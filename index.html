@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Harmonic Restoration · Remaster Suite</title>
+<meta name="description" content="Harmonic Restoration — Remaster Suite. Repariert alte, dumpfe oder verrauschte Aufnahmen direkt im Browser: Signalverarbeitung direkt auf dem Gerät, keine Uploads, kein Server. / Restores old, muffled or noisy recordings right in your browser: 100 % client-side, no uploads, no server.">
+<meta name="theme-color" content="#0d0f12">
+<meta name="color-scheme" content="dark">
+<meta property="og:title" content="Harmonic Restoration · Remaster Suite">
+<meta property="og:description" content="One-drop audio restoration: harmonic exciter, sub-bass synthesis, de-hiss, de-click. 100 % client-side.">
+<meta property="og:type" content="website">
+<link rel="icon" href="assets/img/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/img/favicon.svg">
+<link rel="stylesheet" href="assets/css/app.css">
+</head>
+<body>
+
+<a class="skip-link" href="#dropzone" data-i18n="a11y.skip">Zum Hochladen springen</a>
+
+<!-- ═══════════════════════════════════════════ header ═══════════════════════ -->
+<header class="topbar" id="topbar">
+  <div class="wrap topbar-in">
+    <a class="brand" href="#top" aria-label="Harmonic Restoration — Remaster Suite">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 48 48" width="34" height="34" role="img">
+          <defs>
+            <linearGradient id="bm" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#FFD700"/><stop offset="1" stop-color="#00E676"/>
+            </linearGradient>
+          </defs>
+          <path d="M4 34 L11 34 L15 18 L19 40 L23 10 L27 33 L31 22 L35 34 L44 34"
+                fill="none" stroke="url(#bm)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="23" cy="10" r="2.6" fill="#FFD700"/>
+        </svg>
+      </span>
+      <span class="brand-text">
+        <strong data-i18n="brand.name">Harmonic Restoration</strong>
+        <small data-i18n="brand.sub">Remaster Suite</small>
+      </span>
+    </a>
+
+    <nav class="topbar-actions" aria-label="Sprache / Language">
+      <button class="btn btn-ghost btn-sm" id="btnHelp" data-i18n-title="a11y.help" title="Hilfe / Help">
+        <span aria-hidden="true">?</span><span class="hide-sm" data-i18n="nav.help">Hilfe</span>
+      </button>
+      <div class="lang-switch" role="group" id="langSwitch" aria-label="Sprache / Language">
+        <button type="button" data-lang="de" class="is-active" aria-pressed="true">DE</button>
+        <button type="button" data-lang="en" aria-pressed="false">EN</button>
+      </div>
+    </nav>
+  </div>
+  <div class="flag-bar" aria-hidden="true"><i></i><i></i><i></i></div>
+</header>
+
+<main id="top">
+
+  <!-- ═════════════════════════════════════════ steps ════════════════════════ -->
+  <section class="hero wrap">
+    <h1 data-i18n="hero.title">Alte Aufnahmen klingen wieder neu.</h1>
+    <p class="lede" data-i18n="hero.sub">Ziehe eine Aufnahme hinein — die Suite hört zu, erkennt das Problem und repariert es mit einem Klick. Alles bleibt auf deinem Gerät.</p>
+
+    <ol class="steps" id="steps" aria-label="Ablauf">
+      <li><span class="n">1</span><span class="t" data-i18n="steps.1">Datei ablegen</span></li>
+      <li><span class="n">2</span><span class="t" data-i18n="steps.2">Automatisch prüfen</span></li>
+      <li><span class="n">3</span><span class="t" data-i18n="steps.3">Vergleichen &amp; speichern</span></li>
+    </ol>
+  </section>
+
+  <!-- ═════════════════════════════════════════ dropzone ═════════════════════ -->
+  <section class="wrap">
+    <div class="dropzone" id="dropzone" data-i18n-aria="a11y.dropzone" aria-label="Audiodateien ablegen">
+      <div class="dz-glow" aria-hidden="true"></div>
+      <svg class="dz-icon" viewBox="0 0 64 64" aria-hidden="true">
+        <path d="M32 8 L32 40 M32 8 L20 21 M32 8 L44 21" fill="none" stroke="currentColor" stroke-width="4"
+              stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M10 40 L10 50 Q10 56 16 56 L48 56 Q54 56 54 50 L54 40" fill="none" stroke="currentColor"
+              stroke-width="4" stroke-linecap="round"/>
+      </svg>
+      <p class="dz-title" data-i18n="drop.title">Audiodateien hier ablegen</p>
+      <p class="dz-hint" id="dzHint" data-i18n="drop.hint">… oder klicken und auswählen. Mehrere Dateien auf einmal sind erlaubt.</p>
+      <button type="button" class="btn btn-primary btn-lg" id="btnPick"
+              aria-describedby="dzHint dzFormats" data-i18n="drop.button">Dateien auswählen</button>
+      <p class="dz-formats" id="dzFormats" data-i18n="drop.formats">MP3 · WAV · FLAC · OGG · M4A/AAC — bis zu 2 GB, ohne Upload</p>
+      <input type="file" id="fileInput" class="sr-only" multiple
+             accept="audio/*,.mp3,.wav,.wave,.flac,.ogg,.oga,.opus,.m4a,.mp4,.aac,.aif,.aiff,.webm">
+    </div>
+    <p class="privacy-note">
+      <svg viewBox="0 0 24 24" aria-hidden="true" width="16" height="16"><path d="M12 2 L4 6 v6 c0 5 3.4 8.6 8 10 c4.6-1.4 8-5 8-10 V6 z" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8.5 12.2 l2.4 2.4 l4.6-4.8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      <span data-i18n="drop.privacy">Null Upload, null Konto, null Kosten. Deine Dateien verlassen dieses Gerät nicht.</span>
+    </p>
+  </section>
+
+  <!-- ═════════════════════════════════════ control bar ══════════════════════ -->
+  <section class="controls-wrap" id="controls" hidden>
+    <div class="wrap controls">
+      <div class="ctl-group">
+        <label class="ctl" for="power">
+          <span class="ctl-label" data-i18n="ctl.power">Restaurationskraft</span>
+          <span class="ctl-row">
+            <input type="range" id="power" min="0" max="100" step="1" value="70"
+                   aria-describedby="powerHint">
+            <output class="badge" id="powerVal">70 %</output>
+          </span>
+          <span class="ctl-hint" id="powerHint" data-i18n="ctl.powerHint">Ein Regler für alles. 0 % = Original, 100 % = maximal repariert.</span>
+        </label>
+      </div>
+
+      <div class="ctl-group">
+        <span class="ctl-label" data-i18n="ctl.profile">Klangprofil</span>
+        <select id="presetSelect" class="select">
+          <option value="auto" data-i18n="preset.auto">Automatisch (empfohlen)</option>
+          <option value="garage" data-i18n="preset.garage">Garage / Ein-Mikrofon (60er/70er)</option>
+          <option value="vinyl" data-i18n="preset.vinyl">Vinyl-Rip reparieren</option>
+          <option value="cassette" data-i18n="preset.cassette">Kassette ent-rauschen</option>
+          <option value="lowbitrate" data-i18n="preset.lowbitrate">Niedrige Bitrate aufhellen</option>
+          <option value="general" data-i18n="preset.general">Allgemeine Politur</option>
+        </select>
+      </div>
+
+      <div class="ctl-group">
+        <span class="ctl-label" id="abLabel" data-i18n="ctl.listen">Anhören</span>
+        <div class="seg" role="group" aria-labelledby="abLabel" id="abSwitch">
+          <button type="button" data-ab="original" data-i18n="ctl.original">Original</button>
+          <button type="button" data-ab="restored" class="is-active" data-i18n="ctl.restored">Repariert</button>
+          <button type="button" data-ab="compare" class="seg-compare" data-i18n="ctl.compare" data-i18n-title="ctl.compareHint" title="Wechselt automatisch alle 4 Sekunden">A/B</button>
+        </div>
+      </div>
+
+      <div class="ctl-group ctl-actions">
+        <button type="button" class="btn btn-primary" id="btnProcessAll" data-i18n="ctl.processAll">Alle verarbeiten</button>
+        <button type="button" class="btn btn-green" id="btnZip" data-i18n="ctl.zip">ZIP herunterladen</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="btnClear" data-i18n="ctl.clear">Liste leeren</button>
+      </div>
+
+      <div class="ctl-group">
+        <span class="ctl-label" data-i18n="ctl.export">Export</span>
+        <div class="seg" role="group" aria-labelledby="abLabel">
+          <button type="button" data-format="wav" class="is-active">WAV</button>
+          <button type="button" data-format="mp3">MP3</button>
+        </div>
+        <select id="mp3Rate" class="select select-sm" hidden aria-label="MP3 Bitrate">
+          <option value="192">192 kbps</option>
+          <option value="256">256 kbps</option>
+          <option value="320" selected>320 kbps</option>
+        </select>
+        <select id="wavDepth" class="select select-sm" aria-label="WAV Bit-Tiefe / bit depth">
+          <option value="16" selected>WAV 16 Bit</option>
+          <option value="24">WAV 24 Bit</option>
+        </select>
+      </div>
+
+      <div class="progress-bar" id="globalProgress" hidden aria-live="polite">
+        <div class="progress-fill" id="globalProgressFill"></div>
+        <span class="progress-text" id="globalProgressText"></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═════════════════════════════════════════ file list ════════════════════ -->
+  <section class="wrap">
+    <h2 class="sr-only" data-i18n="list.title">Deine Dateien</h2>
+    <div id="fileList" class="file-list" aria-live="polite"></div>
+  </section>
+
+  <!-- ═════════════════════════════════════════ features ═════════════════════ -->
+  <section class="wrap features">
+    <article class="feature">
+      <h3 data-i18n="feat.engine.t">Was hier wirklich passiert</h3>
+      <p data-i18n="feat.engine.b">Echtes DSP in Echtzeit: Obertonsynthese bis 16 kHz, Sub-Bass bis 30 Hz, Ent-Rauschen, Ent-Knacksen und ein dynamischer Resonanz-Tilger — berechnet auf deinem Gerät, nicht in einer Cloud.</p>
+    </article>
+    <article class="feature">
+      <h3 data-i18n="feat.privacy.t">Privat by design</h3>
+      <p data-i18n="feat.privacy.b">Es gibt keinen Server. Keine Uploads, keine Cookies, kein Tracking, keine Analyse-Tools. Schließe den Tab — alles ist weg.</p>
+    </article>
+    <article class="feature">
+      <h3 data-i18n="feat.free.t">Kostenlos &amp; offen</h3>
+      <p data-i18n="feat.free.b">Statisches HTML, CSS und JavaScript — läuft auf GitHub Pages, ohne Build, ohne Abo. Der Quellcode ist frei einsehbar.</p>
+    </article>
+    <article class="feature">
+      <h3 data-i18n="feat.batch.t">Stapelverarbeitung</h3>
+      <p data-i18n="feat.batch.b">Beliebig viele Dateien auf einmal — eine nach der anderen, damit dein Speicher atmet. Am Ende ein ZIP mit allen Ergebnissen.</p>
+    </article>
+  </section>
+</main>
+
+<!-- ═══════════════════════════════════════════ footer ═══════════════════════ -->
+<footer class="footer">
+  <div class="wrap footer-in">
+
+    <div class="donate">
+      <h3 data-i18n="foot.support">Freiwillig unterstützen</h3>
+      <p class="donate-hint" data-i18n="foot.supportHint">Die Suite bleibt für immer kostenlos. Wenn sie dir Arbeit abnimmt, freue ich mich über eine Krypto-Spende — ein Klick kopiert die Adresse.</p>
+      <ul class="donate-list">
+        <li><button type="button" class="coin" data-copy="79KsqtJJdhKFJ9woxnYgtf3nq7HxQveafWBCtC3mxWi8" data-copy-label="SOL">
+          <span class="coin-tag">SOL</span><code>79KsqtJJdhKFJ9woxnYgtf3nq7HxQveafWBCtC3mxWi8</code><span class="copy-ico" aria-hidden="true">⧉</span></button></li>
+        <li><button type="button" class="coin" data-copy="bc1qeqzrlfg3edrydk4s0hecakc82gp26n5p7hkc7f" data-copy-label="BTC">
+          <span class="coin-tag">BTC</span><code>bc1qeqzrlfg3edrydk4s0hecakc82gp26n5p7hkc7f</code><span class="copy-ico" aria-hidden="true">⧉</span></button></li>
+        <li><button type="button" class="coin" data-copy="0xBC3fab34f69bc9f6661608C3FB36dDdC313C42F7" data-copy-label="ETH">
+          <span class="coin-tag">ETH</span><code>0xBC3fab34f69bc9f6661608C3FB36dDdC313C42F7</code><span class="copy-ico" aria-hidden="true">⧉</span></button></li>
+      </ul>
+      <p class="tiny" data-i18n="foot.donateLegal">Spenden sind freiwillig und kein Kauf: Es entsteht kein Anspruch auf Leistung.</p>
+    </div>
+
+    <div class="foot-right">
+      <p class="credit">
+        <span data-i18n="foot.developedBy">Entwickelt von</span>
+        <strong>AndrexTheDev</strong> ·
+        <a href="mailto:hippie.highho@gmail.com">hippie.highho@gmail.com</a>
+      </p>
+      <nav class="legal-links" aria-label="Rechtliches">
+        <button type="button" class="link" data-dialog="dlgTerms" data-i18n="legal.terms">AGB</button>
+        <button type="button" class="link" data-dialog="dlgPrivacy" data-i18n="legal.privacy">Datenschutz</button>
+        <button type="button" class="link" data-dialog="dlgContact" data-i18n="legal.contact">Kontakt</button>
+        <button type="button" class="link" data-dialog="dlgAbout" data-i18n="legal.about">Über &amp; Quellen</button>
+      </nav>
+      <p class="tiny" data-i18n="foot.localOnly">Diese Anwendung arbeitet zu 100 % in deinem Browser. Es werden keine Audiodaten übertragen.</p>
+    </div>
+  </div>
+</footer>
+
+<!-- ═══════════════════════════════════════ card template ════════════════════ -->
+<template id="cardTpl">
+  <article class="card">
+    <header class="card-head">
+      <div class="card-title">
+        <span class="fname" data-slot="name"></span>
+        <span class="fmeta" data-slot="meta"></span>
+      </div>
+      <div class="card-head-actions">
+        <span class="pill" data-slot="status" hidden></span>
+        <button type="button" class="icon-btn" data-act="remove" data-i18n-title="card.remove" title="Entfernen" aria-label="Entfernen">✕</button>
+      </div>
+    </header>
+
+    <p class="diagnosis" data-slot="diagnosis"></p>
+
+    <ul class="chips" data-slot="chips"></ul>
+
+    <div class="wave-shell">
+      <canvas class="wave" data-slot="wave" width="1200" height="240" role="img" data-i18n-aria="card.waveAria" aria-label="Wellenform-Vergleich"></canvas>
+      <div class="wave-legend">
+        <span class="lg lg-orig"><i></i><span data-i18n="card.legendOriginal">Original</span></span>
+        <span class="lg lg-rest"><i></i><span data-i18n="card.legendRestored">Repariert</span></span>
+        <span class="lg lg-preview" data-slot="window"></span>
+      </div>
+      <div class="wave-empty" data-slot="waveEmpty" data-i18n="card.analyzing">Analyse läuft …</div>
+    </div>
+
+    <div class="player">
+      <button type="button" class="btn-play" data-act="play" aria-label="Play">
+        <svg viewBox="0 0 24 24" class="ico-play" aria-hidden="true"><path d="M8 5 l12 7 -12 7 z"/></svg>
+        <svg viewBox="0 0 24 24" class="ico-pause" aria-hidden="true"><path d="M7 5 h4 v14 h-4 z M13 5 h4 v14 h-4 z"/></svg>
+      </button>
+      <div class="seek" data-act="seek" role="slider" tabindex="0" aria-label="Position">
+        <div class="seek-track"><div class="seek-fill" data-slot="seek"></div></div>
+      </div>
+      <span class="time" data-slot="time">0:00 / 0:00</span>
+      <button type="button" class="btn btn-ghost btn-sm" data-act="loop" data-i18n="card.loop" data-i18n-title="card.loopHint" title="Nur die Vorschau wiederholen">Loop</button>
+    </div>
+
+    <div class="card-grid">
+      <label class="field">
+        <span class="field-label" data-i18n="card.profile">Klangprofil</span>
+        <select class="select select-sm" data-act="preset" data-slot="preset"></select>
+      </label>
+      <label class="field">
+        <span class="field-label" data-i18n="card.power">Kraft für diese Datei</span>
+        <span class="field-row">
+          <input type="range" class="range-sm" data-act="power" min="0" max="100" step="1" value="70">
+          <output class="badge badge-sm" data-slot="power">70 %</output>
+        </span>
+      </label>
+      <div class="field">
+        <span class="field-label" data-i18n="card.listen">Vergleichen</span>
+        <div class="seg seg-sm" data-act="ab">
+          <button type="button" data-ab="original" data-i18n="ctl.original">Original</button>
+          <button type="button" data-ab="restored" class="is-active" data-i18n="ctl.restored">Repariert</button>
+        </div>
+      </div>
+      <div class="field field-actions">
+        <span class="field-label" data-i18n="card.save">Speichern</span>
+        <div class="field-row">
+          <button type="button" class="btn btn-green btn-sm" data-act="download" data-i18n="card.saveFile">Fertig – speichern</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-act="retry" hidden data-i18n="card.retry">Nochmal</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card-bar"><div class="card-bar-fill" data-slot="bar"></div></div>
+    <p class="card-note" data-slot="note" hidden></p>
+  </article>
+</template>
+
+<!-- ═════════════════════════════════════════ dialogs ════════════════════════ -->
+<dialog id="dlgTerms" class="dialog">
+  <h2 data-i18n="legal.terms">AGB</h2>
+  <div data-i18n-html="terms.body" class="dialog-body"></div>
+  <form method="dialog"><button class="btn btn-primary" data-i18n="ui.close">Schließen</button></form>
+</dialog>
+
+<dialog id="dlgPrivacy" class="dialog">
+  <h2 data-i18n="privacy.title">Datenschutz</h2>
+  <div data-i18n-html="privacy.body" class="dialog-body"></div>
+  <form method="dialog"><button class="btn btn-primary" data-i18n="ui.close">Schließen</button></form>
+</dialog>
+
+<dialog id="dlgContact" class="dialog">
+  <h2 data-i18n="contact.title">Kontakt</h2>
+  <div data-i18n-html="contact.body" class="dialog-body"></div>
+  <form method="dialog"><button class="btn btn-primary" data-i18n="ui.close">Schließen</button></form>
+</dialog>
+
+<dialog id="dlgAbout" class="dialog">
+  <h2 data-i18n="about.title">Über die Suite</h2>
+  <div data-i18n-html="about.body" class="dialog-body"></div>
+  <div class="dialog-actions">
+    <button type="button" class="btn btn-ghost btn-sm" id="btnLibMode" data-i18n="about.libLocal">Bibliotheken: lokal</button>
+  </div>
+  <form method="dialog"><button class="btn btn-primary" data-i18n="ui.close">Schließen</button></form>
+</dialog>
+
+<dialog id="dlgHelp" class="dialog">
+  <h2 data-i18n="help.title">So funktioniert es</h2>
+  <div data-i18n-html="help.body" class="dialog-body"></div>
+  <form method="dialog"><button class="btn btn-primary" data-i18n="ui.close">Schließen</button></form>
+</dialog>
+
+<div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>
+
+<noscript>
+  <p class="wrap">Diese Anwendung benötigt JavaScript.</p>
+</noscript>
+
+<!-- ═══════════════════════════════════════ javascript ═══════════════════════ -->
+<script src="assets/js/dsp-utils.js"></script>
+<script src="assets/js/presets.js"></script>
+<script src="assets/js/i18n.js"></script>
+<script src="assets/js/library-loader.js"></script>
+<script src="assets/js/codecs.js"></script>
+<script src="assets/js/analyzer.js"></script>
+<script src="assets/js/engine.js"></script>
+<script src="assets/js/ui.js"></script>
+<script src="assets/js/app.js"></script>
+</body>
+</html>
