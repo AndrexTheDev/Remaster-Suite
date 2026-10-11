@@ -85,12 +85,32 @@
   }
 
   let decodeCtxCache = null;
+  let liveDecodeCtx = null;
   function decodeContext(sr) {
+    const rate = clamp(sr || 44100, 8000, 96000);
     const Ctor = global.OfflineAudioContext || global.webkitOfflineAudioContext;
     if (!Ctor) return null;
     // an offline context decodes just as well as a live one — and needs no
     // user gesture, no output device and no permission
-    return new Ctor(1, 1024, clamp(sr || 44100, 8000, 96000));
+    return new Ctor(1, 1024, rate);
+  }
+
+  /**
+   * Very old browsers (Safari before 14.1) have no decodeAudioData() on the
+   * offline context; a suspended live context decodes fine there. It is created
+   * once and closed again as soon as we are done.
+   */
+  function decodeInLiveContext(arrayBuffer, sr) {
+    const Ctor = global.AudioContext || global.webkitAudioContext;
+    if (!Ctor) throw new Error('no audio context for decoding');
+    if (!liveDecodeCtx) {
+      try { liveDecodeCtx = new Ctor({ sampleRate: clamp(sr || 44100, 8000, 96000) }); }
+      catch (e) { liveDecodeCtx = new Ctor(); }
+    }
+    return new Promise((resolve, reject) => {
+      const p = liveDecodeCtx.decodeAudioData(arrayBuffer.slice(0), resolve, reject);
+      if (p && p.then) p.catch(reject);
+    });
   }
 
   /**
@@ -100,16 +120,19 @@
    */
   async function decodeArrayBuffer(arrayBuffer, sr) {
     const rate = sr || 44100;
-    let ctx = decodeContext(rate);
-    if (!ctx) throw new Error('no OfflineAudioContext');
+    const ctx = decodeContext(rate);
     // decodeAudioData detaches its input in some browsers → hand it a copy
-    const copy = arrayBuffer.slice(0);
-    try {
-      return await ctx.decodeAudioData(copy);
-    } catch (err) {
-      decodeCtxCache = null;
-      throw err;
+    if (ctx) {
+      try {
+        return await ctx.decodeAudioData(arrayBuffer.slice(0));
+      } catch (err) {
+        if (err && /OfflineAudioContext|decodeAudioData/i.test(String(err.name || err.message))) {
+          return decodeInLiveContext(arrayBuffer, rate);
+        }
+        throw err;
+      }
     }
+    return decodeInLiveContext(arrayBuffer, rate);
   }
 
   /**
@@ -170,13 +193,15 @@
 
   /** An AudioBuffer built from plain channel arrays (for the live monitor). */
   let bufferCtx = null;
+  let bufferCtxRate = 0;
   function makeBuffer(channels, sampleRate) {
     const Ctor = global.OfflineAudioContext || global.webkitOfflineAudioContext;
     if (!Ctor) return null;
     const sr = Math.max(8000, Math.min(192000, Math.round(sampleRate || 44100)));
     try {
-      if (!bufferCtx || bufferCtx !== null) {
+      if (!bufferCtx || bufferCtxRate !== sr) {
         bufferCtx = new Ctor(Math.max(1, Math.min(2, channels.length)), 128, sr);
+        bufferCtxRate = sr;
       }
       const buf = bufferCtx.createBuffer(channels.length, channels[0].length, sr);
       for (let c = 0; c < channels.length; c++) buf.copyToChannel(channels[c], c, 0);

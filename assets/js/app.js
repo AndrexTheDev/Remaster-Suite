@@ -40,6 +40,7 @@
     mp3Rate: 320,
     wavDepth: 16,
     busy: false,
+    powerTouched: false,
   };
 
   /* ------------------------------------------------------------- formatting */
@@ -442,6 +443,8 @@
       setProgress(card, 0.35);
       const analysis = Analyzer.analyze(buffer, { previewSeconds: previewSecondsFor(buffer.duration), buckets: 1400 });
       card.analysis = analysis;
+      // first file, untouched slider: adopt the strength the profile recommends
+      if (!State.powerTouched && analysis.recommendedPower) adoptRecommendedPower(analysis.recommendedPower);
       card.el.waveEmpty.hidden = true;
       if (again) card.result = null;
       setProgress(card, 0.6);
@@ -483,6 +486,26 @@
       setProgress(card, 1);
       setNote(card, (err && err.message) === 'worklet-load-failed' ? t('toast.workletFail') : t('err.decode') + ' ' + (err && err.message ? '(' + err.message + ')' : ''), true);
       $('[data-act="retry"]', card.el.card).hidden = false;
+    }
+  }
+
+  /** Move the master slider to the value a profile recommends (one time). */
+  function adoptRecommendedPower(value) {
+    const p = Math.max(0, Math.min(1, value));
+    State.power = p;
+    const power = $('#power');
+    if (!power) return;
+    const pct = Math.round(p * 100);
+    power.value = pct;
+    UI.paintRange(power);
+    const out = $('#powerVal');
+    if (out) out.textContent = t('ui.percent', { v: pct });
+    for (const c of State.cards) {
+      if (c.power === null || c.power === undefined) {
+        c.el.power.value = pct;
+        c.el.powerOut.textContent = t('ui.percent', { v: pct });
+        UI.paintRange(c.el.power);
+      }
     }
   }
 
@@ -729,6 +752,7 @@
     UI.paintRange(power);
     $('#powerVal').textContent = t('ui.percent', { v: power.value });
     power.addEventListener('input', () => {
+      State.powerTouched = true;
       State.power = Number(power.value) / 100;
       $('#powerVal').textContent = t('ui.percent', { v: power.value });
       UI.paintRange(power);
@@ -907,6 +931,7 @@
 
   const API = {
     State, CONFIG, boot, addFiles, prepareCard, renderCard, processAll, downloadZip,
+    adoptRecommendedPower,
     setAB, ensurePlaying, clearAll, removeCard, refreshPreview, P,
   };
   global.RSApp = API;

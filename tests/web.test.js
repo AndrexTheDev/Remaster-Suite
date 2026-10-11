@@ -182,6 +182,11 @@ async function run() {
   ok(card.status === 'ready', 'card reached the ready state', card.status);
   ok(!win.document.getElementById('controls').hidden, 'control bar appeared');
   ok(card.analysis.preset === 'garage', 'auto-diagnosis picked the garage profile', card.analysis.preset);
+  ok(Math.abs(win.RSApp.State.power - card.analysis.recommendedPower) < 1e-6,
+    'the slider adopts the recommended strength of the detected profile',
+    Math.round(win.RSApp.State.power * 100) + ' %');
+  ok(win.document.querySelector('#powerVal').textContent.indexOf(Math.round(win.RSApp.State.power * 100)) === 0,
+    'the badge follows the recommended strength', win.document.querySelector('#powerVal').textContent);
   ok(card.analysis.score > 20 && card.analysis.score < 95, 'quality score is plausible', String(card.analysis.score));
   const diagText = card.el.diagnosis.textContent;
   ok(diagText.length > 30 && !/[A-Z]{2,}[_ ]/.test(diagText), 'diagnosis is a readable sentence', diagText.slice(0, 60) + '…');

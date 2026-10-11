@@ -60,7 +60,9 @@ crest/clipping analysis) and produces:
 
 **Restoration power** (0–100 %) scales every single parameter together. 0 % is bit-transparent
 (you hear the untouched original), 100 % is the full intervention of the chosen profile.
-60–80 % is where music usually sounds best.
+60–80 % is where music usually sounds best — which is why the slider *adopts the strength the
+detected profile recommends* the moment the first file is analysed. Touch the slider once and
+your value wins from then on.
 
 ### Six sound profiles
 
@@ -167,7 +169,7 @@ assets/
 tests/
   harness.js                     Node harness + signal simulators
   dsp.test.js                    DSP/engine suite (56 checks)
-  web.test.js                    static, DOM and end-to-end suite (83 checks)
+  web.test.js                    static, DOM and end-to-end suite (85 checks)
   webaudio-stub.js               miniature Web Audio implementation for Node
 ```
 
@@ -184,7 +186,7 @@ npm test             # runs both suites
 node tests/dsp.test.js   # engine: transparency, sub, air, exciter, de-hiss, de-click,
                          # de-resonator, level match, power scaling, WAV/MP3/ZIP, classification
 node tests/web.test.js   # static integrity, bilingual coverage, boot, drop → analyse → render →
-                         # save → ZIP, error handling, resampling
+                         # save → ZIP, error handling, resampling  (85 checks)
 ```
 
 Signals are simulated (garage session, cassette, vinyl rip, low-bitrate, clean) and the whole
