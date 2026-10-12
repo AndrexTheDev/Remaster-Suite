@@ -249,22 +249,28 @@ H.section('engine · de-clicker');
 
 H.section('engine · the de-hisser does not undo the de-clicker');
 {
-  // A worn record: the pops are the de-clicker's job, and the de-hisser sits in
-  // front of it because it is the noise the pops have to be found *in*. It used
-  // to fight that job: its gate followed its own key sample-by-sample, and the
-  // key is a 43 ms sliding RMS of 4–16 kHz — a window a pop dominates out of all
-  // proportion to its length. Every pop therefore slammed the gate shut (and the
-  // level term opened it again), which turned each repaired click into a 43 ms
-  // hole in the top end with broadband edges: measured on this fixture the chain
-  // left *38* HF frames above 15 dB of crest where the de-clicker alone leaves
-  // 6. The gate now closes slowly (250 ms — hiss is stationary, nothing about it
-  // is fast) and opens fast (8 ms — a musical transient must not be dulled), and
-  // its "nothing to attenuate" branch is a continuous crossfade instead of a step
-  // at the last 0.1 % of its range.
+  // A worn record with hiss *and* crackle: both repairs are asked for at once,
+  // and the de-clicker runs first because a pop is the most localised damage
+  // there is (that is also the order the RX module guides prescribe). It has to:
+  // a pop is broadband, so the de-hisser's top-end gate eats part of it and
+  // leaves a remainder too small for the detector to be sure about — measured
+  // here, the de-hisser alone pulled each pop's sample down to 18 % of its
+  // height, and the 15 dB it left behind were invisible to the de-clicker
+  // (f/s ≈ 1.2, under its 1.25 threshold). With the de-hisser in front, the same
+  // fixture came out with 6 pops above the clean copy; behind, with 0.
+  //
+  // The de-hisser's own gate also has to survive the pops it now sees *after*
+  // the repair: it closes slowly (250 ms — hiss is stationary, nothing about it
+  // is fast) and opens fast (8 ms — a musical transient must not be dulled),
+  // and its "nothing to attenuate" branch is a continuous crossfade instead of a
+  // step at the last 0.1 % of its range.
+  const env = H.songEnvelope(SR, 8, 0.05);          // quiet passages for the hiss to sit in
   let bed = H.filter(RSDSP, H.mul(H.pink(SR, 8, 0.40, 31), 1), SR, 'lp', 7000, 0.60);
   bed = H.filter(RSDSP, bed, SR, 'lp', 5000, 0.55);
+  for (let i = 0; i < bed.length; i++) bed[i] *= env[i];
   const clean = H.normalize(bed, 0.74);
-  const pops = H.addCrackle(clean, 9, 0.85, 8);
+  const hissy = H.normalize(H.mix([clean, H.mul(H.noise(SR, 8, 0.020, 5), 1)]), 0.74);
+  const pops = H.addCrackle(hissy, 9, 0.85, 8);
   const m = RSDSP.measure([pops], SR);
   const law = RP.buildParams('auto', m, 1);
   const crest = (sig) => RSDSP.crackleDetect([sig], SR);
@@ -720,6 +726,50 @@ H.section('engine · true-peak limiter (the export ceiling)');
     String(full.latency) + ' samples (271 de-clip + 17 de-click + 76 limiter)');
   H.ok(RSDSP.measure([full.out[0]], SR).ispDb <= -2 + 0.15, 'the chain as a whole still lands under the ceiling',
     RSDSP.measure([full.out[0]], SR).ispDb.toFixed(2) + ' dBTP');
+}
+
+H.section('engine · the repairs do not depend on the level');
+{
+  // The same recording digitised 20 dB down is the same recording: the finished
+  // file has to be the same file, 20 dB down. Every threshold inside a repair
+  // that is written as an *absolute* number breaks this, and it breaks it in the
+  // worst possible way — a quiet transfer simply gets less repair than a loud
+  // one, with nothing in the interface saying so. Two of them were found this
+  // way: the de-clicker's level gate (f between 0.008 and 0.05, so a −24 dBFS
+  // transfer kept 63 pops where a full-scale one kept 6 — the detector's ratio
+  // statistic was literally identical at both levels, p50 1.08) and the
+  // de-hisser's reference clamp (t1 ≤ 0.01, i.e. −40 dBFS: on any louder file
+  // the gate's level key read "this is music" everywhere and the stage stopped
+  // cutting at all — the two finished files were 12.6 dB apart, 33.5 dB
+  // without the clamp). The synthesis stages are deliberately *not* level-free
+  // (a master sitting at −0.4 dBFS must not receive another 3 dB of bass, see
+  // `headroom`), so this test isolates the repairs.
+  const env = H.songEnvelope(SR, 6, 0.05);
+  let bed = H.filter(RSDSP, H.mul(H.pink(SR, 6, 0.40, 31), 1), SR, 'lp', 8000, 0.60);
+  for (let i = 0; i < bed.length; i++) bed[i] *= env[i];
+  const clean = H.normalize(bed, 0.62);
+  const hissy = H.normalize(H.mix([clean, H.mul(H.noise(SR, 6, 0.014, 5), 1)]), 0.62);
+  const pops = H.addCrackle(hissy, 9, 0.85, 8);
+  const K = 0.1;                                       // −20 dB
+  const repairs = { tpCeil: 0, exciter: 0, air: 0, sub: 0, glue: 0, warmth: 0, tilt: 0, reso: 0 };
+  const renderAt = (g) => {
+    const sig = Float32Array.from(pops, (x) => x * g);
+    const m = RSDSP.measure([sig], SR);
+    const P = Object.assign({}, RP.buildParams('auto', m, 1), repairs);
+    const out = H.render(Processor, [sig], P)[0];
+    return { out, P, index: RSDSP.crackleDetect([out], SR).index };
+  };
+  const a = renderAt(1), b = renderAt(K);
+  H.ok(a.P.dehiss > 0.4 && a.P.declick > 0.4 && b.P.dehiss > 0.4 && b.P.declick > 0.4,
+    'the fixture asks for both repairs at both levels',
+    'dehiss ' + a.P.dehiss.toFixed(2) + '/' + b.P.dehiss.toFixed(2) + ', declick ' + a.P.declick.toFixed(2) + '/' + b.P.declick.toFixed(2));
+  H.ok(a.index < 0.4 && b.index < 0.4, 'and both repairs reach the same verdict',
+    'crackle index ' + a.index.toFixed(2) + ' / ' + b.index.toFixed(2));
+  let e = 0, rr = 0;
+  for (let i = 0; i < a.out.length; i++) { const d = b.out[i] - K * a.out[i]; e += d * d; rr += (K * a.out[i]) * (K * a.out[i]); }
+  const residual = 10 * Math.log10(e / rr);
+  H.ok(residual < -30, 'the two finished files are the same file 20 dB down',
+    residual.toFixed(1) + ' dB of level-normalised residual (was −12.6 dB with the de-hisser's reference clamped)');
 }
 
 H.section('engine · dynamic de-resonator');

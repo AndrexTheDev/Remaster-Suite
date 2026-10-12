@@ -829,7 +829,19 @@
     // strength on a gate: anything the measurement is sure about is applied in
     // full, and a marginal reading stays marginal.
     const hissDose = smoothstep(0.04, 0.40, D.hissNeed);
-    a.dehiss = clamp(a.dehiss * (0.5 + 0.5 * hissDose) + 0.25 * floorExtra * D.hissNeed, 0, cap.dehiss);
+    // …and only when the analyser found top-end noise to subtract at all. The
+    // tilt step is that evidence: without it the worklet has no cap for the
+    // tilt key and falls back to the level key, which on a *stationary* top end
+    // cannot tell hiss from programme. Measured on a clean dull pink bed (a
+    // synthesizer-pad-like file, tilt step 0.04 dB) the profile's half dose took
+    // 4.3 dB off the 9–13 kHz band — a false positive, and the reason the
+    // intensity slider stopped being monotone: the repair fought the air
+    // synthesis that comes two stages later. A profile scales a measured
+    // repair; it does not invent one.
+    const hissEvidence = (m.hissTiltStepDb || 0) > 1.0;
+    a.dehiss = hissEvidence
+      ? clamp(a.dehiss * (0.5 + 0.5 * hissDose) + 0.25 * floorExtra * D.hissNeed, 0, cap.dehiss)
+      : 0;
     a.declick = clamp(a.declick * (0.5 + 0.5 * smoothstep(0.03, 0.40, D.crackleNeed)), 0, cap.declick);
     // The de-clipper is the same kind of stage — it only touches the samples
     // its own detector flags as flat tops at the file's peak level — so the

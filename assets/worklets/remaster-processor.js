@@ -702,7 +702,23 @@ class DeHiss {
     // hide behind. It bounds the repair from below — the level term can never
     // silence music that is well above the measured noise floor, whatever the
     // tilt says.
-    this.t1 = clamp(hfNoiseLin * 2.8, 1e-7, 0.01);
+    // The reference is a band RMS measured exactly like the key below — same
+    // band, same 2048-sample window (see the analyser's hfQuietRmsDb) — so it
+    // needs no *absolute* ceiling. A ceiling at 0.01 (−40 dBFS) is a policy,
+    // not a sanity bound, and it changed the stage's behaviour on everything
+    // louder than −49 dBFS: the reference came out up to 9× too low, the level
+    // term `lvl` then read "this is music" wherever the top end sat above
+    // −40 dBFS, `max(cutLevel − 6, 0)` collapsed to 0 and the gate stopped
+    // cutting *at all* — in every passage, not just the loud ones. Measured on
+    // one recording rendered at 0 dBFS and at −20 dBFS: with the ceiling the
+    // finished files differ by −12.6 dB (rms of the difference, level-
+    // normalised), without it by −33.5 dB, i.e. this one constant decided the
+    // whole chain's level invariance. The stage then also did less the louder
+    // the file was, which is the opposite of what a de-hisser has to do.
+    // The bound that remains is a sanity bound: an HF band RMS above −6 dBFS
+    // means the file is nothing but noise, and then there is no music to
+    // protect and nothing to subtract.
+    this.t1 = clamp(hfNoiseLin * 2.8, 1e-7, 0.5);
     this.inv = 1 / Math.max(this.t1 * 4.0, 1e-9);
   }
   /**
@@ -735,6 +751,15 @@ class DeHiss {
       // always been (and which is all that can be said about a file whose top end
       // nobody has measured).
       const tiltNow = (e > 1e-9 && em2 > 1e-9) ? 20 * Math.log10(e / em2) : this.tiltRef;
+      // Without a measured tilt step there is nothing to subtract *by tilt*,
+      // and the level key alone decides — the plain expander this stage has
+      // always been for a caller who knows there is hiss and says so. That
+      // fallback is a policy the *law* must not rely on: for a file whose top
+      // end is stationary (a dull pad, a synthesizer bed) the quiet-frame floor
+      // and the programme are the same number, so the level key cannot tell
+      // hiss from music and would cut either way. The automatic doses therefore
+      // only ask for the de-hisser when the measurement found a tilt step
+      // (see presets.js) — the module keeps the expander for the manual path.
       const cutTilt = this.maxCut > 0.01 ? clamp(tiltNow - this.tiltRef, 0, this.maxCut) : 60;
       const lvl = smoothstep(this.t1, this.t1 + 1 / this.inv, e);
       const cutLevel = lvl > 1e-6 ? -20 * Math.log10(lvl) : 60;
@@ -1062,12 +1087,18 @@ class DeClicker {
     this.pred2 = new Biquad(); this.pred2.setLowpass(sr, 4000, 0.707);
     this.fast = new EnvFollower(sr, 1 / sr, 0.0006, 1);   // instant attack: 1-sample spikes
     this.slow = new EnvFollower(sr, 0.004, 0.025, 1);
+    // How much of this signal lives above 4 kHz *on average* — the reference the
+    // level gate below measures a spike against (a one-second average of the slow
+    // envelope, seeded from the first sample so the first second is right).
+    this.ref = 0;
+    this.refRate = 1 - Math.exp(-1 / (sr * 1.0));
   }
   reset() {
     this.dp1.reset(); this.dp2.reset(); this.pred.reset(); this.pred2.reset();
     this.fast.v = 0; this.slow.v = 0;
     this.ring.fill(0); this.plan.fill(0); this.mark.fill(0);
     this.w = 0; this.inp = 0; this.dryOut = 0; this.prevIn = 0;
+    this.ref = 0;
   }
   /** How much of the sample `o` samples away from a click is repaired. */
   shape(o) {
@@ -1088,7 +1119,20 @@ class DeClicker {
     // the slow one, while musical transients raise both together
     const ratio = f / (s + 1e-9);
     let k = clamp((ratio - 1.25) / 1.5, 0, 1);
-    k *= clamp((f - 0.008) / 0.05, 0, 1);
+    // How sure the detector is that there was anything *there* to repair. This
+    // gate has to be relative to the file, not to a fixed number: a transfer
+    // digitised at −24 dBFS is the same record as one at −3, and an absolute
+    // floor (f between 0.008 and 0.05) made the stage mute on the quiet one —
+    // measured on the worn record, the dose that leaves 6 of 108 pops above a
+    // clean copy at full scale left **63** of them above it at −24 dBFS, with
+    // the detector's ratio statistic literally unchanged (it is scale-free:
+    // p50 1.08, p99 2.3, max 6.7 at both levels). The thresholds therefore
+    // scale with the file's own HF activity, which is the very same 0.111 that
+    // the old constants were measured against — so a full-scale file behaves
+    // exactly as it did, and a quiet one behaves like the record it is.
+    this.ref += (s - this.ref) * (this.ref > 0 ? this.refRate : 1);
+    const act = this.ref > 1e-3 ? this.ref : 1e-3;      // never below −60 dBFS
+    k *= clamp((f - 0.072 * act) / (0.45 * act), 0, 1);
     // ── what the amount means here ────────────────────────────────────────
     // It is *how sure the detector has to be*, not how much of the click is
     // allowed to stay. Scaling the repair depth by the amount (the law before
@@ -1738,9 +1782,22 @@ class ChannelChain {
       }
     }
 
-    // 3 ── noise repair comes FIRST: never synthesize harmonics out of hiss
-    y = this.hiss.tick(y, p.dehiss);
+    // 3 ── noise repair, most impulsive first. The de-clicker *has* to see the
+    // pop's own shape: a pop is broadband, so any stage in front of it that
+    // works on the top end eats part of it and leaves a remainder too small for
+    // the detector to be sure about. Measured on the worn-record fixture, the
+    // de-hisser alone pulled each pop's sample down to 18 % of its height — and
+    // the 15 dB that were left over were then invisible to the de-clicker
+    // (f/s ≈ 1.2, under its 1.25 threshold), which is why the same fixture came
+    // out with 6 pops above the clean copy when the de-hisser was in front and
+    // 2 when it was not. Hiss, unlike a pop, is stationary: the de-clicker's
+    // detector is a *ratio* and its level gate is relative to the file's own HF
+    // activity, so it does not care whether the crackle it is looking for sits
+    // in silence or in hiss. The other order was the old compromise ("never
+    // synthesise harmonics out of hiss") — but that argument is about the
+    // *synthesisers* further down, and those are still behind both stages.
     y = this.click.tick(y, p.declick, this.declip.marked, this.declip.th);
+    y = this.hiss.tick(y, p.dehiss);
 
     // 3b ── sibilance control. It sits after the noise repair and before the
     // synthesisers for the same reason the de-hisser does: the exciter and the
