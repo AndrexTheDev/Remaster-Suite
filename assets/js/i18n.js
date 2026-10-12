@@ -238,7 +238,7 @@
 <p>Spenden sind freiwillig und kein Kauf — die Adressen stehen im Fußbereich. Danke für jede Rückmeldung.</p>`,
 
       'about.body': `
-<p><strong>Version 1.1</strong> — eine komplette Audio-Restaurations-Kette im Browser. Alles rechnet auf deinem Gerät.</p>
+<p><strong>Version 1.2</strong> — eine komplette Audio-Restaurations-Kette im Browser. Alles rechnet auf deinem Gerät.</p>
 <h3>Die Kette in Reihenfolge</h3>
 <ul>
   <li><strong>Entzerren (EQ):</strong> sechs Bänder, automatisch anhand der Messung dosiert.</li>
@@ -246,7 +246,7 @@
   <li><strong>Harmonischer Exciter:</strong> erzeugt fehlende Obertöne mit 2. und 3. Ordnung — der Kern der Obertonsynthese.</li>
   <li><strong>Air-Synthese 8–16 kHz:</strong> baut den obersten Bereich aus dem verbliebenen Hochtonanteil auf.</li>
   <li><strong>Sub-Bass 30–60 Hz:</strong> gewinnt die fehlende unterste Oktave über eine Oktav-Teilung mit Mitten-Folgung.</li>
-  <li><strong>Ent-Rauschen:</strong> dynamischer Hinweis-Filter in der Höhenlage, der nur zwischen den Tönen zumacht.</li>
+  <li><strong>Ent-Rauschen:</strong> dynamischer Hinweis-Filter in der Höhenlage, der nur zwischen den Tönen zumacht — offen lässt er das Signal unangetastet.</li>
   <li><strong>Ent-Knacksen:</strong> erkennt kurze Nadel- und Digital-Pops und ersetzt sie durch die Vorhersage des Signals.</li>
   <li><strong>Glue-Kompressor, Wärme, Neigung:</strong> Kleben, Sättigung, letzter Feinschliff — mit Pegelanpassung für ein ehrliches A/B.</li>
 </ul>
@@ -521,7 +521,7 @@
 <p>Tips are voluntary and not a purchase — the addresses are in the footer. Thanks for any feedback.</p>`,
 
       'about.body': `
-<p><strong>Version 1.1</strong> — a complete audio restoration chain in the browser. Everything computes on your device.</p>
+<p><strong>Version 1.2</strong> — a complete audio restoration chain in the browser. Everything computes on your device.</p>
 <h3>The chain, in order</h3>
 <ul>
   <li><strong>Corrective EQ:</strong> six bands, dosed automatically from the measurement.</li>
@@ -529,7 +529,7 @@
   <li><strong>Harmonic exciter:</strong> rebuilds missing overtones with 2nd and 3rd order generation — the core of the harmonic restoration.</li>
   <li><strong>Air synthesis 8–16 kHz:</strong> rebuilds the very top from the remaining high-frequency content.</li>
   <li><strong>Sub-bass 30–60 Hz:</strong> recovers the missing lowest octave with octave division and pitch tracking.</li>
-  <li><strong>De-hiss:</strong> a dynamic high-frequency gate that only closes between notes.</li>
+  <li><strong>De-hiss:</strong> a dynamic high-frequency gate that only closes between notes — wide open it hands the signal through untouched.</li>
   <li><strong>De-click:</strong> detects short needle and digital pops and replaces them with the signal's own prediction.</li>
   <li><strong>Glue compressor, warmth, tilt:</strong> cohesion, saturation, final polish — with level matching for an honest A/B.</li>
 </ul>

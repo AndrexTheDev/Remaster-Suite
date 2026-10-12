@@ -124,8 +124,13 @@ H.section('engine · 8–16 kHz air synthesis');
   let dull = H.filter(RSDSP, H.pink(SR, 5, 0.35, 11), SR, 'lp', 5500, 0.707);
   dull = H.filter(RSDSP, dull, SR, 'lp', 7000, 0.707);
   dull = H.normalize(dull, 0.9);
-  const off = H.render(Processor, [dull], Object.assign({}, H.DEFAULT_PARAMS, { power: 1, air: 0, noiseFloor: -70 }))[0];
-  const on = H.render(Processor, [dull], Object.assign({}, H.DEFAULT_PARAMS, { power: 1, air: 0.8, noiseFloor: -70 }))[0];
+  // The stage tests run with the automatic level match switched off
+  // (autoLevel: 0): they measure a single module, and the matcher would take
+  // back the part of that module's change which falls inside its 300 Hz–3.4 kHz
+  // loudness band — hiding the very effect under test. The matcher itself is
+  // covered by the "loudness matching" and "processing power scaling" sections.
+  const off = H.render(Processor, [dull], Object.assign({}, H.DEFAULT_PARAMS, { power: 1, air: 0, noiseFloor: -70, autoLevel: 0 }))[0];
+  const on = H.render(Processor, [dull], Object.assign({}, H.DEFAULT_PARAMS, { power: 1, air: 0.8, noiseFloor: -70, autoLevel: 0 }))[0];
   const hi = band([on], 9000, 13000) - band([off], 9000, 13000);
   H.ok(hi > 8, 'rebuilds 9–13 kHz content on band-limited material', hi.toFixed(1) + ' dB');
   const mid = Math.abs(band([on], 1000, 3000) - band([off], 1000, 3000));
@@ -136,8 +141,8 @@ H.section('engine · 8–16 kHz air synthesis');
 H.section('engine · harmonic exciter');
 {
   let dull = H.normalize(H.filter(RSDSP, H.pink(SR, 5, 0.35, 12), SR, 'lp', 7000, 0.707), 0.9);
-  const off = H.render(Processor, [dull], Object.assign({}, H.DEFAULT_PARAMS, { power: 1, exciter: 0 }))[0];
-  const on = H.render(Processor, [dull], Object.assign({}, H.DEFAULT_PARAMS, { power: 1, exciter: 0.9 }))[0];
+  const off = H.render(Processor, [dull], Object.assign({}, H.DEFAULT_PARAMS, { power: 1, exciter: 0, autoLevel: 0 }))[0];
+  const on = H.render(Processor, [dull], Object.assign({}, H.DEFAULT_PARAMS, { power: 1, exciter: 0.9, autoLevel: 0 }))[0];
   const up = band([on], 2600, 5200) - band([off], 2600, 5200);
   H.ok(up > 3, 'adds upper harmonics to dull material', up.toFixed(1) + ' dB');
 }
@@ -146,18 +151,18 @@ H.section('engine · de-hiss (HF expander)');
 {
   const hissOnly = H.noise(SR, 4, 0.006, 21);
   const off = H.render(Processor, [hissOnly], Object.assign({}, H.DEFAULT_PARAMS,
-    { power: 1, dehiss: 0, noiseFloor: -44, hissFloor: -46 }))[0];
+    { power: 1, dehiss: 0, noiseFloor: -44, hissFloor: -46, autoLevel: 0 }))[0];
   const on = H.render(Processor, [hissOnly], Object.assign({}, H.DEFAULT_PARAMS,
-    { power: 1, dehiss: 1, noiseFloor: -44, hissFloor: -46 }))[0];
+    { power: 1, dehiss: 1, noiseFloor: -44, hissFloor: -46, autoLevel: 0 }))[0];
   const cut = band([off], 6000, 12000) - band([on], 6000, 12000);
   H.ok(cut > 12, 'suppresses steady hiss between the notes', cut.toFixed(1) + ' dB');
 
   // and it must NOT eat the music: loud, continuous programme stays intact
   const music = H.pink(SR, 4, 0.35, 31);
   const mOff = H.render(Processor, [music], Object.assign({}, H.DEFAULT_PARAMS,
-    { power: 1, dehiss: 0, noiseFloor: -70, hissFloor: -90 }))[0];
+    { power: 1, dehiss: 0, noiseFloor: -70, hissFloor: -90, autoLevel: 0 }))[0];
   const mOn = H.render(Processor, [music], Object.assign({}, H.DEFAULT_PARAMS,
-    { power: 1, dehiss: 1, noiseFloor: -70, hissFloor: -90 }))[0];
+    { power: 1, dehiss: 1, noiseFloor: -70, hissFloor: -90, autoLevel: 0 }))[0];
   const loss = band([mOff], 6000, 12000) - band([mOn], 6000, 12000);
   H.ok(loss < 2.5, 'leans out of the way on clean, continuous music', loss.toFixed(1) + ' dB');
 }
@@ -221,8 +226,8 @@ H.section('engine · dynamic de-resonator');
     body[i] = Math.sin(i * 0.02) * 0.06 + H.noise(SR, 0.0001, 0.01, 5)[0] * 0;
   }
   const mixed = H.normalize(H.mix([body, ring]), 0.9);
-  const off = H.render(Processor, [mixed], Object.assign({}, H.DEFAULT_PARAMS, { power: 1, reso: 0 }))[0];
-  const on = H.render(Processor, [mixed], Object.assign({}, H.DEFAULT_PARAMS, { power: 1, reso: 0.9 }))[0];
+  const off = H.render(Processor, [mixed], Object.assign({}, H.DEFAULT_PARAMS, { power: 1, reso: 0, autoLevel: 0 }))[0];
+  const on = H.render(Processor, [mixed], Object.assign({}, H.DEFAULT_PARAMS, { power: 1, reso: 0.9, autoLevel: 0 }))[0];
   // ring energy must be measured in the time domain: a spectral median across
   // the whole file hides a transient that only rings 30 % of the time
   const ringRms = (sig) => {
@@ -261,7 +266,10 @@ H.section('engine · processing power scaling');
   }
   H.ok(monotonic, 'the single intensity slider scales the effect smoothly',
     levels.map((l) => l.toFixed(1)).join(' → '));
-  H.ok(levels[4] - levels[0] > 6, 'slider range is wide enough to matter',
+  // …and what is left of it once the automatic level match has taken back the
+  // part of the change that lands inside its loudness band. The slider has to
+  // deliver a clearly audible top-end span, not a theoretical one.
+  H.ok(levels[4] - levels[0] > 5, 'slider range is wide enough to matter',
     (levels[4] - levels[0]).toFixed(1) + ' dB');
 }
 

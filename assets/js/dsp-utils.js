@@ -350,19 +350,46 @@
     const norm = 2 / (winSum * nCh);
 
     // ---- 1. frame loudness distribution ---------------------------------
+    // Alongside it, a 4–16 kHz follower built from the same frames: whether the
+    // top end moves with the music or sits still is what separates a stationary
+    // hiss floor from ordinary bright material (see hissDeficitDb below).
     const frameRms = new Float32Array(total);
+    const hfFrame = new Float32Array(total);
+    const hfCh = [];
+    for (let c = 0; c < nCh; c++) {
+      const a = new Biquad(), b = new Biquad();
+      a.setHighpass(sr, 4000, 0.707); b.setHighpass(sr, 4000, 0.707);
+      const ch = channels[c], out = new Float32Array(ch.length);
+      for (let i = 0; i < ch.length; i++) out[i] = b.process(a.process(ch[i]));
+      hfCh.push(out);
+    }
     for (let fr = 0; fr < total; fr++) {
       const off = fr * hop;
-      let ms = 0;
+      let ms = 0, hs = 0;
       for (let c = 0; c < nCh; c++) {
-        const ch = channels[c];
-        for (let i = 0; i < fftSize; i++) ms += ch[off + i] * ch[off + i];
+        const ch = channels[c], hch = hfCh[c];
+        for (let i = 0; i < fftSize; i++) {
+          const v = ch[off + i];
+          ms += v * v;
+          const w = hch[off + i];
+          hs += w * w;
+        }
       }
       frameRms[fr] = Math.sqrt(ms / (fftSize * nCh));
+      hfFrame[fr] = Math.sqrt(hs / (fftSize * nCh));
     }
     const sorted = Float32Array.from(frameRms).sort();
+    const sortedHf = Float32Array.from(hfFrame).sort();
     const pct = (p) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.floor(sorted.length * p)))];
+    const pctHf = (p) => sortedHf[Math.min(sortedHf.length - 1, Math.max(0, Math.floor(sortedHf.length * p)))];
     const p05 = pct(0.05), p20 = pct(0.20), p50 = pct(0.50), p90 = pct(0.90), p98 = pct(0.98);
+    // Dynamic range of the whole signal vs. of its 4–16 kHz band. Broadband
+    // music moves by 30–50 dB between a quiet phrase and a loud one; a steady
+    // hiss keeps the HF band almost flat underneath it, so the HF range shrinks
+    // and the difference between the two becomes positive.
+    const bbDynDb = db(p98 + 1e-12) - db(pct(0.02) + 1e-12);
+    const hfDynDb = db(pctHf(0.98) + 1e-12) - db(pctHf(0.02) + 1e-12);
+    const hissDeficitDb = clamp(bbDynDb - hfDynDb, -30, 30);
     const musicDb = db(p98);
     // "quiet" = the quietest 8 % of the file: track gaps, fades, pauses between
     // phrases. That is where a recording shows what it does when it is silent.
@@ -428,6 +455,7 @@
 
     return {
       spec, floorDb, hfFloorDb, midFloorDb, lowFloorDb, noiseSlope, flatness, rumble,
+      bbDynDb, hfDynDb, hissDeficitDb,
       crackleIndex, crestP98Db: cr.crestP98Db, crestGlobalDb: cr.globalCrestDb, musicDb, quietLevelDb: db(quietLimit), quietCount, total, confidence,
       dynamicRangeDb: db(p98) - db(p05),
       frameRms,
@@ -559,6 +587,11 @@
     m.airiness = clamp((-3 * Math.log2(8500 / 113) + high - bass) / 24, 0, 1);
     m.tilt = high - bass + 3 * Math.log2(8500 / 113);
     m.hfEnergyLoss = clamp((bandLevel(spec, 3000, 6000) - veryHigh) / 40, 0, 1);
+    // How far the band the air synthesiser works from (4.6–7.5 kHz) sits below
+    // the midrange. Small = the top end is merely rolled off and can be rebuilt;
+    // large = it is gone, and there is almost nothing left to derive from.
+    m.deriveDb = bandMedian(spec, 4600, 7500);
+    m.deriveGapDb = clamp(mid - m.deriveDb, 0, 30);
     // natural top-end loss (independent of hiss): HF level vs. the −3 dB/oct ideal
     m.topLoss = clamp((-3 * Math.log2(8500 / 1130) + mid - high) / 22, 0, 1);
 
@@ -577,8 +610,23 @@
     // how far the music sits above the noise floor (intuitive "SNR")
     m.snrDb = m.musicLevelDb - nf;           // music peaks above the noise floor
     m.hfSnrDb = m.musicLevelDb - hfNf;
-    // hiss = intrusive (little headroom above the floor) AND spectrally flat
-    m.hissAmount = clamp((55 - m.hfSnrDb) / 26, 0, 1) * m.noiseFlatness * clamp(m.noiseConfidence * 1.5, 0, 1);
+    // Hiss is not "a bright top end", it is a top end that *does not move*: the
+    // 6–20 kHz region keeps its level while the music drops away. A previous
+    // version asked for a spectrally flat noise floor in the quietest frames,
+    // which fired on any bright, cymbal-rich master — it de-hissed exactly the
+    // material that needed nothing — while missing real tape hiss at other
+    // times. hissDeficitDb (see noiseAnalysis) instead compares how far the HF
+    // band moves with the music: measured 0–1.6 dB for clean and bright
+    // material, 3–6 dB for a hiss floor 25–35 dB below the music.
+    m.hissDeficitDb = na.hissDeficitDb === undefined ? 0 : na.hissDeficitDb;
+    // Two conditions, both measured on the same frames: the floor has to be
+    // *stationary* (the deficit) and close enough to the music to be heard at
+    // all (hfSnrDb). A floor 50 dB down is not hiss, it is silence; the level
+    // term can only scale the estimate down, never up, and keeps a floor of
+    // 0.35 so that a very quiet but plainly stationary floor is still reported
+    // as a small amount rather than nothing.
+    const hissLevel = clamp((55 - m.hfSnrDb) / 26 + 0.35, 0.35, 1);
+    m.hissAmount = clamp((m.hissDeficitDb - 1.0) / 4.0, 0, 1) * hissLevel * clamp(m.noiseConfidence * 1.5, 0, 1);
     // hard spectral edge (codec brick-wall) vs. natural analogue roll-off:
     // look for a CLIFF in the smoothed spectrum, not just a quiet top end.
     m.hfDropDb = bandMedian(spec, 6000, 8000) - bandMedian(spec, 12000, 16000);

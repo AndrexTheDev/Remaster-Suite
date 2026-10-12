@@ -425,10 +425,17 @@ section('audit · presets and parameters');
   for (const k of ['air', 'exciter', 'dehiss', 'declick', 'sub', 'reso', 'glue', 'warmth', 'power']) {
     for (let i = 1; i < series.length; i++) if (series[i][k] < series[i - 1][k] - 1e-9) nonMonotone.push(k + '@' + (i * 0.1 + 0.1).toFixed(1));
   }
+  // A band is an amount like any other: as the slider rises it has to move
+  // further in *its own* direction. The reference sign therefore comes from the
+  // same material that is being swept (a band the chain cuts must become a
+  // deeper cut, not a shallower one), not from the garage card above — that one
+  // lifts the 7 kHz shelf, which used to make a legitimate cut look like a
+  // violation of the contract.
+  const seriesFull = Presets.buildParams('auto', m2, 1);
   for (let b = 0; b < 6; b++) {
-    const anchor = full['band' + b];
-    if (anchor >= 0) {
-      for (let i = 1; i < series.length; i++) if (series[i]['band' + b] < series[i - 1]['band' + b] - 1e-9) nonMonotone.push('band' + b);
+    const dir = seriesFull['band' + b] >= 0 ? 1 : -1;
+    for (let i = 1; i < series.length; i++) {
+      if ((series[i]['band' + b] - series[i - 1]['band' + b]) * dir < -1e-9) nonMonotone.push('band' + b);
     }
   }
   ok(nonMonotone.length === 0, 'the whole chain reacts monotonically to the slider', nonMonotone.join(', '));
