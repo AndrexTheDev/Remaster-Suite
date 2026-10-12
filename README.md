@@ -59,6 +59,29 @@ crest/clipping analysis) and produces:
 * a **waveform comparison**: the original mirrored above the centre line, the restored version
   below it, in the same timeline
 * measurement chips (peak, loudness, top-end cut-off, noise floor, dynamics, stereo width, clipping)
+* **an honest progress bar while it works** — the stage (*"Measuring the sound …"*, *"Restoring the
+  recording …"*, *"Writing the file …"*), a percentage and a coarse time left, on the file card and
+  on a second bar above the list that names the file the queue is on. Steps that cannot be counted
+  (the browser's own decode) sweep instead of inventing a number.
+
+### On a phone
+
+The suite is built to be used in a phone browser:
+
+* **The card is on the list the moment you pick the file, with its name** — the analysis runs
+  behind it, and a long name wraps instead of being cut off.
+* **The job bar docks to the bottom edge** so it stays visible while you scroll the list.
+* **Thumb-first controls:** every button and segmented control is at least 44 px tall, fields use
+  16 px text (so iOS Safari does not zoom into them), and nothing depends on hovering.
+* **No desktop wording:** with a coarse pointer the drop zone says *tap to choose* instead of
+  *drop files here*, and it switches live if the pointer changes.
+* **Safe-area aware:** the notch and the home indicator are respected — the bar and the footer
+  keep clear of the gesture area.
+* **Smaller memory budget** (420 MB instead of 900 MB estimated output) so a ZIP full of WAVs
+  cannot blow up a mobile browser, and a **screen wake lock** keeps the tab alive during a long
+  render.
+* Verified in a real browser at 320, 360, 390, 414 and 768 px wide — no horizontal scrolling
+  anywhere, in `tests/beta/beta.js` and the screenshot matrix in [`docs/beta/`](docs/beta).
 
 ### The one slider
 
@@ -229,7 +252,8 @@ node tests/tuning.test.js  # the tuning contract: octave bands, loudness, the le
                            # soft-clip guard, level-normalised synthesis, honest extremes
 node tests/beta/beta.js    # big beta: drives a real headless Chromium over the DevTools
                            # protocol — real drops, real AudioWorklet, real dialogs and
-                           # downloads — and photographs the screenshot matrix
+                           # downloads, phone emulation at 390 and 320 px with live progress
+                           # sampling — and photographs the screenshot matrix
 ```
 
 The beta writes `docs/BETA-REPORT.md` and the screenshot matrix to `docs/beta/`.

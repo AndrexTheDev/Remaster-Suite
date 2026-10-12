@@ -7,6 +7,11 @@
 <meta name="description" content="Harmonic Restoration — Remaster Suite. Repariert alte, dumpfe oder verrauschte Aufnahmen direkt im Browser: Signalverarbeitung direkt auf dem Gerät, keine Uploads, kein Server. / Restores old, muffled or noisy recordings right in your browser: 100 % client-side, no uploads, no server.">
 <meta name="theme-color" content="#0d0f12">
 <meta name="color-scheme" content="dark">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Remaster Suite">
+<meta name="format-detection" content="telephone=no">
 <meta property="og:title" content="Harmonic Restoration · Remaster Suite">
 <meta property="og:description" content="One-drop audio restoration: harmonic exciter, sub-bass synthesis, de-hiss, de-click. 100 % client-side.">
 <meta property="og:type" content="website">
@@ -84,7 +89,7 @@
         <path d="M10 40 L10 50 Q10 56 16 56 L48 56 Q54 56 54 50 L54 40" fill="none" stroke="currentColor"
               stroke-width="4" stroke-linecap="round"/>
       </svg>
-      <p class="dz-title" data-i18n="drop.title">Audiodateien hier ablegen</p>
+      <p class="dz-title" id="dzTitle" data-i18n="drop.title">Audiodateien hier ablegen</p>
       <p class="dz-hint" id="dzHint" data-i18n="drop.hint">… oder klicken und auswählen. Mehrere Dateien auf einmal sind erlaubt.</p>
       <button type="button" class="btn btn-primary btn-lg" id="btnPick"
               aria-describedby="dzHint dzFormats" data-i18n="drop.button">Dateien auswählen</button>
@@ -158,9 +163,15 @@
         </select>
       </div>
 
-      <div class="progress-bar" id="globalProgress" hidden aria-live="polite">
-        <div class="progress-fill" id="globalProgressFill"></div>
-        <span class="progress-text" id="globalProgressText"></span>
+      <div class="job" id="globalProgress" hidden>
+        <div class="job-head">
+          <span class="job-text" id="globalProgressText" aria-live="polite"></span>
+          <span class="job-pct" id="globalProgressPct">0 %</span>
+        </div>
+        <div class="job-track" id="globalProgressTrack" role="progressbar" aria-valuemin="0"
+             aria-valuemax="100" aria-valuenow="0" data-i18n-aria="work.aria">
+          <div class="job-fill" id="globalProgressFill"></div>
+        </div>
       </div>
     </div>
   </section>
@@ -243,6 +254,18 @@
       </div>
     </header>
 
+    <div class="work" data-slot="work" hidden>
+      <div class="work-head">
+        <span class="work-stage" data-slot="stage"></span>
+        <span class="work-eta" data-slot="eta"></span>
+        <span class="work-pct" data-slot="pct">0 %</span>
+      </div>
+      <div class="work-track" data-slot="track" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+           aria-valuenow="0" data-i18n-aria="work.aria">
+        <div class="work-fill" data-slot="bar"></div>
+      </div>
+    </div>
+
     <p class="diagnosis" data-slot="diagnosis"></p>
 
     <ul class="chips" data-slot="chips"></ul>
@@ -297,7 +320,6 @@
       </div>
     </div>
 
-    <div class="card-bar"><div class="card-bar-fill" data-slot="bar"></div></div>
     <p class="card-note" data-slot="note" hidden></p>
   </article>
 </template>

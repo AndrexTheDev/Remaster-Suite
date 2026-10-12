@@ -232,6 +232,134 @@ section('audit · stylesheet');
   }
 }
 
+/* ══════════════════════════════════════════ 3b · progress & phone audit ══ */
+
+section('audit · progress bars');
+{
+  // one bar for the running job, above the file list: it has to be a real
+  // progressbar for assistive tech, and it must not be a decorative div
+  const job = html.match(/<div class="job" id="globalProgress"[\s\S]*?<\/div>\s*<\/div>/);
+  ok(!!job, 'the job bar exists as its own block');
+  const jobHtml = job ? job[0] : '';
+  ok(/class="job-text" id="globalProgressText"[^>]*aria-live="polite"/.test(jobHtml),
+    'the job bar announces its status politely');
+  ok(/id="globalProgressPct"/.test(jobHtml), 'the job bar carries a percentage readout');
+  ok(/id="globalProgressTrack"[^>]*role="progressbar"[^>]*aria-valuemin="0"[\s\S]*?aria-valuemax="100"[\s\S]*?aria-valuenow="0"/.test(jobHtml),
+    'the track is a labelled progressbar with min/max/now');
+  ok(/data-i18n-aria="work.aria"/.test(jobHtml), 'the progressbar has a translated accessible name');
+  ok(/class="job-fill" id="globalProgressFill"/.test(jobHtml), 'the fill element the code drives exists');
+
+  // each card has its own bar inside the card, in a fixed slot order
+  const tpl = html.match(/<template id="cardTpl">([\s\S]*?)<\/template>/);
+  const card = tpl ? tpl[1] : '';
+  const work = card.match(/<div class="work" data-slot="work" hidden>[\s\S]*?<\/div>\s*<\/div>/);
+  ok(!!work, 'the card has its own work block');
+  const workHtml = work ? work[0] : '';
+  for (const slot of ['stage', 'eta', 'pct', 'track', 'bar']) {
+    ok(new RegExp('data-slot="' + slot + '"').test(workHtml), 'the card work block has a ' + slot + ' slot');
+  }
+  ok(/data-slot="track" role="progressbar"[\s\S]*?aria-valuenow="0"/.test(workHtml),
+    'the card bar is exposed as a progressbar too');
+  ok(workHtml.indexOf('data-slot="work"') < card.indexOf('data-slot="diagnosis"'),
+    'the bar sits above the diagnosis, where the eye lands first');
+
+  // the old two bars are really gone, in markup and in code
+  const legacy = /\.progress-bar|\.card-bar|id="globalProgressBar"|class="card-bar"/;
+  ok(!legacy.test(html) && !legacy.test(css) && !legacy.test(appSrc),
+    'no leftover markup, style or code from the old bars');
+  const queried = [...appSrc.matchAll(/\$\('#(globalProgress[A-Za-z]*)/g)].map((m) => m[1]);
+  const ids = new Set([...html.matchAll(/id="([^"]+)"/g)].map((m) => m[1]));
+  const stray = queried.filter((id) => !ids.has(id));
+  ok(stray.length === 0 && queried.length >= 4, 'the code drives exactly the ids that exist', queried.join(', '));
+
+  // the wording that the bars show has to exist in both languages
+  const stageKeys = ['wait', 'decode', 'measure', 'analyze', 'diagnose', 'window', 'envelope', 'preview', 'render', 'encode', 'zip'];
+  const noWording = stageKeys.filter((k) => !i18n.DICT.de['work.' + k] && k !== 'measure');
+  ok(noWording.length === 0, 'every stage the bars can show has wording', noWording.join(', '));
+  const analyzerStages = [...read('assets/js/analyzer.js').matchAll(/onProgress\(\s*[^,]+,\s*'([a-z]+)'/g)].map((m) => m[1]);
+  const stageTable = appSrc.match(/const STAGE_TEXT = \{([\s\S]*?)\n  \};/);
+  const known = stageTable ? stageTable[1] : '';
+  const unmapped = Array.from(new Set(analyzerStages)).filter((st) => !new RegExp('^\\s*' + st + ':', 'm').test(known));
+  ok(unmapped.length === 0, 'every stage the analyser reports has a word in the app',
+    Array.from(new Set(analyzerStages)).join(', ') + ' → missing: ' + (unmapped.join(', ') || 'none'));
+  for (const k of ['work.eta', 'work.etaMin']) {
+    ok(/\{s\}|\{m\}/.test(i18n.DICT.de[k]) && /\{s\}|\{m\}/.test(i18n.DICT.en[k]),
+      'the time left is a translated template: ' + k);
+  }
+}
+
+section('audit · the phone');
+{
+  // the viewport has to allow the notch and the on-screen keyboard, but must
+  // never forbid zooming (pinch-to-zoom is an accessibility feature)
+  const vp = (html.match(/<meta name="viewport" content="([^"]+)"/) || [])[1] || '';
+  ok(/width=device-width/.test(vp) && /initial-scale=1/.test(vp), 'the viewport scales to the device');
+  ok(/viewport-fit=cover/.test(vp), 'the layout may use the area around the notch');
+  ok(!/user-scalable=no|maximum-scale=1(\.0)?\b/.test(vp), 'zoom is not disabled', vp);
+  ok(/name="mobile-web-app-capable" content="yes"/.test(html)
+    && /name="apple-mobile-web-app-capable" content="yes"/.test(html)
+    && /apple-mobile-web-app-status-bar-style/.test(html),
+    'the app can be installed to the home screen');
+  ok(/name="theme-color" content="#0d0f12"/.test(html), 'the status bar picks up the brand background');
+  ok(/name="apple-mobile-web-app-title"/.test(html), 'the home-screen icon has a name');
+  ok(/property="og:image:alt"/.test(html), 'the social preview image is described');
+
+  // three sizes that make a phone usable: 44 px targets, 16 px fields, no
+  // hover-only affordances, and a bottom bar that respects the home indicator
+  const mobile = css.slice(css.indexOf('@media (max-width: 720px)'), css.indexOf('@media (max-width: 480px)'));
+  ok(/\.btn \{ min-height: 44px/.test(mobile), 'buttons are at least 44 px tall on a phone');
+  ok(/\.icon-btn \{ width: 44px; height: 44px/.test(mobile), 'icon buttons get the full 44 px square');
+  ok(/\.seg button, \.seg-sm button \{ padding: 10px 14px; font-size: \.86rem; min-height: 44px/.test(mobile),
+    'both sizes of segmented control grow to a 44 px thumb target');
+  ok(/\.seek \{ height: 44px/.test(mobile), 'the seek strip is 44 px tall');
+  ok(/input\[type="range"\] \{ width: 100%; height: 32px/.test(mobile), 'sliders are tall enough to grab');
+  ok(/\.select, \.select-sm \{ font-size: 1rem/.test(mobile), 'fields use 16 px so iOS does not zoom in');
+  ok(/\.btn-lg \{ width: 100%/.test(mobile) && /\.ctl-actions \{ display: grid/.test(mobile),
+    'the primary action takes the full width on a phone');
+  ok(/overflow-wrap: anywhere/.test(mobile) && !/max-width: 40vw/.test(css),
+    'a long file name wraps instead of being cut off');
+  ok(/\.job \{[\s\S]*?position: fixed; left: 0; right: 0; bottom: 0/.test(mobile),
+    'the job bar docks to the bottom edge on a phone');
+  ok(/env\(safe-area-inset-bottom\)/.test(mobile) && /env\(safe-area-inset-left\)/.test(mobile),
+    'the docked bar and the page keep clear of the home indicator');
+  const insets = (css.match(/env\(safe-area-inset-[a-z]+\)/g) || []).length;
+  ok(insets >= 5, 'safe-area insets are used throughout, not patched in once', insets + ' uses');
+  ok(/@media \(hover: none\)/.test(css) && /transform: none/.test(css.slice(css.indexOf('@media (hover: none)'))),
+    'hover styles cannot stick after a tap');
+  ok(/-webkit-tap-highlight-color: transparent/.test(css), 'no grey tap flash on the brand buttons');
+  ok(/touch-action: manipulation/.test(css), 'the 300 ms double-tap delay is removed from controls');
+  ok(/\.controls-wrap \{ backdrop-filter: none/.test(mobile),
+    'the sticky blur is dropped where it would cost frames (and would trap the docked bar)');
+
+  // an indeterminate bar animates; a measured bar must never pretend to move
+  ok(/\.work\.is-indeterminate \.work-fill/.test(css) && /@keyframes workSlide/.test(css),
+    'the indeterminate state has its own sweep animation');
+  ok(!/(^|\n)\.work-fill \{[^}]*animation:/.test(css), 'a measured bar is not animated');
+  ok(/\.job\.is-indeterminate \.job-fill \{ animation: workSlide/.test(css),
+    'the docked job bar sweeps too while an uncountable step runs');
+  // an auto-sized grid track grows to max-content: without this guard a long
+  // file name pushes the percentage off the right edge of both bars
+  ok(/\.job \{[^}]*grid-template-columns: minmax\(0, 1fr\)/.test(css)
+    && /\.work \{[^}]*grid-template-columns: minmax\(0, 1fr\)/.test(css),
+    'both progress blocks clamp their column, so the percentage cannot be pushed out');
+  ok(/prefers-reduced-motion/.test(css) && /animation-duration: \.001ms/.test(css),
+    'the sweep is switched off for reduced motion');
+
+  // the phone gets its own wording, and it is not desktop wording with a suffix
+  const touchKeys = { 'drop.titleTouch': /tap|tippe|wähle|choose|pick/i, 'drop.hintTouch': /tap|tippe/i };
+  for (const [key, re] of Object.entries(touchKeys)) {
+    for (const lang of ['de', 'en']) {
+      const v = i18n.DICT[lang][key];
+      ok(!!v && re.test(v) && !/drag|drop|ziehen|ablegen/i.test(v),
+        lang + ' · ' + key + ' speaks about tapping, not dragging', v);
+    }
+  }
+  ok(i18n.DICT.de['drop.titleTouch'] !== i18n.DICT.de['drop.title'], 'the touch title is a different sentence');
+  // and the app must pick it without a reload-free hack: the key is rewritten
+  ok(/el\.setAttribute\('data-i18n', key\)/.test(appSrc),
+    'the drop zone writes the effective key back, so a repaint keeps the variant');
+}
+
 /* ═════════════════════════════════════════════════ 4 · bilingual coverage ══ */
 
 section('audit · bilingual coverage');
@@ -262,13 +390,35 @@ section('audit · bilingual coverage');
   for (const attr of ['data-i18n', 'data-i18n-html', 'data-i18n-title', 'data-i18n-aria']) {
     for (const m of html.matchAll(new RegExp(attr + '="([^"]+)"', 'g'))) usedKeys.add(m[1]);
   }
-  // static keys only: dynamic ones are composed ("kind." + id) and checked below
-  for (const m of appSrc.matchAll(/\bt\(\s*'([a-z0-9]+\.[A-Za-z0-9.]+)'/g)) usedKeys.add(m[1]);
-  for (const m of appSrc.matchAll(/t\((\w+) \? '([a-z0-9]+\.[A-Za-z0-9.]+)' : '([a-z0-9]+\.[A-Za-z0-9.]+)'/g)) { usedKeys.add(m[2]); usedKeys.add(m[3]); }
+  // The dictionary file itself is *not* part of the code that may reference a
+  // key — otherwise every key would count as used and this check could never
+  // fail. (It could not, before this was split.)
+  const codeOnly = APP_JS.filter((f) => f.indexOf('i18n.js') === -1).map(read).join('\n');
+
+  // static keys
+  for (const m of codeOnly.matchAll(/\bt\(\s*'([a-z0-9]+\.[A-Za-z0-9.]+)'/g)) usedKeys.add(m[1]);
+  for (const m of codeOnly.matchAll(/t\((\w+) \? '([a-z0-9]+\.[A-Za-z0-9.]+)' : '([a-z0-9]+\.[A-Za-z0-9.]+)'/g)) { usedKeys.add(m[2]); usedKeys.add(m[3]); }
+  // dynamic families: composed at runtime from a prefix that appears in the code
+  // ("kind." + id, "issue." + key, "status." + state)
+  const families = new Set([...codeOnly.matchAll(/'([a-z]+)\.'\s*\+/g)].map((m) => m[1] + '.'));
+  for (const k of de) {
+    for (const f of families) if (k.indexOf(f) === 0) usedKeys.add(k);
+  }
+
   const missing = [...usedKeys].filter((k) => !i18n.DICT.de[k] || !i18n.DICT.en[k]);
   ok(missing.length === 0, 'every referenced key exists in both languages', missing.join(', '));
-  const unused = de.filter((k) => !usedKeys.has(k) && !new RegExp("'" + k.replace(/\./g, '\\.') + "'").test(appSrc + html));
+  const unused = de.filter((k) => !usedKeys.has(k)
+    && !new RegExp("'" + k.replace(/\./g, '\\.') + "'").test(codeOnly + html));
   ok(unused.length === 0, 'no dead translation keys', unused.join(', '));
+  ok(families.has('kind.') && families.has('issue.') && families.has('status.'),
+    'the dynamic key families are still discovered', [...families].join(', '));
+
+  // …and every state the app can be switched into has wording to show (the
+  // reverse direction — a key nothing shows — is what `unused` above checks)
+  const statusWords = new Set([...codeOnly.matchAll(/setStatus\(\s*[^,]+,\s*'([a-z]+)'/g)].map((m) => m[1]));
+  statusWords.add('rendering');            // the pill's live percentage word
+  const missingStatus = [...statusWords].filter((w) => !i18n.DICT.de['status.' + w] || !i18n.DICT.en['status.' + w]);
+  ok(missingStatus.length === 0, 'every state the cards can be in has wording', missingStatus.join(', '));
 
   // HTML strings must be balanced and free of stray markup
   const voidTags = ['br', 'hr', 'img', 'input', 'meta', 'link'];

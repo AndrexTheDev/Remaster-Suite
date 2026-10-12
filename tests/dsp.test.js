@@ -404,7 +404,103 @@ H.section('codecs · JSZip + lamejs availability (vendored fallbacks)');
   }
 }
 
+/* ═════════════════════════════════════════ the sliced measurement (progress) ══ */
+
+/* the analyser reads the very same globals the page does */
+global.RSDSP = RSDSP;
+global.RSPresets = RP;
+const Analyzer = require(path.join(H.ROOT, 'assets', 'js', 'analyzer.js'));
+
+/** The async sections below are the only ones that yield; keep them in one place. */
+async function slicedSections() {
+
+H.section('measurement · the sliced form is the same measurement');
+{
+  // The UI runs `measureAsync`/`analyzeAsync` so a phone can paint a progress bar
+  // while a long file is measured. That is only allowed to be a *driving* change:
+  // the numbers have to be identical to the synchronous reference, bit for bit.
+  const SIM2 = {
+    garage: H.garageSim(RSDSP, SR, 6),
+    cassette: H.cassetteSim(RSDSP, SR, 6),
+    vinyl: H.vinylSim(RSDSP, SR, 6),
+    lowbitrate: H.lowBitrateSim(RSDSP, SR, 6),
+  };
+  const FIELDS = ['score', 'peakDb', 'loudness', 'noiseFloorDb', 'hfNoiseFloorDb', 'dynamicRangeDb',
+    'crackleIndex', 'correlation', 'clipRatio', 'hfCutoff', 'tilt', 'topLoss', 'brickwall',
+    'dullIndex', 'deriveGapDb', 'hissAmount', 'hissDeficitDb', 'snrDb', 'hfSnrDb', 'vinylAmount',
+    'tapeAmount', 'noiseSlope', 'noiseFlatness', 'noiseRumble', 'noiseConfidence', 'mudScore',
+    'harshness', 'airiness', 'bassRoll', 'subDeficit', 'cliffDb', 'cliffHz', 'specEndHz',
+    'bandLimited', 'musicLevelDb', 'hfEnergyLoss', 'deriveDb', 'hfDropDb', 'crestDb'];
+  let diff = [];
+  for (const [name, sig] of Object.entries(SIM2)) {
+    const sync = RSDSP.measure([sig], SR);
+    const async_ = await RSDSP.measureAsync([sig], SR);
+    for (const f of FIELDS) if (sync[f] !== async_[f]) diff.push(name + ' ' + f);
+    for (let b = 0; b < sync.bandExcess.length; b++) {
+      if (sync.bandExcess[b] !== async_.bandExcess[b]) diff.push(name + ' bandExcess[' + b + ']');
+    }
+    if (sync.spec.db.length !== async_.spec.db.length) diff.push(name + ' spectrum length');
+    for (let k = 0; k < sync.spec.db.length; k += 97) {
+      if (sync.spec.db[k] !== async_.spec.db[k]) { diff.push(name + ' spectrum bin ' + k); break; }
+    }
+  }
+  H.ok(diff.length === 0, 'every metric of the sliced measurement equals the synchronous one',
+    diff.slice(0, 5).join(', '));
+
+  // …and the whole analysis, including the window, the envelopes and the chips
+  const sim = SIM2.garage;
+  const buffer = {
+    sampleRate: SR, numberOfChannels: 1, duration: sim.length / SR,
+    getChannelData: () => sim,
+  };
+  const syncA = Analyzer.analyze(buffer, { previewSeconds: 40, buckets: 1400 });
+  const asyncA = await Analyzer.analyzeAsync(buffer, { previewSeconds: 40, buckets: 1400 });
+  const deepEqual = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  H.ok(deepEqual(syncA.metrics, asyncA.metrics) && syncA.window.start === asyncA.window.start
+    && deepEqual(syncA.chips, asyncA.chips) && deepEqual(syncA.diag, asyncA.diag),
+    'the sliced analysis returns the same window, metrics, chips and diagnosis');
+  H.ok(deepEqual(Array.from(syncA.envelope.max), Array.from(asyncA.envelope.max))
+    && deepEqual(Array.from(syncA.windowEnvelope.rms), Array.from(asyncA.windowEnvelope.rms)),
+    'both waveform envelopes are identical too');
+}
+
+H.section('measurement · progress is honest and the loop stays alive');
+{
+  const sig = H.vinylSim(RSDSP, SR, 8);
+  const marks = [];
+  let ticks = 0;
+  const timer = setInterval(() => { ticks++; }, 4);      // proves the loop yields
+  const out = await RSDSP.measureAsync([sig], SR, (p, label) => marks.push({ p, label }), {});
+  clearInterval(timer);
+  H.ok(marks.length > 10, 'a several-second file is reported many times, not in one jump',
+    marks.length + ' reports');
+  H.ok(marks[0].p === 0 && marks[marks.length - 1].p === 1, 'progress runs from 0 to 100 %',
+    marks[0].p + ' → ' + marks[marks.length - 1].p);
+  H.ok(marks.every((m, i) => i === 0 || m.p >= marks[i - 1].p - 1e-9), 'progress never goes backwards');
+  H.ok(marks.every((m) => typeof m.label === 'string' && m.label.length > 2), 'every report names a stage',
+    Array.from(new Set(marks.map((m) => m.label))).join(', '));
+  H.ok(ticks > 3, 'the event loop gets control back while measuring', ticks + ' timer ticks');
+  H.ok(out.score === RSDSP.measure([sig], SR).score, 'and the result is still the same measurement');
+
+  // the stage names are what the UI shows before it translates them
+  const stages = [];
+  await Analyzer.analyzeAsync({ sampleRate: SR, numberOfChannels: 1, duration: sig.length / SR, getChannelData: () => sig },
+    { previewSeconds: 30, buckets: 400 }, (p, stage) => stages.push(stage));
+  const known = ['measure', 'diagnose', 'window', 'envelope'];
+  H.ok(stages.every((st) => known.indexOf(st) !== -1) && stages.indexOf('measure') === 0
+    && stages.indexOf('envelope') !== -1, 'the analysis reports its own stages', Array.from(new Set(stages)).join(', '));
+}
+
+}                                    // end of the async sections
+
 /* ------------------------------------------------------------------- done */
 
-const okAll = H.summarize();
-process.exit(okAll ? 0 : 1);
+slicedSections()
+  .then(() => {
+    const okAll = H.summarize();
+    process.exit(okAll ? 0 : 1);
+  })
+  .catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });

@@ -4,6 +4,68 @@ All notable changes to the Remaster Suite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are the ones shown in
 *About & credits*.
 
+## [1.3.0] — 2026-10-12
+
+**The progress-and-phone release.** A long file now says what it is doing, how far along it is
+and how much longer it will take — and the whole interface is built for a phone browser
+first, because that is where the suite gets used.
+
+### Added
+
+* **An honest progress bar, in two places.** The card shows the stage it is in
+  ("Measuring the sound …", "Restoring the recording …", "Writing the file …"), a percentage
+  and a coarse time left ("~12 s", "~3 min" — never fake-precise). A second bar above the file
+  list reports the *job*: which file of how many, its name, and the same stage and percentage.
+  On a phone that bar docks to the bottom edge, so it stays visible while the list scrolls.
+* **Steps that cannot be counted sweep instead of lying.** Reading a file happens inside the
+  browser's own decoder; there is no percentage to report, so the bar animates and the number
+  stays empty until a real measurement starts.
+* **The measurement itself became interruptible.** The analyser used to run 501 numbers over
+  the whole file in one blocking pass. It is now sliced into ~26 ms steps that yield to the
+  event loop, so the bar paints and the tab stays responsive on a phone — with the results
+  proven bit-identical to the synchronous reference (`tests/dsp.test.js`).
+* **The screen wake lock** is requested while a job runs and dropped when it ends: a phone that
+  dims the display can suspend the tab and stall a queue mid-file.
+* **A phone layout, systematically:** 44 px tap targets for every button and both sizes of
+  segmented control, 16 px fields (so iOS does not zoom into them), safe-area insets for the
+  notch and the home indicator, the footer's long donation addresses allowed to shrink, and a
+  halved memory budget (420 MB) so a ZIP of WAVs cannot blow up a mobile browser.
+* **Phone wording:** the drop zone says "tap to choose" instead of "drop files here" when the
+  device has no hovering pointer, and switches live when the pointer changes (a phone with a
+  keyboard attached, a tablet that gets a mouse).
+
+### Fixed
+
+* A single-file job was labelled "1 Dateien" — the batch wording is now only used for batches,
+  and a one-file job leads with that file's name.
+* The measurement phase (0–74 % of the analysis) was labelled "waiting in the queue", because
+  the analyser's stage name was not in the UI's vocabulary. Every stage the analyser can report
+  now has a word, checked by the audit.
+* The percentage of the docked bar could be pushed off the right edge by a long file name — a
+  grid track sized `auto` grows to max-content; both progress blocks now clamp it with
+  `minmax(0, 1fr)`.
+* **A real phone bug found in the browser:** the footer's donation addresses are long and
+  unbreakable, and every `1fr` in the chain honoured their intrinsic width, so a 390 px phone
+  laid the page out 449 px wide — the copy buttons for the tip addresses sat 36 px outside the
+  screen. Fixed at each step (`minmax(0, …)` tracks, `min-width: 0` on the flex and grid items).
+  The page now fits 320 / 360 / 390 / 414 / 768 px exactly, verified in the beta suite.
+* Two buttons (the A/B and format segmented controls) measured 39 px on a phone — just under the
+  44 px thumb target; they now carry the same minimum as everything else.
+* The play/pause button never told a screen reader what it would do; it now carries a translated
+  `aria-label` that follows the language switch.
+* The audit's "no dead translation keys" check included the dictionary file in the code it
+  scanned, so it could never fail. It now scans the application only, discovers the dynamic key
+  families (`kind.`, `issue.`, `status.`), and the 17 keys it immediately found were removed.
+
+### Verified
+
+* Five dependency-free suites: **531 checks** (dsp 66 · audit 215 · web 126 · e2e 107 · tuning 17),
+  all green.
+* The beta suite drives a real headless Chromium: **61 checks, 19 screenshots**, including a
+  390 px and a 320 px phone, thumb-target measurements, the docked bar's geometry, and progress
+  rates sampled every 50–60 ms to prove the bars only ever move forward within a stage.
+* The brightness and loudness contracts of 1.2.0 are unchanged and still enforced.
+
 ## [1.2.0] — 2026-10-12
 
 **The tuning release:** the automatic mode was overdriven, and it is now bounded by
