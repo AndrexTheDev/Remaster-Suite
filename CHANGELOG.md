@@ -4,6 +4,112 @@ All notable changes to the Remaster Suite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are the ones shown in
 *About & credits*.
 
+## [1.6.0] — 2026-10-12
+
+**The combination release.** The suite always dosed every stage from a measurement, but it still
+picked *one* of the six profiles by a vote and threw the other readings away. Most real files are
+not one thing: the classic record in a private archive is a 1970s album, ripped from vinyl, then
+compressed to 128 kbit/s by whoever put it online — crackle, surface noise, transfer hiss and a
+codec cliff in one file, so whichever profile won the vote, the treatments the other problems needed
+were capped by it. Automatic mode now works on a chain instead of a label.
+
+### Added
+
+* **A diagnosis that names every problem, not the loudest one.** `classify` returns a chain of the
+  profiles that carry evidence (from 30 % score upwards), the card's sentence becomes *"Sounds like
+  several problems at once: vinyl rip + heavily compressed file"*, and the ZIP report carries the
+  whole chain (`detected : lowbitrate+vinyl+cassette`). A band-limited source keeps its own name
+  (*band-limited recording*) instead of being called a low-bitrate file, while still borrowing that
+  profile's top-end rebuild.
+* **A tone curve that is the mix of the detected problems.** The six band ceilings are the
+  evidence-weighted mean of the detected profiles' curves (70 % vinyl / 30 % codec gets 70/30 of the
+  two curves) — not the winner's curve. Measured on a vinyl+128 kbit/s fixture: the 7 kHz ceiling
+  lands at **2.38 dB** between the vinyl 1.80 and the codec 2.60 instead of taking either.
+* **Repair permissions are the union, doses stay measured.** Each profile's budget for de-hissing,
+  de-clicking, sub-bass, air and the rest is a *permission*; a file with two problems gets the wider
+  permission per stage, scaled by how much evidence it carries, and the measurement still decides
+  the dose. Measured: **cassette tape with a little dirt on it** is diagnosed as cassette (0.60) +
+  vinyl (0.40) and takes its spikes down **3.6 dB** at the recommended strength — where the
+  single-profile answer managed 0.6 dB, because the cassette ceiling (0.20) was the limit, not the
+  detector.
+* **A measured codec cliff counts in full.** The low-bitrate score used to be discounted by hiss and
+  crackle all the way through, which meant the most common combined file — an old vinyl rip at
+  128 kbit/s — lost the codec treatment *because* it was noisy. The cliff is a direct measurement,
+  so it now stands on its own (measured brickwall 1.00 → codec score 0.62 on the combined fixture,
+  0.28 before), while the circumstantial terms (clean material, a dull top) keep their discounts.
+
+### Notes
+
+* A file with a single problem is still a file with a single problem: on a solo cassette the new
+  mixing moves the tone by **0.03 dB** and the repair budgets by **0.00**, and the clean reference
+  file is bit-for-bit the same decision as before (no parameter moves at all).
+* A hand-picked profile is a decision, not a diagnosis: it is still used exactly as chosen, with no
+  blending.
+* Nothing about the single slider changed: the amounts still follow the same power curve, and 0 %
+  is still a bit-transparent copy of the original.
+
+## [1.5.0] — 2026-10-12
+
+**The per-song release.** Until now the suite chose one of six profiles from the measurements and
+the profile's *ceilings* decided how far each stage could go. That is still true — a profile is
+never a curve to apply — but seven parameters are no longer amounts at all: they are measurements
+of the file itself (where its noise starts, which split its de-hisser should use, where its mains
+line sits, how percussive it is, how its bass arrives in the two channels), and four stages are new
+and exist only when a file asks for them. Two files of the same kind no longer get the same
+treatment: they get the treatment each of them measured.
+
+### Added
+
+* **A sub-sonic guard, dosed from measured rumble.** The quiet passages are compared below the
+  music (20–45 Hz against 120–270 Hz, equal relative width, summed) and the guard is a 12 dB/octave
+  high-pass at **18–30 Hz** — under the bass, where a turntable's rumble lives and no instrument
+  does — and only when the confidence in that measurement is there *and* no mains line could be its
+  cause (a 50/60 Hz line leaks into the band below it at any sane FFT resolution, and a hum is a
+  notch, not a reason to take the bottom off the record). Measured: a rumbly fixture gets 22 Hz, a
+  clean pink programme 0 Hz, the garage fixture 0 Hz.
+* **A per-song corrective EQ — twelve bands, 50 Hz … 8 kHz, Q 1.4.** This is the part that is
+  different for every song: the file's own departures from its own spectral trend, minus what the
+  profile's six bands already shape, with a ±1.5 dB dead zone, a ±6 dB cap, boosts held back within
+  18 dB of the measured noise floor, and no correction at all in a band the file does not fill
+  (more than 22 dB under its own median). Measured on a dull 6 kHz-limited recording: the curve
+  comes out `0 0 0 0 0 0 0 0 −0.1 −0.2 +0.35 +1.64 dB`, and pushing the slider from 0 % to 100 %
+  moves the 9–13 kHz band by 6.1 dB.
+* **A de-esser that fires on sibilance and only on sibilance.** A dynamic dip over 5.2–9.5 kHz,
+  keyed on the fast/slow ratio of that band — a quiet "s" and a loud one are the same problem — and
+  dosed from the measured excess of the band over the trend the rest of the spectrum predicts. It
+  sits before the synthesisers, so the exciter and the air stage cannot rebuild what it just took
+  out. Measured: a sibilant probe asks for 0.46, a recording without sibilance measures 0.00.
+* **A bass mono-maker for a bass that arrives out of phase.** If one channel's low end is inverted,
+  the two channels cancel below 200 Hz when the file is folded to mono — a mis-wired cartridge or a
+  polarity-flipped bass microphone does exactly this. Measured: an inverted bass asks for 1.00, a
+  centred bass for 0.00.
+* **Measured rates instead of guessed ones.** The glue compressor's attack/release now follow the
+  file's **percussive character** (crest factor), and the de-hisser's split point is the measured
+  **start of the noise** (2.2–4 kHz), so a tape whose hiss begins at 2.5 kHz is repaired from
+  2.5 kHz up instead of from a fixed 3.2 kHz.
+* **Every one of them is named in the analysis**, in the same plain sentence as the rest, and the
+  worklet's parameter set grew from 36 to **53** (all of them exercised by `tests/audit.test.js`,
+  which now also proves that a sibilant, an inverted bass and a rumbly recording each move exactly
+  one stage).
+
+### Fixed
+
+* **MP3 export wrote silence.** lamejs copies whatever it is handed straight into 16-bit buffers,
+  so the −1…1 float mix from the renderer was written out as samples rounding to zero: a file with
+  valid frames, a plausible size, and no sound. Independently decoded (mpg123): the file the old
+  path produced measures **−∞ dBFS** — digital silence, 120 960 bytes of it — while the same signal
+  through the fixed path measures **−17.8 dBFS RMS, −3.4 dBFS peak**. Both encoder paths (the worker and the main-thread
+  fallback) now scale to 16-bit PCM with clipping and dither, and the stream is checked for a frame
+  header and a sensible length before the download is offered — an encoder failure is reported as an
+  error instead of being saved as a file that "worked". `tests/web.test.js` now listens at the
+  encoder's input and fails if the samples stop being 16-bit PCM (the check was verified against the
+  old behaviour: peak 2 instead of ≈23 000), and `tests/audit.test.js` checks the conversion itself
+  and that *both* paths perform it.
+* The de-clicker's amount no longer takes a 30 % cut on material whose crest factor is high
+  *because* of its crackle — a crackly record is the one case where full de-clicking is what the
+  file needs, and the vinyl profile's ceiling for it rises from 0.75 to 0.85. Measured: the vinyl
+  fixture's spike crest comes down 1.9 dB at the recommended strength.
+
 ## [1.4.0] — 2026-10-12
 
 **The measurement release.** Three repairs that were dosed from a number nobody had ever checked

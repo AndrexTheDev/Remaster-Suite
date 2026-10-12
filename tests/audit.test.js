@@ -395,15 +395,22 @@ section('audit · bilingual coverage');
   // fail. (It could not, before this was split.)
   const codeOnly = APP_JS.filter((f) => f.indexOf('i18n.js') === -1).map(read).join('\n');
 
-  // static keys
-  for (const m of codeOnly.matchAll(/\bt\(\s*'([a-z0-9]+\.[A-Za-z0-9.]+)'/g)) usedKeys.add(m[1]);
+  // static keys — a literal that ends in a dot is a *prefix*, not a key: the
+  // real key is completed at runtime, and the family scan below takes care of it
+  for (const m of codeOnly.matchAll(/\bt\(\s*'([a-z0-9]+\.[A-Za-z0-9.]+)'/g)) {
+    if (!/\.$/.test(m[1])) usedKeys.add(m[1]);
+  }
   for (const m of codeOnly.matchAll(/t\((\w+) \? '([a-z0-9]+\.[A-Za-z0-9.]+)' : '([a-z0-9]+\.[A-Za-z0-9.]+)'/g)) { usedKeys.add(m[2]); usedKeys.add(m[3]); }
   // dynamic families: composed at runtime from a prefix that appears in the code
-  // ("kind." + id, "issue." + key, "status." + state)
-  const families = new Set([...codeOnly.matchAll(/'([a-z]+)\.'\s*\+/g)].map((m) => m[1] + '.'));
+  // ("kind." + id, "issue." + key, "find.act." + kind). Every dictionary key
+  // under such a prefix counts as used — which is what makes this check able to
+  // fail: a prefix with no keys under it is a family with nothing to show.
+  const families = new Set([...codeOnly.matchAll(/'([a-z][a-z0-9.]*)\.'\s*\+/g)].map((m) => m[1] + '.'));
   for (const k of de) {
     for (const f of families) if (k.indexOf(f) === 0) usedKeys.add(k);
   }
+  const emptyFamilies = [...families].filter((f) => !de.some((k) => k.indexOf(f) === 0));
+  ok(emptyFamilies.length === 0, 'every dynamic key family has translations', emptyFamilies.join(', '));
 
   const missing = [...usedKeys].filter((k) => !i18n.DICT.de[k] || !i18n.DICT.en[k]);
   ok(missing.length === 0, 'every referenced key exists in both languages', missing.join(', '));
@@ -473,6 +480,82 @@ section('audit · bilingual coverage');
 
 /* ══════════════════════════════════════════ 5 · preset & parameter integrity ══ */
 
+/* ═══════════════════════════════════════════ 5b · mehr als ein Problem ══ */
+
+section('audit · several problems at once');
+{
+  const SR = 48000;
+  const P = H.loadProcessor(SR);
+  const crest = (ch) => DSP.crackleDetect(ch, SR).crestP98Db;
+
+  /* The record that is most of a private archive: an old vinyl transfer that
+   * was pushed through a 128 kbit/s encoder on its way to a hard drive. Three
+   * problems in one file — crackle, transfer noise, a codec cliff — so a
+   * diagnosis that names one of them can only serve a third of the file. */
+  const combo = H.comboSim(DSP, SR, 12);
+  const m = DSP.measure([combo], SR);
+  const d = Presets.classify(m);
+  const ids = d.chain.map((c) => c.id);
+  ok(ids.length >= 2 && ids.includes('vinyl') && ids.includes('lowbitrate'),
+    'a vinyl rip that went through a 128 kbit/s encoder is both problems, not one', ids.join(' + '));
+  ok(d.scores.lowbitrate > 0.55,
+    'a *measured* codec cliff counts in full however noisy the transfer around it is',
+    d.scores.lowbitrate.toFixed(2));
+  // …and the tone is the mix of the two curves, not the winner's
+  const mix = Presets.mixAnchors(d.id, d);
+  const win = Presets.PRESETS[d.id].anchors;
+  const second = Presets.PRESETS[ids.filter((k) => k !== d.id)[0] || 'vinyl'].anchors;
+  const lo = Math.min(win.bands[5], second.bands[5]), hi = Math.max(win.bands[5], second.bands[5]);
+  ok(mix.bands[5] > lo + 0.1 && mix.bands[5] < hi - 0.1,
+    'the 7 kHz ceiling is pulled towards the second problem, not the winner of the vote',
+    mix.bands[5].toFixed(2) + ' dB between ' + lo.toFixed(2) + ' and ' + hi.toFixed(2));
+
+  /* A permission is not a dose. Cassette tape with a little dirt on it: the vote
+   * goes to cassette (its hiss is the bigger defect), but the clicks are still
+   * there, and the cassette profile's de-click ceiling is 0.2 — a fifth of what
+   * the crackle needs. The chain hands the file the budget its evidence earned. */
+  const clicks = H.addCrackle(H.cassetteSim(DSP, SR, 12), 1, 0.75, 91);
+  const mc = DSP.measure([clicks], SR);
+  const dc = Presets.classify(mc);
+  const pc = Presets.buildParams('auto', mc, 0.7);
+  ok(dc.id === 'cassette' && dc.chain.some((c) => c.id === 'vinyl'),
+    'a hissy cassette with light crackle is diagnosed as both', dc.chain.map((c) => c.id).join(' + '));
+  ok(pc.declick > Presets.PRESETS.cassette.anchors.declick * 2,
+    '…and its de-click budget is no longer the cassette ceiling',
+    pc.declick.toFixed(2) + ' vs ' + Presets.PRESETS.cassette.anchors.declick);
+  const base = Object.assign({}, H.DEFAULT_PARAMS, pc);
+  const c0 = crest([clicks]);
+  const chainRun = crest(H.render(P, [clicks], base));
+  const capRun = crest(H.render(P, [clicks], Object.assign({}, base, { declick: Presets.PRESETS.cassette.anchors.declick })));
+  const noneRun = crest(H.render(P, [clicks], Object.assign({}, base, { declick: 0 })));
+  ok(chainRun < capRun - 2.5,
+    'the chain tames the clicks where the cassette ceiling cannot (even applied in full)',
+    'crest ' + c0.toFixed(1) + ' → ' + chainRun.toFixed(1) + ' dB with the chain, '
+    + capRun.toFixed(1) + ' dB with the single profile, ' + noneRun.toFixed(1) + ' dB with none');
+
+  /* The other direction, and the more important one: a file with one problem
+   * must stay a file with one problem. The hints every recording carries are
+   * blended into the tone only as far as they are worth. */
+  const solo = H.cassetteSim(DSP, SR, 12);
+  const ms = DSP.measure([solo], SR);
+  const ds = Presets.classify(ms);
+  ok(ds.chain.length === 1, 'a hissy cassette with nothing else in it stays a one-line diagnosis',
+    ds.chain.map((c) => c.id).join(' + '));
+  const soloOnly = Presets.adapt(Presets.PRESETS[ds.id].anchors, ms, ds, { manual: false });
+  const soloMix = Presets.adapt(Presets.mixAnchors(ds.id, ds), ms, ds, { manual: false });
+  const drift = Math.max(...soloOnly.bands.map((v, i) => Math.abs(v - soloMix.bands[i])));
+  ok(drift < 0.25, '…and the profiles it only hints at do not move its tone', drift.toFixed(2) + ' dB of drift');
+  ok(Math.abs(soloOnly.dehiss - soloMix.dehiss) < 0.02 && Math.abs(soloOnly.declick - soloMix.declick) < 0.02,
+    '…nor its repair budgets', soloMix.dehiss.toFixed(3) + ' / ' + soloMix.declick.toFixed(3));
+
+  // a hand-picked profile is a decision: it is used as it is, never blended
+  const manual = Presets.buildParams('vinyl', m, 0.7);
+  const manualWant = Presets.adapt(Presets.PRESETS.vinyl.anchors, m, d, { manual: true });
+  ok(Math.abs(manual.band4 - manualWant.bands[4] * Math.pow(0.7, 0.85)) < 0.05,
+    'a hand-picked profile is used exactly as it is (no blending)',
+    manual.band4.toFixed(2) + ' dB');
+}
+
 section('audit · presets and parameters');
 {
   const anchorKeys = ['bands', 'reso', 'sub', 'subRatio', 'exciter', 'air', 'dehiss', 'declick', 'glue', 'warmth', 'tilt'];
@@ -498,7 +581,10 @@ section('audit · presets and parameters');
     const dflt = Number(m[2]);
     ranges[m[1]] = m[3] === undefined ? [Math.min(0, dflt), Math.max(1, dflt)] : [Number(m[3]), Number(m[4])];
   }
-  ok(declared.length === 36, 'the processor declares 36 parameters', String(declared.length));
+  // 53 = the original 36 + the per-song stage: a sub-sonic corner, a de-esser,
+  // a mono-maker for out-of-phase bass, a glue timing, the de-hisser's crossover
+  // and twelve bands of corrective EQ.
+  ok(declared.length === 53, 'the processor declares the whole per-song parameter set', String(declared.length));
   // A mains line that is not a pure sine. Real hum arrives with its harmonics,
   // and a recording with a 100 Hz buzz has to be notched there *because that was
   // measured* — this is the fixture that proves the harmonic notches are wired to
@@ -509,7 +595,19 @@ section('audit · presets and parameters');
     for (let i = 0; i < out.length; i++) out[i] += second[i] + third[i];
     return out;
   })();
-  const sims = { garage: H.garageSim(DSP, 48000, 6), humrich: humRich, cassette: H.cassetteSim(DSP, 48000, 6), vinyl: H.vinylSim(DSP, 48000, 6), lowbitrate: H.lowBitrateSim(DSP, 48000, 6), clean: DSP.smoothSpec ? H.cassetteSim(DSP, 48000, 6) : null };
+  // A sibilant vocal: the 5–9.5 kHz band sits well above the trend its own mids
+  // predict. Without a fixture like this the de-esser would be a parameter no
+  // measurement ever fires, and the audit could not tell it from a dead one.
+  const sibilant = (() => {
+    const base = H.normalize(H.filter(DSP, H.pink(48000, 6, 0.3, 71), 48000, 'lp', 4000, 0.707), 0.4);
+    let sib = H.filter(DSP, H.filter(DSP, H.noise(48000, 6, 1, 75), 48000, 'hp', 5200, 0.707), 48000, 'lp', 9000, 0.707);
+    sib = H.normalize(sib, 0.4);
+    const env = H.songEnvelope(48000, 6, 0.25);
+    const out = Float32Array.from(base);
+    for (let i = 0; i < out.length; i++) out[i] += sib[i] * env[i];
+    return H.normalize(out, 0.8);
+  })();
+  const sims = { garage: H.garageSim(DSP, 48000, 6), humrich: humRich, cassette: H.cassetteSim(DSP, 48000, 6), vinyl: H.vinylSim(DSP, 48000, 6), lowbitrate: H.lowBitrateSim(DSP, 48000, 6), sibilant, clean: DSP.smoothSpec ? H.cassetteSim(DSP, 48000, 6) : null };
   const outOfRange = [];
   const seen = new Map();                       // which parameters the law actually moves
   for (const key of Object.keys(sims)) {
@@ -545,12 +643,54 @@ section('audit · presets and parameters');
     return [first, second];
   })();
   const stereoM = DSP.measure(narrowPair, 48000);
+  // …and the opposite defect: a bass that is *inverted* in one channel, so the
+  // channels agree everywhere else and cancel below 200 Hz. This is the only
+  // fixture that can ask for the mono-maker, and it is a real fault — a
+  // mis-wired cartridge or a polarity-flipped bass mic does exactly this.
+  const phasePair = (() => {
+    const mid = H.normalize(H.filter(DSP, H.pink(48000, 6, 0.3, 72), 48000, 'hp', 250, 0.707), 0.5);
+    const bass = H.normalize(H.filter(DSP, H.pink(48000, 6, 0.3, 74), 48000, 'lp', 150, 0.707), 0.45);
+    const a = Float32Array.from(mid), b = Float32Array.from(mid);
+    for (let i = 0; i < a.length; i++) { a[i] += bass[i]; b[i] -= bass[i]; }
+    return [H.normalize(a, 0.8), H.normalize(b, 0.8)];
+  })();
+  const phaseM = DSP.measure(phasePair, 48000);
+  // …and a turntable's rumble: real programme with no content below 120 Hz, a
+  // steady 20–40 Hz noise floor under it — the one defect a high-pass can fix
+  // and the only fixture that can ask for it.
+  const rumbly = (() => {
+    const env = H.songEnvelope(48000, 6, 0.12);
+    const p = H.pink(48000, 6, 0.4, 15);
+    const voiced = new Float32Array(p.length);
+    for (let i = 0; i < voiced.length; i++) voiced[i] = p[i] * env[i];
+    let music = H.filter(DSP, voiced, 48000, 'hp', 120, 0.707);
+    let rumble = H.noise(48000, 6, 1, 22);
+    rumble = H.normalize(H.filter(DSP, rumble, 48000, 'lp', 42, 0.707), 0.06);
+    return H.normalize(H.mix([music, rumble]), 0.75);
+  })();
+  const rumbleM = DSP.measure([rumbly], 48000);
+  ok(Presets.buildParams('auto', rumbleM, 0.8).infraHP > 15,
+    'a rumbly recording asks for the sub-sonic guard', Presets.buildParams('auto', rumbleM, 0.8).infraHP.toFixed(1) + ' Hz');
+  ok(Presets.buildParams('auto', rumbleM, 0.8).infraHP < 32,
+    '…and the guard stays below the musical bass', Presets.buildParams('auto', rumbleM, 0.8).infraHP.toFixed(1) + ' Hz');
+  ok(Presets.buildParams('auto', DSP.measure([H.garageSim(DSP, 48000, 6)], 48000), 0.8).infraHP === 0,
+    'a recording with no rumble gets no high-pass');
+  ok(Presets.buildParams('auto', (() => { const q = DSP.measure([H.garageSim(DSP, 48000, 6)], 48000); return q; })(), 0.8).bassMono === 0,
+    'a centred bass is left centred');
+  ok(Presets.buildParams('auto', phaseM, 0.8).bassMono > 0.5,
+    'an inverted bass asks for the mono-maker', Presets.buildParams('auto', phaseM, 0.8).bassMono.toFixed(2));
+  ok(Presets.buildParams('auto', DSP.measure([sibilant], 48000), 0.8).deess > 0.2,
+    'a sibilant recording asks for the de-esser',
+    Presets.buildParams('auto', DSP.measure([sibilant], 48000), 0.8).deess.toFixed(2));
+  ok(Presets.buildParams('auto', DSP.measure([sims.garage], 48000), 0.8).deess < 0.05,
+    'a recording with no sibilance does not', Presets.buildParams('auto', DSP.measure([sims.garage], 48000), 0.8).deess.toFixed(2));
   ok(Presets.buildParams('auto', stereoM, 0.8).width > 0.05,
     'a narrow stereo image asks for width', Presets.buildParams('auto', stereoM, 0.8).width.toFixed(2));
   ok(Presets.buildParams('auto', DSP.measure([sims.garage, sims.garage], 48000), 0.8).width === 0,
     '…and a mono master is left alone');
 
-  const probes = Object.keys(sims).map((key) => () => DSP.measure([sims[key]], 48000)).concat([() => stereoM]);
+  const probes = Object.keys(sims).map((key) => () => DSP.measure([sims[key]], 48000))
+    .concat([() => stereoM, () => phaseM, () => rumbleM]);
   const untouched = declared.filter((k) => {
     if (k === 'bypass') return false;            // the A/B switch, not a law parameter
     let moved = false;
@@ -571,7 +711,11 @@ section('audit · presets and parameters');
   // level references the chain is told to expect) are not amounts — they sit at
   // whatever was measured and are multiplied by a zero amount inside the worklet.
   const RATES = ['noiseFloor', 'hissFloor', 'autoLevel', 'subRatio',
-    'humHz', 'boxF1', 'boxQ1', 'boxF2', 'boxQ2', 'airF', 'airRoom', 'hissTilt', 'hissMax'];
+    'humHz', 'boxF1', 'boxQ1', 'boxF2', 'boxQ2', 'airF', 'airRoom', 'hissTilt', 'hissMax',
+    // the per-song stages add two more: where the de-hisser splits and how the
+    // glue compressor is timed are *measurements* of the file, not amounts —
+    // each is multiplied by its own zero amount inside the worklet.
+    'glueTime', 'hissF'];
   const stillActive = Object.keys(zero).filter((k) => ['bypass'].indexOf(k) === -1 && Math.abs(zero[k]) > 1e-9
     && RATES.indexOf(k) === -1);
   ok(stillActive.length === 0, 'at 0 % every module amount is exactly zero', stillActive.join(', '));
@@ -860,6 +1004,32 @@ section('audit · codecs');
     ];
     const bad = cases.filter(([n, ab, want]) => DSP.detectSampleRate(ab) !== want);
     ok(bad.length === 0, 'sample-rate sniffing reads the container header', bad.map((b) => b[0]).join(', '));
+  }
+
+  // The MP3 defect: lamejs copies whatever it is handed straight into 16-bit
+  // buffers, so samples in −1…1 come out as a *silent* file — one with frames,
+  // a plausible size, and no sound. The app therefore has to scale (and clamp)
+  // before it hands anything over; this is that conversion on its own.
+  {
+    const RSCodecs = require(path.join(ROOT, 'assets', 'js', 'codecs.js'));
+    const src = new Float32Array([0, 0.5, -0.5, 1.5, -1.5, 0.25, NaN, Infinity, -Infinity]);
+    const i16 = RSCodecs.toInt16(src, 0, src.length);
+    const want = [0, 16384, -16384, 32767, -32768, 8192, 0, 0, 0];
+    const bad = want.filter((w, i) => Math.abs(i16[i] - w) > 1);
+    ok(bad.length === 0, 'the PCM handed to the MP3 encoder is 16-bit-scaled and clipped',
+      Array.from(i16).join(' '));
+    ok(Math.abs(i16[1] / 32768 - 0.5) < 0.001, '…at exactly the amplitude it was given');
+    const chunk = RSCodecs.toInt16(src, 3, 5);
+    ok(chunk.length === 2 && chunk[0] === 32767, 'and a slice of the signal is sliced correctly',
+      Array.from(chunk).join(' '));
+    // The worker path cannot run under jsdom, so its half of the same contract
+    // is checked in the source: every encodeBuffer call site must be preceded
+    // by a toInt16 conversion of the very samples it is given.
+    const codecsSrc = read('assets/js/codecs.js');
+    const postsScaled = /const l = toInt16\(left, off, end\);[\s\S]{0,240}left: l, right: r, last/.test(codecsSrc);
+    const mainScaled = /const l = toInt16\(left, off, end\);[\s\S]{0,240}enc\.encodeBuffer\(l, r\)/.test(codecsSrc);
+    ok(postsScaled && mainScaled, 'both encoder paths convert first (the worker path too)',
+      (postsScaled ? 'worker ✓' : 'worker ✗') + ' · ' + (mainScaled ? 'fallback ✓' : 'fallback ✗'));
   }
 
   // MP3 at every rate lamejs supports

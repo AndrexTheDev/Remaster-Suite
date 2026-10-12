@@ -365,6 +365,10 @@
         pill: $('[data-slot="status"]', node),
         diagnosis: $('[data-slot="diagnosis"]', node),
         chips: $('[data-slot="chips"]', node),
+        analysis: $('[data-slot="analysis"]', node),
+        analysisCount: $('[data-slot="analysisCount"]', node),
+        analysisLead: $('[data-slot="analysisLead"]', node),
+        findings: $('[data-slot="findings"]', node),
         canvas: $('[data-slot="wave"]', node),
         waveEmpty: $('[data-slot="waveEmpty"]', node),
         window: $('[data-slot="window"]', node),
@@ -426,6 +430,7 @@
     const chips = UI.chipsFrom(card.analysis.chips, card.after ? card.after.chips : null);
     card.el.chips.textContent = '';
     for (const c of chips) card.el.chips.appendChild(c);
+    refreshAnalysis(card);
     if (card.analysis.window) {
       card.el.window.textContent = t('card.window', {
         a: Math.round(card.analysis.window.start),
@@ -442,6 +447,31 @@
       duration: card.analysis.window ? card.analysis.window.seconds : card.analysis.duration,
     };
     card.wave.setData(data);
+  }
+
+  /**
+   * The detailed analysis panel: every finding, the number it was measured at,
+   * and the dose the file will really get — recomputed whenever the parameters
+   * change, because the doses are what it shows.
+   */
+  function refreshAnalysis(card) {
+    const box = card.el && card.el.analysis;
+    if (!box) return;
+    const a = card.analysis;
+    if (!a || !a.metrics) { box.hidden = true; return; }
+    const params = P.params(card);
+    const r = Presets.recipe(a.metrics, params, P.power(card));
+    card.recipe = r;
+    box.hidden = false;
+    card.el.analysisCount.textContent = r.headline.count === 1
+      ? t('card.findOne')
+      : t('card.findMany', { n: r.headline.count });
+    card.el.analysisLead.textContent = t('card.analysisLead', {
+      char: t('char.' + r.character),
+      severe: r.headline.severe,
+    });
+    card.el.findings.textContent = '';
+    card.el.findings.appendChild(UI.findingsList(r, global.RSi18n.lang));
   }
 
   /* -------------------------------------------------------------- card wiring */
@@ -825,8 +855,11 @@
       UI.toast(t('toast.saved', { name: res.name }), 'ok');
     } catch (err) {
       setStatus(card, 'error');
-      setNote(card, t('err.render') + ' ' + (err && err.message ? err.message : ''), true);
-      UI.toast(t('toast.renderFail', { msg: (err && err.message) || '?' }), 'bad', 6000);
+      const msg = err && err.message;
+      // the encoder refusing its own output is a real, nameable failure — it
+      // must never be saved as a file that "worked"
+      setNote(card, /^mp3-/.test(msg || '') ? t('err.mp3') : t('err.render') + ' ' + (msg || ''), true);
+      UI.toast(/^mp3-/.test(msg || '') ? t('err.mp3') : t('toast.renderFail', { msg: msg || '?' }), 'bad', 6000);
     }
     Job.end();
     State.busy = false;
@@ -920,7 +953,8 @@
       lines.push('  out      : ' + ((c.result && c.result.name) || '—'));
       lines.push('  profile  : ' + presets + '  (power ' + Math.round(P.power(c) * 100) + ' %)');
       lines.push('  format   : ' + (c.result ? c.result.format.toUpperCase() + ' · ' + c.result.rate + ' Hz' : '—'));
-      lines.push('  detected : ' + (a ? a.diag.id : '?') + (a ? ' [' + a.diag.issues.join(', ') + ']' : ''));
+      lines.push('  detected : ' + (a ? (a.diag.chain && a.diag.chain.length ? a.diag.chain.join('+') : a.diag.id) : '?')
+        + (a ? ' [' + a.diag.issues.join(', ') + ']' : ''));
       lines.push('  quality  : ' + (a ? a.score : '?') + ' / 100 before');
       lines.push('');
     }

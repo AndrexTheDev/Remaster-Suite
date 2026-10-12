@@ -53,6 +53,12 @@ const DEFAULT_PARAMS = {
   declick: 0, reso: 0, glue: 0, warmth: 0, tilt: 0,
   band0: 0, band1: 0, band2: 0, band3: 0, band4: 0, band5: 0,
   noiseFloor: -70, autoLevel: 1,
+  // the per-song stages (see remaster-processor.js): a high-pass corner, the
+  // sibilance control, the mono-maker, the glue timing, the de-hisser split and
+  // the twelve bands of the corrective EQ
+  infraHP: 0, deess: 0, bassMono: 0, glueTime: 0.5, hissF: 3200,
+  eq0: 0, eq1: 0, eq2: 0, eq3: 0, eq4: 0, eq5: 0,
+  eq6: 0, eq7: 0, eq8: 0, eq9: 0, eq10: 0, eq11: 0,
 };
 
 /**
@@ -200,6 +206,32 @@ function cassetteSim(RSDSP, sr, seconds) {
 }
 
 /** Vinyl rip: rumble, hum, crackle, full but slightly soft top end. */
+/**
+ * The record that is most of a private archive: an old, crackly, slightly hissy
+ * transfer that was later pushed through a 128 kbit/s encoder. Three problems at
+ * once — crackle, hiss and a codec brick wall — which is exactly the case a
+ * single profile cannot serve, because whichever one wins the vote, the
+ * treatments the other two need are capped by it.
+ *
+ * The codec is modelled the way the other sims model it: the encoder's own
+ * low-pass (three poles at 14.8 kHz) plus the tiny amount of noise it adds.
+ * (Verified against a real lamejs 128 kbit/s round trip: brickwall 1.00 both.)
+ */
+function comboSim(RSDSP, sr, seconds) {
+  const env = songEnvelope(sr, seconds, 0.05);
+  let s = mul(pink(sr, seconds, 0.40, 81), 1);
+  for (let i = 0; i < s.length; i++) s[i] *= env[i];
+  s = filter(RSDSP, s, sr, 'lp', 17000, 0.707);          // the record
+  s = filter(RSDSP, s, sr, 'hp', 28, 0.707);             // a turntable's bottom
+  s = mix([s, mul(noise(sr, seconds, 1, 82), 0.0030)]);  // surface noise
+  s = addCrackle(s, 10, 0.9, 83);
+  s = mix([s, mul(noise(sr, seconds, 1, 84), 0.0050)]);  // transfer hiss
+  s = filter(RSDSP, s, sr, 'lp', 14800, 0.60);           // the encoder it went through
+  s = filter(RSDSP, s, sr, 'lp', 14800, 0.60);
+  s = filter(RSDSP, s, sr, 'lp', 14800, 0.60);
+  s = mix([s, mul(noise(sr, seconds, 1, 85), 0.00005)]);
+  return normalize(s, 0.72);
+}
 function vinylSim(RSDSP, sr, seconds) {
   const env = songEnvelope(sr, seconds, 0.04);
   let s = mul(pink(sr, seconds, 0.40, 31), 1);
@@ -289,6 +321,6 @@ function summarize() {
 module.exports = {
   ROOT, loadProcessor, loadDsp, render, DEFAULT_PARAMS,
   tone, noise, pink, mix, mul, filter, rng, peak, songEnvelope, addCrackle, normalize,
-  garageSim, cassetteSim, vinylSim, lowBitrateSim,
+  garageSim, cassetteSim, vinylSim, lowBitrateSim, comboSim,
   ok, section, summarize, stats: () => ({ passed, failed }),
 };

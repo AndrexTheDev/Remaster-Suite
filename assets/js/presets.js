@@ -60,6 +60,7 @@
     box: 3.5,          // dB taken out of the strongest measured resonance
     width: 0.55,       // stereo width restoration (≈ +3.4 dB of side signal)
     airRoom: 0.95,     // how much top end the synthesiser may rebuild
+    eq: 6,             // dB the per-song corrective EQ may move a band in auto
   };
 
   /* The same for a profile the *user* picked by hand.
@@ -75,6 +76,7 @@
   const MANUAL = {
     reso: 0.80, sub: 0.80, exciter: 0.70, air: 0.80,
     dehiss: 0.95, declick: 0.95, glue: 0.55, warmth: 0.65, tilt: 0.50,
+    eq: 9,             // a profile the user picked may correct more of the shape
   };
 
   /* -------------------------------------------------------------------------
@@ -113,7 +115,7 @@
       anchors: {
         bands: [1.5, -3.0, -2.0, 0.5, 1.5, 1.8],
         reso: 0.40, sub: 0.45, subRatio: 0.5, exciter: 0.35, air: 0.35,
-        dehiss: 0.55, declick: 0.75, glue: 0.25, warmth: 0.55, tilt: 0.0,
+        dehiss: 0.55, declick: 0.85, glue: 0.25, warmth: 0.55, tilt: 0.0,
       },
     },
     cassette: {
@@ -155,6 +157,125 @@
    * @param {object} m metrics from RSDSP.measure()
    * @returns {{id:string, scores:object}} best matching preset + raw scores
    */
+  /**
+   * The score at which a profile is *named* in the diagnosis. Below it the
+   * evidence is real but faint (every vinyl rip is a little boxy, every
+   * cassette a little dull) and naming it would turn the sentence into a
+   * shopping list. It still counts towards the tone — see TONE_MIN.
+   */
+  const CHAIN_MIN = 0.30;
+
+  /**
+   * The score at which a profile starts to colour the *tone* and the taste
+   * amounts. Lower than CHAIN_MIN on purpose: a hint of garage in a vinyl rip is
+   * still a hint, and below this line the number is noise.
+   */
+  const TONE_MIN = 0.12;
+
+  /** The evidence each profile carries, in score order. */
+  function evidence(diag) {
+    const scores = (diag && diag.scores) || {};
+    const list = [];
+    for (const k of Object.keys(scores)) {
+      // a band-limited source (telephone, dictaphone, a 32 kHz master) has no
+      // profile of its own: what it needs is the top end rebuilt, which is the
+      // low-bitrate profile's job — the same equation the label uses.
+      const id = k === 'narrowband' ? 'lowbitrate' : k;
+      const p = PRESETS[id];
+      if (!p || !p.anchors) continue;
+      const found = list.find((e) => e.id === id);
+      if (found) found.w = Math.max(found.w, scores[k]);
+      else list.push({ id, w: scores[k] });
+    }
+    return list.sort((a, b) => b.w - a.w);
+  }
+
+  /**
+   * What this file is, in problems rather than in one label.
+   *
+   * Real files are rarely one thing: the most common record in a private
+   * archive is a 1970s album, ripped from vinyl, then compressed to 128 kbit/s
+   * by whoever put it online — crackle, a dull top end, surface noise and a
+   * codec cliff, all at once. Picking the one profile with the highest score
+   * and throwing the rest away is what makes such a file come out half
+   * restored. The chain is the list of profiles that carry evidence, weighted
+   * by how much evidence each one carries; a file with a single problem gets a
+   * chain of one and behaves exactly as it always did.
+   */
+  function chainOf(scores, winner, confidence) {
+    const list = [];
+    for (const k of Object.keys(scores || {})) {
+      // `narrowband` has no profile of its own — it is the *reason* a
+      // band-limited file wants the low-bitrate profile's top-end rebuild — but
+      // it is what the file is, so the chain (and the sentence) keeps the name.
+      const id = k;
+      if (scores[k] < CHAIN_MIN) continue;
+      const found = list.find((c) => c.id === id);
+      if (found) found.w = Math.max(found.w, scores[k]);
+      else list.push({ id, w: scores[k] });
+    }
+    if (!list.some((c) => c.id === winner || (winner === 'lowbitrate' && c.id === 'narrowband'))) {
+      list.push({ id: winner, w: Math.max(confidence, CHAIN_MIN) });
+    }
+    const sum = list.reduce((n, c) => n + c.w, 0) || 1;
+    for (const c of list) c.w = c.w / sum;
+    list.sort((a, b) => b.w - a.w);
+    return list;
+  }
+
+  /** Stage budgets a profile is allowed to *unlock*: permission, not dose. */
+  const CHAIN_PERMISSION = ['reso', 'sub', 'exciter', 'air', 'dehiss', 'declick'];
+  /** Stages that are taste rather than repair: those are mixed, not unioned. */
+  const CHAIN_TASTE = ['glue', 'warmth', 'tilt'];
+
+  /**
+   * The profile a file actually gets: one profile's anchors when it has one
+   * problem, a *synthesis* of the profiles it has evidence for when it has
+   * several.
+   *
+   * The rule is the one sentence that makes this safe: **a profile is a set of
+   * permissions and one tone curve.** So
+   *   · the tone bands are the weighted mix of the detected profiles' curves
+   *     (a file that is 70 % vinyl and 30 % codec gets 70/30 of the two
+   *     curves, not one of them);
+   *   · a stage's *permission* is the union — the most any detected profile
+   *     allows — because the amount that stage actually applies is still dosed
+   *     from the measurement (`demand`), so a wider permission can only ever
+   *     be used by evidence that is already there. This is what stops a codec
+   *     cliff from being capped by the vinyl ceiling, or a hissy cassette from
+   *     being capped by the vinyl one;
+   *   · taste amounts (glue, warmth, tilt) are mixed like the tone, because
+   *     nobody needs the *sum* of two personalities.
+   */
+  function mixAnchors(id, diag) {
+    const base = PRESETS[id] || PRESETS.auto;
+    if (!base.anchors) return base.anchors;
+    const parts = evidence(diag)
+      .filter((e) => e.w >= TONE_MIN)
+      .map((e) => ({ id: e.id, w: e.w, a: (PRESETS[e.id] || base).anchors }));
+    if (parts.length < 2) return base.anchors;
+    const sum = parts.reduce((n, p) => n + p.w, 0) || 1;
+    const out = {};
+    // the tone is the mix of the curves, weighted by the evidence
+    out.bands = [];
+    for (let i = 0; i < 6; i++) out.bands[i] = parts.reduce((n, p) => n + p.w * (p.a.bands[i] || 0), 0) / sum;
+    // a *permission* is not a dose: the profile that was detected keeps its own
+    // (it is the diagnosis), and every other profile adds its permission in
+    // proportion to how much evidence it carries — no cliff at a threshold, and
+    // no faint reading unlocking a stage the file has not earned.
+    for (const k of CHAIN_PERMISSION) {
+      let v = base.anchors[k] || 0;
+      for (const p of parts) {
+        if (p.id === id) continue;
+        v = Math.max(v, (p.a[k] || 0) * smoothstep(TONE_MIN, 0.40, p.w));
+      }
+      out[k] = v;
+    }
+    for (const k of CHAIN_TASTE) out[k] = parts.reduce((n, p) => n + p.w * (p.a[k] || 0), 0) / sum;
+    out.subRatio = parts.reduce((n, p) => n + p.w * (p.a.subRatio || 0.5), 0) / sum;
+    return out;
+  }
+
   function classify(m) {
     const cut = m.hfCutoff || 0;
     const crackle = clamp(m.crackleIndex, 0, 1);
@@ -187,9 +308,15 @@
       * (crackle > 0.06 ? 1 : 0.42), 0, 1);
     // cassette: steady hiss, flat noise floor, rolled-off top, no crackle
     s.cassette = clamp(0.75 * hiss + 0.25 * flat * (1 - crackle) + 0.20 * dull * (1 - brick), 0, 1);
-    // low bitrate / MP3: hard spectral cliff on otherwise clean material
-    s.lowbitrate = clamp((0.62 * brick + 0.30 * clean * (1 - hiss) + 0.16 * dull * (1 - flat))
-      * (1 - 0.5 * hiss) * (1 - 0.5 * crackle), 0, 1);
+    // low bitrate / MP3: a hard spectral cliff. The cliff itself is *measured*,
+    // so it counts in full; the two circumstantial terms (clean material, a
+    // dull top end) are what the hiss/crackle discounts are for — a noisy file
+    // can look dull for other reasons, but it cannot fake a brick wall. Without
+    // this split, the most common record in a private archive — an old vinyl
+    // rip that was later pushed through a 128 kbit/s encoder — lost its codec
+    // treatment exactly because it was also hissy and crackly.
+    s.lowbitrate = clamp(0.62 * brick
+      + (0.30 * clean * (1 - hiss) + 0.16 * dull * (1 - flat)) * (1 - 0.5 * hiss) * (1 - 0.5 * crackle), 0, 1);
     // 60s/70s garage or one-mic room session: thin, boxy, dull, noisy, analogue —
     // and, because it was cut in a room with whatever wiring was there, often
     // hummy as well
@@ -201,8 +328,10 @@
     let best = 'general', top = 0;
     for (const k of Object.keys(s)) if (s[k] > top) { top = s[k]; best = k; }
     if (best === 'narrowband') best = 'lowbitrate';
+    const id = top < 0.40 ? 'general' : best;
     return {
-      id: top < 0.40 ? 'general' : best,
+      id,
+      chain: chainOf(s, id === 'general' ? 'general' : id, top),
       scores: s, confidence: top,
       crackle, hum, rumble, hiss, clean, dull, brick, thin, mud, harsh,
       analogNoise: hiss, flat,
@@ -295,6 +424,53 @@
     const hissNeed = clamp((m.hissAmount || 0) * clamp((m.noiseConfidence || 0) * 1.5, 0, 1), 0, 1);
     const crackleNeed = clamp(m.crackleIndex || 0, 0, 1);
 
+    /* ── the six per-song decisions ────────────────────────────────────────
+     * Everything above is a *problem* the profile then treats. Everything below
+     * is a property of this one file — a rumble it has, a sibilance it has, an
+     * out-of-phase bottom, an amount of percussive movement, and where its
+     * noise actually starts — that no profile could know about. */
+    const conf = clamp((m.noiseConfidence || 0) * 1.5, 0, 1);
+
+    // Sibilance: the 5–9 kHz band above the trend the file's own mids predict.
+    // 2.5 dB is the dead zone (that is an "s" being present), 8 dB is a
+    // problem; a de-esser is a *repair*, so it needs evidence, not a hunch.
+    const sibDb = clamp(m.sibExcessDb || 0, 0, 16);
+    const sibNeed = smoothstep(2.5, 8, sibDb);
+
+    // Sub-sonic rumble, measured where only rumble can be: in the quiet
+    // passages. Two guards, because this is the one measurement a *clean*
+    // recording can trip by accident:
+    //   · the noise confidence — on material with no quiet passage at all, the
+    //     "quiet" frames are really the music, and there is nothing to measure;
+    //   · the mains score — a 50/60 Hz line leaks into the band *below* it at
+    //     any sane FFT resolution, and a hum is a notch, not a reason to take
+    //     the bottom off the record.
+    const infraDb = clamp(m.infraExcessDb || 0, 0, 26);
+    const infraNeed = smoothstep(9, 20, infraDb) * smoothstep(0.12, 0.45, conf)
+      * (1 - 0.5 * clamp(m.humScore || 0, 0, 1));
+
+    // An out-of-phase bottom: the channels are correlated in the mids but
+    // *cancel* below 200 Hz. Only stereo material can have it, and only when
+    // there is real side energy down there to cancel in the first place.
+    const st = m.stereo || {};
+    const lowRho = (m.channels > 1 && isFinite(st.low)) ? st.low : 1;
+    const widenGuard = m.channels > 1 && isFinite(st.mid) ? 1 : 0;
+    const phaseNeed = widenGuard * smoothstep(0.55, 0.05, lowRho);
+
+    // How percussive the material is (crest factor: a bed of sound sits at
+    // 12–15 dB, hits and notes at 18–22 dB). It decides how the glue
+    // compressor is timed — a compressor that grabs a drum recording the way
+    // it grabs a pad pumps it.
+    const percussive = clamp(((m.crestDb === undefined ? 14 : m.crestDb) - 13) / 8, 0, 1);
+
+    // Where this file's noise actually starts (measured per band from the
+    // quiet-frame spectrum against the music in the same band). The *repair*
+    // branch of the de-hisser may reach down from the band the analyser keys
+    // on (4 kHz), never above it — see DeHiss.setXover — so the usable range of
+    // the split is 2.2–4 kHz: enough to follow a cassette's 2.5 kHz hiss edge,
+    // and never a number measured somewhere the gate cannot see.
+    const hissStartHz = clamp(m.hissStartHz || 3200, 2200, 4000);
+
     // is there headroom to add anything at all? (a master that already peaks at
     // −0.2 dBFS must not receive another 3 dB of bass)
     const peakDb = clamp(m.peakDb === undefined ? -6 : m.peakDb, -30, 0);
@@ -312,6 +488,8 @@
       needSub: clamp(subDeficitDb / 12, 0, 1),
       humNeed, resoNeed: clamp((resoExcess - 2) / 8, 0, 1), resoExcess,
       resoList, widenNeed, airRoom, codecRoom,
+      // the per-song six
+      sibDb, sibNeed, infraDb, infraNeed, lowRho, phaseNeed, percussive, hissStartHz, conf,
       needMud: clamp(mudExcessDb / 10, 0, 1),
       needHarsh: clamp(harshExcessDb / 8, 0, 1),
       needReso: clamp(Math.max(mudExcessDb / 12, harshExcessDb / 10, boxExcessDb / 10,
@@ -319,6 +497,192 @@
       bandExcess: [0, 1, 2, 3, 4, 5].map(band),
       confidence: c.confidence,
     };
+  }
+
+  /* ------------------------------------------------------- the per-song curve */
+
+  /**
+   * The six fixed bands of the profile's tone stage. Mirrored from the worklet
+   * (chain 1) so the per-song correction can be computed *net* of what the
+   * profile already does — the one thing that keeps two stages from correcting
+   * the same problem twice.
+   */
+  const PROFILE_EQ = [
+    ['lowshelf', 60, 0.70], ['peak', 200, 0.80], ['peak', 450, 1.00],
+    ['peak', 1300, 0.90], ['peak', 3200, 0.85], ['highshelf', 7000, 0.70],
+  ];
+
+  /**
+   * Magnitude of one RBJ biquad at frequency `f`, in dB — built from exactly
+   * the coefficients the worklet's Biquad computes, so "the profile already
+   * does +3 dB here" is a measurement and not an estimate.
+   */
+  function biquadDb(type, sr, f0, q, gainDb, f) {
+    const w0 = 2 * Math.PI * clamp(f0, 5, sr * 0.49) / sr;
+    const c = Math.cos(w0), sn = Math.sin(w0);
+    const A = Math.pow(10, gainDb / 40);
+    let b0, b1, b2, a0, a1, a2;
+    if (type === 'lowshelf' || type === 'highshelf') {
+      const al = sn / 2 * Math.sqrt((A + 1 / A) * (1 / q - 1) + 2);
+      const sq = 2 * Math.sqrt(A) * al;
+      if (type === 'lowshelf') {
+        b0 = A * ((A + 1) - (A - 1) * c + sq); b1 = 2 * A * ((A - 1) - (A + 1) * c);
+        b2 = A * ((A + 1) - (A - 1) * c - sq);
+        a0 = (A + 1) + (A - 1) * c + sq; a1 = -2 * ((A - 1) + (A + 1) * c);
+        a2 = (A + 1) + (A - 1) * c - sq;
+      } else {
+        b0 = A * ((A + 1) + (A - 1) * c + sq); b1 = -2 * A * ((A - 1) + (A + 1) * c);
+        b2 = A * ((A + 1) + (A - 1) * c - sq);
+        a0 = (A + 1) - (A - 1) * c + sq; a1 = 2 * ((A - 1) - (A + 1) * c);
+        a2 = (A + 1) - (A - 1) * c - sq;
+      }
+    } else {
+      const al = sn / (2 * q);
+      b0 = 1 + al * A; b1 = -2 * c; b2 = 1 - al * A;
+      a0 = 1 + al / A; a1 = -2 * c; a2 = 1 - al / A;
+    }
+    const w = 2 * Math.PI * clamp(f, 1, sr * 0.5) / sr;
+    const cw = Math.cos(w), sw = Math.sin(w);
+    const c2 = Math.cos(2 * w), s2 = Math.sin(2 * w);
+    const nr = b0 + b1 * cw + b2 * c2, ni = -(b1 * sw + b2 * s2);
+    const dr = a0 + a1 * cw + a2 * c2, di = -(a1 * sw + a2 * s2);
+    const num = Math.sqrt(nr * nr + ni * ni), den = Math.sqrt(dr * dr + di * di);
+    return 20 * Math.log10(Math.max(num, 1e-9) / Math.max(den, 1e-9));
+  }
+
+  /** What the profile's six bands already do at `f`, in dB. */
+  function profileDb(bands, sr, f) {
+    let sum = 0;
+    for (let i = 0; i < PROFILE_EQ.length; i++) {
+      const d = PROFILE_EQ[i];
+      const g = bands && isFinite(bands[i]) ? bands[i] : 0;
+      if (Math.abs(g) < 0.01) continue;
+      sum += biquadDb(d[0], sr, d[1], d[2], g, f);
+    }
+    return sum;
+  }
+
+  /** 3-point smoothing that keeps the ends in place. */
+  function smoothCurve(v) {
+    const out = v.slice();
+    for (let i = 1; i < v.length - 1; i++) out[i] = (v[i - 1] + 2 * v[i] + v[i + 1]) / 4;
+    return out;
+  }
+
+  /**
+   * Wide (5-point) trend with mirrored ends: what the curve would look like if
+   * the band under test were removed and the surrounding bands were asked what
+   * belongs between them.
+   */
+  function wideTrend(v) {
+    const n = v.length, out = new Array(n);
+    const at = (i) => v[Math.max(0, Math.min(n - 1, i))];
+    for (let i = 0; i < n; i++) {
+      out[i] = (at(i - 2) + at(i - 1) + at(i) + at(i + 1) + at(i + 2)) / 5;
+    }
+    const t2 = new Array(n);
+    for (let i = 0; i < n; i++) {
+      t2[i] = (out[Math.max(0, i - 1)] + out[i] + out[Math.min(n - 1, i + 1)]) / 3;
+    }
+    return t2;
+  }
+
+  /**
+   * The per-song corrective EQ — the *shape* of this recording, twelve bands.
+   *
+   * The profile's six bands are broad: they move the tone, the tilt, the
+   * character. What they cannot do is a *local* imbalance — a hollow 800 Hz, a
+   * peaky 1.6 kHz, a scooped 3 kHz, all of them one or two bands wide and
+   * different in every file. That is what this curve is: the file's own twelve
+   * measured bands compared with the trend its *neighbouring* bands predict, so
+   * a band that sticks out is pulled back and one that sits in a hole is lifted,
+   * while the recording's overall tone is left alone (that belongs to the
+   * profile and the power slider, and every file is meant to keep its own).
+   *
+   * The rules that keep it honest:
+   *   · a ±1.5 dB dead zone — natural ripple is not a defect, and chasing it is
+   *     how an automatic mode starts to sound like its own reflection;
+   *   · the *local* part of what the profile already does is subtracted, so a
+   *     bump the profile has already fixed is not fixed twice (its smooth part
+   *     is character and stays untouched);
+   *   · boosts are refused where they would only lift noise (a band less than
+   *     ~12 dB above the measured floor there) and where the file is empty — and
+   *     halved when there was no quiet passage to measure a floor in, because
+   *     then the noise margin is simply unknown;
+   *   · a codec's cliff is never boosted (that top end was removed; rebuilding
+   *     it is the air synthesiser's job, a shelf would only lift the noise under
+   *     the edge);
+   *   · no bass cut without measured excess in the bottom octave — the one
+   *     correction that can make a record sound small.
+   *
+   * @returns {number[]} twelve gains in dB, in EQ_CENTERS order
+   */
+  function eqCurve(m, bands, manual) {
+    const centers = (m.eqCenters && m.eqCenters.length === 12) ? m.eqCenters : [50, 80, 125, 200, 320, 500, 800, 1250, 2000, 3200, 5000, 8000];
+    const lvl = (m.bandDb && m.bandDb.length === 12) ? m.bandDb : null;
+    if (!lvl) return centers.map(() => 0);
+    const sr = m.sr || 48000;
+    const cap = manual ? 9 : 6;
+
+    // the file's local departure from its own trend
+    const trend = wideTrend(lvl);
+    let local = lvl.map((v, i) => (isFinite(v) ? v - trend[i] : 0));
+    // …minus the local part of the profile's response: what the profile has
+    // already shaped locally must not be shaped again
+    const prof = centers.map((f) => profileDb(bands, sr, f));
+    const profTrend = wideTrend(prof);
+    local = local.map((v, i) => v + (prof[i] - profTrend[i]));
+
+    let curve = local.map((v) => {
+      const g = -v;                                    // flatten the local shape
+      return Math.sign(g) * Math.max(0, Math.abs(g) - 1.5);
+    });
+    curve = smoothCurve(curve);
+
+    // is the noise floor in this band known well enough to allow a boost?
+    const conf = clamp((m.noiseConfidence || 0) * 1.5, 0, 1);
+    const med = lvl.slice().sort((a, b) => a - b)[lvl.length >> 1];
+    for (let i = 0; i < curve.length; i++) {
+      const f = centers[i];
+      let g = clamp(curve[i], -cap, cap);
+      if (!isFinite(lvl[i]) || (med - lvl[i]) > 22) {
+        // the band holds no music: nothing to balance, and a boost would only
+        // raise whatever is left
+        g = 0;
+      } else if (g > 0) {
+        const snr = (m.bandSnrDb && isFinite(m.bandSnrDb[i])) ? m.bandSnrDb[i] : 40;
+        if (conf > 0.25) {
+          // a band that is mostly noise: a boost there is a boost of the noise
+          if (snr < 12) g *= 0.2;
+          else if (snr < 18) g *= 0.55;
+        } else {
+          g *= 0.55;                                   // floor unknown → be careful
+        }
+        // above a codec cliff the content was *removed*
+        if (m.brickwall > 0.25 && m.cliffHz && f > m.cliffHz * 1.0) g = Math.min(g, 0.8);
+      } else if (g < 0 && f <= 80) {
+        // Taking the bottom away is the one correction that can remove what the
+        // recording actually has, so it needs more evidence than the dead zone:
+        // an excess this file measured *against its own trend*, not just a dip
+        // in the trend fit. (There is no separate "bass excess" number in the
+        // measurement — the band's own departure is the measurement.)
+        const excess = clamp(-local[i], 0, 12);
+        if (excess < 3) g = 0;
+        else g = Math.max(g, -0.5 * excess);
+      }
+      curve[i] = clamp(g, -cap, cap);
+    }
+    return curve;
+  }
+
+  /** What the per-song curve does at one frequency, in dB (real biquads). */
+  function curveDb(curve, centers, q, sr, f) {
+    let sum = 0;
+    for (let i = 0; i < centers.length; i++) {
+      if (Math.abs(curve[i]) < 0.01) continue;
+      sum += biquadDb('peak', sr, centers[i], q, curve[i], f);
+    }
+    return sum;
   }
 
   /**
@@ -502,6 +866,55 @@
      * the tilt is actually audible. */
     a.tilt = clamp(a.tilt + clamp((m.tilt || 0) / 45, -0.20, 0.20) * (D.confidence > 0.35 ? 1 : 0.5), -cap.tilt, cap.tilt);
 
+    /* ── 9 · the per-song stages ──────────────────────────────────────────
+     * Six decisions that no profile can make, because they are about this one
+     * file. Each is a repair: it is dosed by the measurement of the defect and
+     * it does nothing at all when nothing was measured. */
+
+    // 9a · sub-sonic rumble → a high-pass at the measured corner. The corner
+    // *is* the amount, and it stays low on purpose: 18–30 Hz is where rumble
+    // lives and where no instrument does, so a 12 dB/octave filter there takes
+    // out what a turntable (or a desk, or a passing lorry) put in without
+    // touching the bass above it. A "repair" that reaches into 40 Hz would be
+    // taking the record's bottom away, which is the opposite of remastering.
+    a.infraHP = D.infraNeed > 0.02 ? clamp(18 + 12 * D.infraNeed, 0, 30) : 0;
+
+    // 9b · sibilance → the dynamic de-esser amount (up to the cap at full need)
+    a.deess = clamp(0.85 * D.sibNeed * D.headroom, 0, 0.85);
+
+    // 9c · stereo: an out-of-phase bottom is folded to the centre, and the
+    // widening is only asked for where the image is narrow *and* centred —
+    // widening a recording with a phase problem makes the phase problem
+    // audible, which is exactly what the bass-mono stage above prevents.
+    a.bassMono = clamp(D.phaseNeed * 1.0, 0, 1);
+
+    // 9d · how a *hit* behaves → the glue compressor's timing. Percussive
+    // material gets a slower attack and a shorter release (let the hit
+    // through, be back at unity for the next one); sustained material gets the
+    // slow, smooth setting that is what "glue" means on a pad or a string bed.
+    a.glueTime = clamp(1 - D.percussive * 0.85, 0.15, 1);
+
+    // 9e · where the hiss starts → the de-hisser's crossover. A rate, not an
+    // amount: it is the measurement, and the worklet multiplies by the amount.
+    a.hissF = D.hissStartHz;
+
+    // 9f · the per-song corrective EQ, computed net of the profile's own bands.
+    // Its amount follows the master amount like every other amount (at 0 % the
+    // curve is not applied at all), but the *shape* is this file's.
+    a.ceq = eqCurve(m, a.bands, manual).map((g) => clamp(g, -cap.eq, cap.eq));
+
+    // 9g · the de-clicker on percussive material. Its detector separates a
+    // click from a snare by how far the fast envelope stands above the slow
+    // one — and a drum hit does that too, which is why a recording with a lot
+    // of them gets a little less of it.
+    // The exception is the recording that is *made* of clicks: crackle raises
+    // the crest factor just like a drum kit does, so the "percussive" estimate
+    // is confounded by the very defect this stage repairs. Where the crackle
+    // detector has actually heard crackle, the reduction stands down — a
+    // crackly record is the one case where full de-clicking is what the file
+    // needs, whatever its crest factor says.
+    a.declick = clamp(a.declick * (1 - 0.3 * D.percussive * (1 - D.crackleNeed)), 0, cap.declick);
+
     return a;
   }
 
@@ -517,6 +930,7 @@
   const NEUTRAL = {
     autoLevel: 1, noiseFloor: -70, hissFloor: -80, airRoom: 0.5, airF: 6000, subRatio: 0.5,
     humHz: 50, boxF1: 120, boxF2: 240, boxQ1: 3, boxQ2: 3,
+    hissF: 3200, glueTime: 0.5, infraHP: 0,
   };
 
   function num(v, dflt) {
@@ -530,7 +944,10 @@
     const id = (presetId === 'auto' || !PRESETS[presetId]) ? diag.id : presetId;
     const base = PRESETS[id] || PRESETS.auto;
     const manual = !!(presetId && presetId !== 'auto' && PRESETS[presetId]);
-    const a = adapt(base.anchors, metrics, diag, { manual });
+    // A hand-picked profile is a decision, not a diagnosis: it is used as it
+    // is. The automatic mode synthesises the profile from every problem the
+    // file was found to have (see mixAnchors).
+    const a = adapt(manual ? base.anchors : mixAnchors(id, diag), metrics, diag, { manual });
     const p = clamp(power, 0, 1);
     // Amounts follow a slightly concave curve, so the low range of the slider is
     // useful. `on` is the "switched on at all" factor: it is *exactly* 0 at 0 %,
@@ -597,8 +1014,22 @@
       // measurement found to be noise rather than programme (dB)
       hissTilt: num(metrics.musicTiltDb, 0),
       hissMax: num(clamp((metrics.hissTiltStepDb || 0) - 1.0, 0, 18), 0),
+      // ── the per-song stages ─────────────────────────────────────────────
+      // Amounts follow the same curves as everything else: the rumble filter's
+      // corner follows the *gate* (a repair is either on or off, but it must
+      // not switch on at 2 %), the de-esser and the bass-mono stage are
+      // amounts, and the corrective EQ follows `amt` like every other band.
+      infraHP: num(fix(a.infraHP), 0),
+      deess: num(repair(a.deess), 0),
+      bassMono: num(fix(a.bassMono), 0),
+      glueTime: num(a.glueTime, 0.5),
+      hissF: num(clamp(a.hissF, 2000, 8000), 3200),
       autoLevel: 1,
     };
+    // the corrective EQ: twelve bands, same amount curve as the profile's
+    for (let i = 0; i < 12; i++) {
+      params['eq' + i] = num(clamp((a.ceq && a.ceq[i]) || 0, -9, 9) * amt, 0);
+    }
     if (overrides) Object.assign(params, overrides);
     // Belt and braces: whatever the measurement was, the worklet never receives a
     // non-finite number. A `NaN` parameter does not fail loudly — it either
@@ -610,6 +1041,153 @@
       if (typeof v === 'number' && !isFinite(v)) params[k] = NEUTRAL[k] === undefined ? 0 : NEUTRAL[k];
     }
     return params;
+  }
+
+  /**
+   * The whole per-song analysis, item by item.
+   *
+   * This is the answer to "what does this file actually need": every finding
+   * carries the number it was measured at and the treatment it produced — and
+   * the treatments are the *parameters that will actually be used*, not a
+   * description of the profile. A file with nothing wrong produces a short,
+   * honest list instead of a shopping list.
+   *
+   * @param {object} m metrics from RSDSP.measure()
+   * @param {object} [params] the built parameter map (for the doses)
+   * @param {number} [power] 0..1
+   * @returns {{findings:Array, headline:{count:number,severe:number}, character:string}}
+   */
+  function recipe(m, params, power) {
+    const p = params || {};
+    const D = demand(m);
+    const st = m.stereo || {};
+    const out = [];
+    const add = (key, sev, value, act) => {
+      out.push({ key, sev: clamp(sev, 0, 1), value: value || null, act: act || null });
+    };
+    const dbv = (n) => ({ n, unit: 'db' });
+    const pct = (n) => ({ n, unit: 'pct' });
+    // an action carries the parameter it ends up setting, in its own unit, so
+    // the UI can print the dose the file will really get
+    const act = (key, n, unit) => ({ key, value: n === null || n === undefined ? null : { n, unit: unit || 'pct' } });
+
+    /* ── noise and surface defects ─────────────────────────────────────── */
+    if (D.infraNeed > 0.02) {
+      add('rumble', D.infraNeed, dbv(D.infraDb), act('infra', p.infraHP || 0, 'hz'));
+    }
+    if ((m.humScore || 0) > 0.2) {
+      add('hum', clamp(m.humScore, 0, 1), dbv(m.humPeakDb || 0), act('hum', 42 * (p.hum || 0), 'db'));
+      if ((m.hum2Db || 0) > 2 || (m.hum3Db || 0) > 2) {
+        add('humHarm', clamp(Math.max(m.hum2Db || 0, m.hum3Db || 0) / 20, 0, 1),
+          dbv(Math.max(m.hum2Db || 0, m.hum3Db || 0)), act('humHarm', null));
+      }
+    }
+    if ((m.hissAmount || 0) > 0.12) {
+      add('hiss', clamp(m.hissAmount, 0, 1), dbv(m.hissTiltStepDb || 0),
+        act('dehiss', p.dehiss || 0));
+      add('hissBand', clamp(m.hissAmount, 0, 1), { n: p.hissF || m.hissStartHz || 3200, unit: 'hz' },
+        act('hissSplit', p.hissF || 0, 'hz'));
+    }
+    if ((m.crackleIndex || 0) > 0.08) {
+      add('crackle', clamp(m.crackleIndex, 0, 1), dbv((m.noiseInfo && m.noiseInfo.crestP98Db) || 0),
+        act('declick', p.declick || 0));
+    }
+    if (m.noiseSpreadDb > 6) {
+      add('noisePump', clamp(m.noiseSpreadDb / 18, 0, 1), dbv(m.noiseSpreadDb), act('expander', null));
+    }
+
+    /* ── tonal shape: the measured bands and the per-song curve ────────── */
+    const reso = (D.resoList || [])[0];
+    if (reso && reso.excessDb > 3) {
+      add('boxy', clamp((reso.excessDb - 3) / 6, 0, 1), { n: reso.hz, unit: 'hz' },
+        act('box', Math.abs(p.boxG1 || 0), 'db'));
+    }
+    const reso2 = (D.resoList || [])[1];
+    if (reso2 && reso2.excessDb > 3 && Math.abs(p.boxG2 || 0) > 0.05) {
+      add('boxy2', clamp((reso2.excessDb - 3) / 6, 0, 1), { n: reso2.hz, unit: 'hz' },
+        act('box', Math.abs(p.boxG2), 'db'));
+    }
+    if (D.needMud > 0.12) {
+      add('mud', D.needMud, dbv(D.mudExcessDb), act('eqCut', Math.min(0, p.band1 || 0) + Math.min(0, p.band2 || 0), 'db'));
+    }
+    if (D.needHarsh > 0.1) {
+      add('harsh', D.needHarsh, dbv(D.harshExcessDb), act('eqCut', Math.min(0, p.band4 || 0), 'db'));
+    }
+    if (D.sibNeed > 0.05) {
+      add('sibilance', D.sibNeed, dbv(D.sibDb), act('deess', p.deess || 0));
+    }
+    if (D.needTop > 0.15 || D.needAir > 0.2) {
+      add('dullTop', clamp(Math.max(D.needTop, D.needAir), 0, 1), dbv(D.topDeficitDb),
+        act('exciter', p.exciter || 0));
+      add('airLost', clamp(D.needAir, 0, 1), dbv(D.airDeficitDb), act('air', p.air || 0));
+    }
+    if ((m.brickwall || 0) > 0.25 && m.cliffHz) {
+      add('codec', clamp(m.brickwall, 0, 1), { n: m.cliffHz, unit: 'hz' },
+        act('rebuild', p.airF || 0, 'hz'));
+    }
+    if (D.needSub > 0.15) {
+      add('weakBass', D.needSub, dbv(D.subDeficitDb), act('sub', p.sub || 0));
+    }
+    // the per-song EQ itself: the largest correction it makes, and where
+    if (p.eq0 !== undefined) {
+      let worst = 0, worstF = 0, count = 0;
+      for (let i = 0; i < 12; i++) {
+        const g = p['eq' + i] || 0;
+        if (Math.abs(g) > 0.6) count++;
+        if (Math.abs(g) > Math.abs(worst)) { worst = g; worstF = (m.eqCenters && m.eqCenters[i]) || 0; }
+      }
+      if (Math.abs(worst) > 0.6) {
+        add('shape', clamp(Math.abs(worst) / (MANUAL.eq), 0, 1), { n: worstF, unit: 'hz' },
+          act('songEq', worst, 'db'));
+      }
+    }
+
+    /* ── stereo image ──────────────────────────────────────────────────── */
+    if (m.channels > 1 && D.phaseNeed > 0.05) {
+      add('outOfPhase', D.phaseNeed, { n: st.low, unit: 'ratio' }, act('bassMono', p.bassMono || 0));
+    }
+    if (m.channels > 1 && D.widenNeed > 0.15) {
+      add('narrow', clamp(D.widenNeed, 0, 1), { n: m.correlation, unit: 'ratio' }, act('width', p.width || 0));
+    }
+    if (m.channels === 1) add('mono', 0.2, null, act('mono', null));
+    if (m.channels > 1 && Math.abs(st.balanceDb || 0) > 1.5) {
+      add('balance', clamp(Math.abs(st.balanceDb) / 6, 0, 1), dbv(st.balanceDb), act('balance', null));
+    }
+
+    /* ── level, dynamics, medium ───────────────────────────────────────── */
+    const dr = m.dynamicRangeDb === undefined ? 18 : m.dynamicRangeDb;
+    if (dr < 12) add('dense', clamp((12 - dr) / 8, 0, 1), dbv(dr), act('noSquash', null));
+    if ((m.clipRatio || 0) > 0.002) {
+      add('clipping', clamp(m.clipRatio * 40, 0, 1), pct(m.clipRatio * 100), act('headroom', null));
+    }
+    if (m.peakDb > -1) add('hotPeak', clamp((m.peakDb + 3) / 3, 0, 1), dbv(m.peakDb), act('ceiling', null));
+    if (m.ispDb !== undefined && m.ispDb > m.peakDb + 0.1 && m.ispDb > -1) {
+      add('truePeak', clamp((m.ispDb + 1) / 1.5, 0, 1), dbv(m.ispDb), act('truePeak', null));
+    }
+    const dcDb = m.dcOffsetDb === undefined ? -120 : m.dcOffsetDb;
+    if (dcDb > -46) add('dcOffset', clamp((dcDb + 60) / 14, 0, 1), dbv(dcDb), act('dcGuard', null));
+    if (m.dc && m.dc.driftDb > 12) {
+      add('dcDrift', clamp(m.dc.driftDb / 30, 0, 1), dbv(m.dc.driftDb), act('dcGuard', null));
+    }
+    if (m.snrDb !== undefined && m.snrDb < 45) {
+      add('noiseFloor', clamp((45 - m.snrDb) / 35, 0, 1), dbv(m.snrDb), act('expander', null));
+    }
+    if (D.percussive > 0.25 && p.glue !== undefined) {
+      add('punch', D.percussive, dbv(m.crestDb || 0), act('glueTime', p.glueTime || 0));
+    }
+
+    out.sort((a, b) => b.sev - a.sev);
+    const severe = out.filter((f) => f.sev >= 0.5).length;
+    if (!out.length || out[0].sev < 0.2) {
+      out.unshift({ key: 'clean', sev: 0, value: null, act: null });
+    }
+    return {
+      findings: out,
+      headline: { count: out.length, severe },
+      // the material's character, in one word for the UI ("sustained" /
+      // "percussive" / "dense"), from the same measurement the glue timing uses
+      character: D.percussive > 0.55 ? 'percussive' : (dr < 12 ? 'dense' : 'sustained'),
+    };
   }
 
   /**
@@ -631,9 +1209,21 @@
     if (m.clipRatio > 0.002) push('clipping', 0.6);
     if (m.dynamicRangeDb < 9) push('squashed', 0.5);
     if (m.correlation < 0.2 && m.channels > 1) push('narrow', 0.5);
+    // the per-song findings are part of the sentence as well: they are the ones
+    // a profile cannot know about
+    const D = demand(m, d);
+    if (D.sibNeed > 0.3) push('sibilance', D.sibNeed);
+    if (D.infraNeed > 0.3) push('rumble', D.infraNeed);
+    if (D.phaseNeed > 0.3) push('outOfPhase', D.phaseNeed);
+    if (m.dcOffsetDb !== undefined && m.dcOffsetDb > -46) push('dc', 0.5);
     if (!issues.length) push('healthy', 1);
     issues.sort((a, b) => b.weight - a.weight);
-    return { id: d.id, issues: issues.slice(0, 3).map((i) => i.key), confidence: d.confidence, scores: d.scores };
+    return {
+      id: d.id,
+      chain: (d.chain || [{ id: d.id, w: 1 }]).map((c) => c.id),
+      issues: issues.slice(0, 3).map((i) => i.key),
+      confidence: d.confidence, scores: d.scores,
+    };
   }
 
   /** Resolve "auto" to the profile that was actually detected. */
@@ -642,7 +1232,7 @@
     return classify(metrics).id;
   }
 
-  const API = { PRESETS, PRESET_ORDER, CEILING, classify, demand, adapt, resolve, buildParams, diagnose };
+  const API = { PRESETS, PRESET_ORDER, CEILING, MANUAL, PROFILE_EQ, CHAIN_MIN, TONE_MIN, classify, chainOf, evidence, mixAnchors, demand, adapt, resolve, buildParams, diagnose, recipe, eqCurve, curveDb, biquadDb, profileDb };
   global.RSPresets = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

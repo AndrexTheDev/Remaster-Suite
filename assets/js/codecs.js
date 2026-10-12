@@ -235,6 +235,49 @@
 
   /* --- MP3: lamejs, streamed through a worker so the UI stays alive --------- */
 
+  /**
+   * Float → the integer scale lamejs actually encodes.
+   *
+   * This is not cosmetic. `lamejs.Mp3Encoder.encodeBuffer()` copies whatever it
+   * is handed into a `Float32Array` and its ported LAME reads that array as PCM
+   * on the 16-bit scale (proven: handing it integers and handing it the same
+   * integers as floats produces byte-identical MP3s). Hand it normalised −1…+1
+   * floats, as this function's caller used to, and every sample lands ≈ 90 dB
+   * below full scale — the export is a valid, frame-aligned MP3 of digital
+   * silence. So every sample that goes into the encoder passes through here.
+   *
+   * The chain output is 32-bit float, so the conversion is also where the word
+   * length is decided: TPDF dither at ±1 LSB (two independent uniform draws,
+   * triangular distribution) avoids the correlated quantization error that
+   * plain truncation folds back into quiet, heavily repaired material.
+   *
+   * @param {Float32Array} src
+   * @param {number} from first sample (inclusive)
+   * @param {number} to   last sample (exclusive)
+   * @returns {Int16Array}
+   */
+  function toInt16(src, from, to) {
+    const start = from || 0;
+    const end = to === undefined ? src.length : to;
+    const out = new Int16Array(Math.max(0, end - start));
+    for (let i = 0; i < out.length; i++) {
+      let v = src[start + i] * 32768 + (Math.random() + Math.random() - 1);
+      // a non-finite sample becomes silence, never a full-scale click
+      if (v !== v || v === Infinity || v === -Infinity) v = 0;
+      else if (v < -32768) v = -32768;
+      else if (v > 32767) v = 32767;
+      out[i] = v < 0 ? -Math.round(-v) : Math.round(v);
+    }
+    return out;
+  }
+
+  /** A 4-byte MPEG audio frame header (0xFFEx/0xFFFx), or an ID3 tag. */
+  function looksLikeMp3(bytes) {
+    if (!bytes || bytes.length < 4) return false;
+    if (bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) return true;   // "ID3"
+    return bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0;
+  }
+
   const WORKER_SRC = [
     "let lame = null, enc = null, nCh = 2;",
     "self.onmessage = function (e) {",
@@ -245,6 +288,7 @@
     "    nCh = d.nCh;",
     "    try { enc = new lamejs.Mp3Encoder(nCh, d.sr, d.kbps); }",
     "    catch (err2) { self.postMessage({ ok: false, err: 'init:' + err2 }); return; }",
+    "    if (typeof enc.encodeBuffer !== 'function') { self.postMessage({ ok: false, err: 'no-encodeBuffer' }); return; }",
     "    self.postMessage({ ok: true });",
     "    return;",
     "  }",
@@ -317,20 +361,19 @@
     for (let off = 0; off < len; off += CHUNK) {
       const end = Math.min(len, off + CHUNK);
       const last = end >= len;
-      // slice copies: the worker must not see a shared, moving buffer
-      worker.postMessage({
-        cmd: 'chunk',
-        left: left.slice(off, end),
-        right: right ? right.slice(off, end) : null,
-        last,
-      });
+      // 16-bit chunks, handed over rather than copied: they are ours alone, and
+      // the worker is the one place the PCM still exists at full length
+      const l = toInt16(left, off, end);
+      const r = right ? toInt16(right, off, end) : null;
+      const transfer = r ? [l.buffer, r.buffer] : [l.buffer];
+      worker.postMessage({ cmd: 'chunk', left: l, right: r, last }, transfer);
       const data = await once();
       if (data && data.byteLength) parts.push(new Uint8Array(data));
       if (onProgress) onProgress(end / len);
       if (!last) await tick();
     }
     worker.terminate();
-    return { bytes: concat(parts), sampleRate: rate };
+    return finishMp3(concat(parts), rate, len);
   }
 
   /** Same thing without a worker (rare browsers / blocked blob workers). */
@@ -345,8 +388,8 @@
     const CHUNK = Math.max(1152 * 4, Math.floor(rate * 1.5));
     for (let off = 0; off < len; off += CHUNK) {
       const end = Math.min(len, off + CHUNK);
-      const l = left.subarray(off, end);
-      const r = right ? right.subarray(off, end) : null;
+      const l = toInt16(left, off, end);
+      const r = right ? toInt16(right, off, end) : null;
       const mb = enc.encodeBuffer(l, r);
       if (mb.length) parts.push(new Uint8Array(mb));
       if (end >= len) {
@@ -356,7 +399,19 @@
       if (onProgress) onProgress(end / len);
       await tick();
     }
-    return { bytes: concat(parts), sampleRate: rate };
+    return finishMp3(concat(parts), rate, len);
+  }
+
+  /**
+   * Last gate before an MP3 is handed to the download: it has to be a stream,
+   * and it has to be a stream that came from samples. Both checks exist because
+   * the failure they catch is silent — a zero-byte or an audio-free file looks
+   * like a successful export to everything except the ear.
+   */
+  function finishMp3(bytes, rate, samples) {
+    if (!bytes || bytes.length < 128) throw new Error('mp3-empty');
+    if (!looksLikeMp3(bytes)) throw new Error('mp3-invalid');
+    return { bytes, sampleRate: rate, samples };
   }
 
   /** Join the MP3 fragments into one contiguous block. */
@@ -424,7 +479,7 @@
   }
 
   const API = {
-    MP3_RATES, mp3RateFor,
+    MP3_RATES, mp3RateFor, toInt16, looksLikeMp3,
     decodeArrayBuffer, decodeFile, decodeWithFFmpeg,
     encodeWav, encodeMp3, makeBuffer, readBlob, blobOf, mimeFor,
     zip, download,

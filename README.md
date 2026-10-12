@@ -103,6 +103,24 @@ that needs nothing, the automatic result measures as unchanged — `tests/tuning
 nine problem recordings and holds every octave band that carries content to ±3 dB, the music band's
 loudness to ±0.8 dB, and the soft-clip guard transparent.
 
+Seven of the chain's parameters are not amounts at all but *measurements of the file* — the mains
+frequency, the frequency and sharpness of its two worst resonances, where its noise starts, which
+split its de-hisser should use, how percussive it is — and four stages exist only when a file asks
+for them: the **sub-sonic guard**, the **per-song corrective EQ**, the **de-esser** and the **bass
+mono-maker**. They are computed from that file's own spectrum, and on a recording that measures
+clean they do nothing (on a 93/100 file: sub-sonic guard and de-esser exactly 0, mono-maker 0, no
+corrective band above **0.2 dB**). Each one is visible in the analysis, in one plain sentence — and
+when a file has several problems at once, automatic mode treats all of them (see
+[More than one problem](#more-than-one-problem)).
+
+Nothing in the chain is a fixed curve. The six profile bands above are anchors — ceilings — and
+the **corrective EQ** is the part that is different for every song: twelve bands, log-spaced from
+50 Hz to 8 kHz, correcting *this recording's* own departures from its own spectral trend, and
+subtracting what the profile's bands are already doing so the two never add up. Its guard rails are
+deliberate: a ±1.5 dB dead zone (so a linear recording is left linear), a cap of ±6 dB, no boost
+where the band is within 18 dB of the measured noise, and no correction at all in a band the file
+does not fill — an empty band is a boundary, not a tone.
+
 Two bounds tell the difference between "a repair" and "overdriven", because a dull 1960s recording
 has *nothing* above 9 kHz — a strict band-by-band limit would either forbid the repair or allow a
 fake top end:
@@ -117,12 +135,41 @@ fake top end:
 
 | Profile | For |
 | --- | --- |
-| **Automatic** | picks the right profile from the measurements |
+| **Automatic** | reads the file and combines whatever it finds (see below) |
 | **Garage / one-mic (60s/70s)** | thin bottom, boxy mids, rolled-off top, room noise |
 | **Vinyl rip** | crackle, surface roar, rumble (hum is repaired whenever it is measured, whichever profile runs) |
 | **Cassette de-hiss** | steady tape hiss, soft high-frequency loss |
 | **Low bitrate brightener** | hard codec edge around 11–16 kHz (the biggest job for the exciter) |
 | **General polish** | nothing dramatic, just better |
+
+### More than one problem
+
+Most real files are not one thing. The classic record in a private archive is a 1970s album, ripped
+from vinyl, then compressed to 128 kbit/s by whoever put it online: crackle, surface noise, a dull
+top end, a codec cliff — four problems, one file. A profile vote that keeps the winner and throws
+the rest away is what leaves such a file half restored.
+
+Automatic mode therefore works on a **chain**, not on a label:
+
+* **The diagnosis names every problem it found**, not just the loudest one — *"Sounds like several
+  problems at once: vinyl rip + heavily compressed file. Standing out: crackle, dull highs, …"* —
+  and the ZIP report carries the whole chain (`detected : lowbitrate+vinyl+cassette`).
+* **The tone is the mix** of the detected profiles' curves, weighted by how much evidence each one
+  carries — 70/30 vinyl/codec gets 70/30 of the two curves.
+* **A repair's permission is the union, the dose is the measurement.** Each profile allows so much
+  de-hissing, de-clicking, sub-bass, air; a file that is both hissy and crackly gets the wider of
+  the two budgets for each stage, and then the *measured* requirement decides how much of it is
+  used. This is what stops a codec cliff from being capped by the vinyl ceiling, or a dirty cassette
+  from being capped by the cassette's (deliberately cautious) de-click budget.
+* **A permission is not a dose, and a hint is not a problem.** A faint reading joins the tone mix as
+  far as it is worth, but only real evidence unlocks a budget — and a file with one problem is still
+  a file with one problem (measured drift on a solo cassette: 0.03 dB of tone and 0.00 of budget).
+
+Measured on the case that started this: cassette tape with a little dirt on it, diagnosed as
+cassette (its hiss is the bigger defect) with clicks on top. The single-profile answer took 0.6 dB
+off the spike crest; the chain takes **3.6 dB** off it, because the file earned a de-click budget of
+0.60 instead of the cassette profile's 0.20 — and on a real 128 kbit/s re-encode of a vinyl rip the
+codec joins the chain at 0.46, which lifts the 7 kHz band correction from 0.0 to 1.5 dB.
 
 ### Batch
 
@@ -147,19 +194,23 @@ and runs per sample, control-rate decimated for speed:
 
 | # | Stage | What it does |
 | --- | --- | --- |
-| 1 | **DC guard** | 2 Hz one-pole: removes a damaged file's offset without rotating the phase of the 20–60 Hz region, where the sub-bass repair works |
-| 2 | **Static EQ bank** | 6 biquads: 60 Hz shelf, 200 Hz mud, 450 Hz box, 1.3 kHz honk, 3.2 kHz presence, 7 kHz air — dosed automatically from the measurement |
-| 2b | **Measured resonance notches** | the two strongest narrow peaks the analyser finds (150 Hz – 1.8 kHz, ≥ 3.2 dB above the local trend), each notched at its own frequency, depth and sharpness. A boxy room is a *constant* colouration, which the dynamic de-resonator below cannot see |
+| 0 | **Presence follower** | a 13 ms envelope against a one-second average; it gates every synthesis stage, so nothing is generated in a gap — the air and the sub octave arrive with the music, not with the noise floor |
+| 1 | **Input DC guard** | 2 Hz one-pole: removes a damaged file's offset without rotating the phase of the 20–60 Hz region, where the sub-bass repair works |
+| 1b | **Sub-sonic guard** | a 12 dB/octave high-pass at 18–30 Hz, switched on *only* when the quiet passages measured rumble below the music and no mains line that could explain it. A turntable's rumble lives there; no instrument does, which is why the corner stays under 30 Hz |
+| 2 | **Static EQ bank** | 6 biquads: 60 Hz shelf, 200 Hz mud, 450 Hz box, 1.3 kHz honk, 3.2 kHz presence, 7 kHz air — the profile's anchors, dosed from the measurement |
+| 2b | **Per-song corrective EQ** | 12 bands, 50 Hz … 8 kHz at Q 1.4, correcting the file's own departures from its own spectral trend — net of what the six profile bands do. ±1.5 dB dead zone, ±6 dB cap, no boost near the noise floor, no correction in a band the file does not fill |
+| 2c | **Measured resonance notches** | the two strongest narrow peaks the analyser finds (150 Hz – 1.8 kHz, ≥ 3.2 dB above the local trend), each notched at its own frequency, depth and sharpness. A boxy room is a *constant* colouration, which the dynamic de-resonator below cannot see |
 | 3 | **Dynamic de-resonator** | 6 narrow bands (220 Hz … 3.1 kHz) watch their own envelope against a long-term average; anything ringing way above it gets pulled down. Steady tones pass, room ring does not. |
-| 4 | **Harmonic exciter** | 3 bands, each: band-pass → asymmetric saturation (even *and* odd harmonics) → band-pass → envelope gate. Synthesise the overtones that were never recorded. |
-| 5 | **Air synthesis 8–16 kHz** | takes the surviving 4.5–7.5 kHz band and generates 2nd/3rd order content above it, with a de-esser so it never turns into fizz |
-| 6 | **Sub-bass 30–60 Hz** | 6th-order low pass → hysteresis zero-crossing detector → divide-by-two pitch tracking → oscillator with a gated envelope. A 60–120 Hz bass line gains its missing bottom octave. |
-| 7 | **De-hiss** | Linkwitz-Riley split at 3.2 kHz. The key is the *tilt* of the top end (4 kHz+ against the 1.45 kHz band, the same two bands and the same 2048-sample window the analyser measures), so it attenuates where the top end stops following the programme and leaves everything else alone: between the notes the same repair is worth 6 dB, over music less than 0.3 dB |
-| 8 | **De-click** | low-pass prediction (4 kHz, 4th order) plus a fast/slow envelope ratio; impulses are replaced by the prediction, with a short decaying hold for the neighbours of the click |
-| 9 | **Glue compressor** | soft 2:1 with automatic make-up, transient-preserving |
+| 4 | **De-hiss** | Linkwitz-Riley split, keyed on the *tilt* of the top end (4 kHz+ against the 1.45 kHz band, the same two bands and the same window the analyser measures), so it attenuates where the top end stops following the programme and leaves everything else alone: between the notes the same repair is worth 6 dB, over music less than 0.3 dB. The split itself is measured too (2.2–4 kHz, where this file's noise starts) |
+| 5 | **De-click** | low-pass prediction (4 kHz, 4th order) plus a fast/slow envelope ratio; impulses are replaced by the prediction, with a short decaying hold for the neighbours of the click |
+| 5b | **De-esser** | a dynamic dip over 5.2–9.5 kHz, keyed on the fast/slow ratio of that band: a quiet "s" and a loud one are the same problem, and a recording without sibilance measures zero. It sits before the synthesisers, so the exciter and the air cannot rebuild what it just removed |
+| 6 | **Harmonic exciter** | 3 bands, each: band-pass → asymmetric saturation (even *and* odd harmonics) → band-pass → envelope gate. Synthesise the overtones that were never recorded. |
+| 7 | **Air synthesis 8–16 kHz** | takes the surviving 4.5–7.5 kHz band and generates 2nd/3rd order content above it, gated by the presence follower and limited to a fraction of the band it came from |
+| 8 | **Sub-bass 30–60 Hz** | 6th-order low pass → hysteresis zero-crossing detector → divide-by-two pitch tracking → oscillator with a gated envelope. A 60–120 Hz bass line gains its missing bottom octave. |
+| 9 | **Glue compressor** | soft 2:1 with automatic make-up; attack and release follow the file's measured percussive character |
 | 10 | **Warmth + tilt** | gentle saturation and a low/high shelf pair for the final tone balance |
-| 11 | **Mains hum notch** | three biquads, three hertz wide, at the measured mains frequency and its harmonics — dosed from the level the line stands above its own neighbourhood, and placed *after* every stage that can put low-frequency energy back. Bypassed completely when nothing was measured |
-| 12 | **Stereo width** | the high-passed side signal (above 200 Hz) of an image that measured as narrow but not mono is lifted back towards the programme's own bandwidth; a mono master is never widened |
+| 11 | **Stereo (M/S)** | a bass that measured out of phase in one channel is folded to mono below 200 Hz; the side signal of an image that measured narrow but not mono is lifted back towards the programme's own bandwidth, and a mono master is never widened |
+| 12 | **Mains hum notch** | three biquads, three hertz wide, at the measured mains frequency and its harmonics — dosed from the level the line stands above its own neighbourhood, and placed *after* every stage that can put low-frequency energy back. Bypassed completely when nothing was measured |
 | 13 | **Output** | 2 Hz DC guard (keeps the offset the saturation stages can add out of the export), auto level match, then a tanh soft-clip guard that saturates at −0.02 dBFS so a 16-bit export can never hit the rail |
 
 The dry/wet cross-fade happens at the very end: `out = dry + power · (wet − dry)`. Because the whole
@@ -173,7 +224,10 @@ reporting instead of blocking the tab — at the **source sample rate** (the con
 parsed to find it), then encodes:
 
 * **WAV** 16, 24 or 32-bit float, written by hand, no dependency
-* **MP3** up to 320 kbps through lamejs, inside a Web Worker so the UI never freezes
+* **MP3** up to 320 kbps through lamejs, inside a Web Worker so the UI never freezes. The mixer
+  hands the encoder 16-bit PCM (lamejs copies what it is given straight into 16-bit buffers, so a
+  −1…1 float mix would be written out as a silent file), and the stream is checked for a frame
+  header and a plausible length before the download starts
 
 A ZIP containing hundreds of megabytes of WAVs would blow up browser memory, so the app keeps an
 eye on the projected size and warns before you pack.
@@ -225,15 +279,19 @@ assets/
     og-image.jpg                 512×512 social preview
     favicon.svg                  the waveform alone — the record ring is unreadable at 16 px
 tests/
-  harness.js                     Node harness + signal simulators
+  harness.js                     Node harness + signal simulators (garage session,
+                                 cassette, vinyl rip, low bitrate, clean, and the
+                                 combination fixture: a vinyl transfer that went
+                                 through a 128 kbit/s encoder)
   dsp.test.js                    DSP/engine suite: transparency, sub, air, exciter, de-hiss,
                                  de-click, measured hum/hiss repair, and the contract that a
                                  broken file never becomes NaN parameters (73 checks)
   tuning.test.js                 the tuning contract: what the automatic mode may do to a file (17 checks)
-  web.test.js                    static, DOM and app suite (130 checks)
+  web.test.js                    static, DOM and app suite (137 checks)
   audit.test.js                  repository hygiene, markup, contrast, i18n, parameter,
                                  codec and robustness audit — including the mains-notch law,
-                                 a rich-hum fixture and the effect budgets (224 checks)
+                                 a rich-hum fixture, the effect budgets, and the
+                                 several-problems-at-once chain (246 checks)
   e2e.test.js                    realistic journeys: five problem recordings, slider sweep,
                                  profile overrides, 10-file batch → ZIP, mono/32 k/96 k,
                                  hostile input (108 checks)
@@ -255,7 +313,8 @@ node tests/dsp.test.js     # engine: transparency, sub, air, exciter, de-hiss, d
 node tests/web.test.js     # static integrity, bilingual coverage, boot, drop → analyse → render
                            # → save → ZIP, error handling, resampling
 node tests/audit.test.js   # repository hygiene, markup, stylesheet, contrast, bilingual
-                           # coverage, parameter ranges, DSP edge cases, codec round-trips, budgets
+                           # coverage, parameter ranges, the several-problems-at-once
+                           # chain, DSP edge cases, codec round-trips, budgets
 node tests/e2e.test.js     # realistic journeys: five problem recordings, slider sweep, profile
                            # overrides, 10-file batch → ZIP, mono/32 k/96 k, hostile input
 node tests/tuning.test.js  # the tuning contract: octave bands, loudness, the level match, the
@@ -273,9 +332,11 @@ It needs the optional dev dependency `@sparticuz/chromium` (a packaged headless
 Chromium, used because CI machines rarely ship a browser); `npm test` runs the
 five dependency-free suites and stays green everywhere.
 
-Signals are simulated (garage session, cassette, vinyl rip, low-bitrate, clean) and the whole
-application is exercised in a DOM with a miniature Web Audio implementation that runs the real
-processor in 128-frame quanta — so the tests measure the actual engine, not a mock.
+Signals are simulated (garage session, cassette, vinyl rip, low-bitrate, clean — plus a vinyl
+transfer that was later pushed through a 128 kbit/s encoder, the file that needs more than one
+treatment at once) and the whole application is exercised in a DOM with a miniature Web Audio
+implementation that runs the real processor in 128-frame quanta — so the tests measure the actual
+engine, not a mock.
 
 ---
 
