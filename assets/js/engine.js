@@ -102,6 +102,7 @@
       this.bypass = !!on;
       const p = this.node && this.node.parameters.get('bypass');
       if (p) p.setTargetAtTime(on ? 1 : 0, this.ctx.currentTime, glide === undefined ? 0.01 : glide);
+      this._notifyState();
     }
 
     /** Auto A/B: flip every `seconds` so the ear stays honest. */
@@ -138,6 +139,14 @@
         src.loopEnd = this.bounds.end;
       }
       src.connect(this.node);
+      src.onended = () => {
+        if (this.src === src && !this.loop) {
+          this.offset = this.bounds ? this.bounds.start : 0;
+          this._stopSource();
+          this.playing = false;
+          this._notifyState();
+        }
+      };
       const from = Math.min(this.offset, Math.max(0, this.buffer.duration - 0.02));
       src.start(0, from);
       this.src = src;

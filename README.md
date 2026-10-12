@@ -123,7 +123,7 @@ Saving runs the same processor in an `OfflineAudioContext` — with `suspend()`/
 reporting instead of blocking the tab — at the **source sample rate** (the container header is
 parsed to find it), then encodes:
 
-* **WAV** 16 or 24-bit, written by hand, no dependency
+* **WAV** 16, 24 or 32-bit float, written by hand, no dependency
 * **MP3** up to 320 kbps through lamejs, inside a Web Worker so the UI never freezes
 
 A ZIP containing hundreds of megabytes of WAVs would blow up browser memory, so the app keeps an
@@ -175,13 +175,12 @@ assets/
     apple-touch-icon.png         180×180 home-screen icon
     og-image.jpg                 512×512 social preview
     favicon.svg                  the waveform alone — the record ring is unreadable at 16 px
-  img/favicon.svg
 tests/
   harness.js                     Node harness + signal simulators
   dsp.test.js                    DSP/engine suite (56 checks)
-  web.test.js                    static, DOM and app suite (85 checks)
+  web.test.js                    static, DOM and app suite (89 checks)
   audit.test.js                  repository hygiene, markup, contrast, i18n, parameter,
-                                 codec and robustness audit (159 checks)
+                                 codec and robustness audit (161 checks)
   e2e.test.js                    realistic journeys: five problem recordings, slider sweep,
                                  profile overrides, 10-file batch → ZIP, mono/32 k/96 k,
                                  hostile input (107 checks)

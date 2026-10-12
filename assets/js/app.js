@@ -194,8 +194,8 @@
     card.el.powerOut.textContent = t('ui.percent', { v: Math.round(State.power * 100) });
 
     card.wave = new UI.Waveform(card.el.canvas, {
-      onSeek: (sec) => {
-        ensurePlaying(card);
+      onSeek: async (sec) => {
+        await ensurePlaying(card);
         Engine.seek(sec);
       },
     });
@@ -281,20 +281,20 @@
     $('[data-act="retry"]', node).addEventListener('click', () => prepareCard(card, true));
 
     const seek = $('[data-act="seek"]', node);
-    const scrub = (ev) => {
+    const scrub = async (ev) => {
       if (!card.analysis) return;
       const r = seek.getBoundingClientRect();
       const f = Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width));
-      ensurePlaying(card);
+      await ensurePlaying(card);
       Engine.seek(f * card.analysis.window.seconds);
     };
     seek.addEventListener('pointerdown', (ev) => { seek.setPointerCapture(ev.pointerId); scrub(ev); });
     seek.addEventListener('pointermove', (ev) => { if (ev.buttons) scrub(ev); });
-    seek.addEventListener('keydown', (ev) => {
+    seek.addEventListener('keydown', async (ev) => {
       if (!card.analysis) return;
       const step = 2;
-      if (ev.key === 'ArrowRight') { Engine.seek(Engine.position + step); ev.preventDefault(); }
-      if (ev.key === 'ArrowLeft') { Engine.seek(Math.max(0, Engine.position - step)); ev.preventDefault(); }
+      if (ev.key === 'ArrowRight') { ev.preventDefault(); await ensurePlaying(card); Engine.seek(Engine.position + step); }
+      if (ev.key === 'ArrowLeft') { ev.preventDefault(); await ensurePlaying(card); Engine.seek(Math.max(0, Engine.position - step)); }
     });
   }
 
@@ -381,6 +381,8 @@
     const dur = card.analysis.window.seconds;
     const f = dur ? Math.max(0, Math.min(1, pos / dur)) : 0;
     card.el.seek.style.width = (f * 100).toFixed(2) + '%';
+    const seekEl = $('[data-act="seek"]', card.el.card);
+    if (seekEl) seekEl.setAttribute('aria-valuenow', String(Math.round(f * 100)));
     card.el.time.textContent = Codecs.formatDuration(pos) + ' / ' + Codecs.formatDuration(dur);
     card.wave.setPosition(pos);
   });
@@ -456,7 +458,6 @@
         chans.push(buffer.getChannelData(c).subarray(from, to));
       }
       card.analysisWindowChannels = chans;
-      card.analysis.windowEnvelope = Analyzer.envelope(chans, 1400);
       card.previewBuffer = Codecs.makeBuffer(chans, analysis.sampleRate);
       card.buffer = null;                    // let the full decode go
       setProgress(card, 0.7);
@@ -470,15 +471,10 @@
         card.after = { envelope: env, chips: after.chips };
         card.afterScore = after.score;
       }
+      $('[data-act="retry"]', card.el.card).hidden = true;
       setProgress(card, 1);
       setStatus(card, 'ready');
       refreshCardText(card);
-      setNote(card, t('note.realtime'));
-      card.wave.setData({
-        before: card.analysis.windowEnvelope,
-        after: card.after ? card.after.envelope : null,
-        duration: card.analysis.window.seconds,
-      });
     } catch (err) {
       card.error = err;
       setStatus(card, 'error');
@@ -678,9 +674,12 @@
 
   function removeCard(card) {
     if (State.current === card) { Engine.stop(); State.current = null; }
+    clearTimeout(card._previewTimer);
+    if (card.wave && card.wave.destroy) card.wave.destroy();
     const i = State.cards.indexOf(card);
     if (i >= 0) State.cards.splice(i, 1);
     card.el.card.remove();
+    refreshLibraryLabels();
     if (!State.cards.length) {
       $('#controls').hidden = true;
       $('#fileList').textContent = '';
@@ -690,8 +689,14 @@
   function clearAll() {
     Engine.stop();
     State.current = null;
-    for (const c of State.cards) c.el.card.remove();
+    clearTimeout(previewTimer);
+    for (const c of State.cards) {
+      clearTimeout(c._previewTimer);
+      if (c.wave && c.wave.destroy) c.wave.destroy();
+      c.el.card.remove();
+    }
     State.cards = [];
+    refreshLibraryLabels();
     $('#controls').hidden = true;
     UI.toast(t('toast.cleared'));
   }

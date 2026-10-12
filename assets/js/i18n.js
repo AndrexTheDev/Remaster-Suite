@@ -238,7 +238,7 @@
 <p>Spenden sind freiwillig und kein Kauf — die Adressen stehen im Fußbereich. Danke für jede Rückmeldung.</p>`,
 
       'about.body': `
-<p><strong>Version 1.0</strong> — eine komplette Audio-Restaurations-Kette im Browser. Alles rechnet auf deinem Gerät.</p>
+<p><strong>Version 1.1</strong> — eine komplette Audio-Restaurations-Kette im Browser. Alles rechnet auf deinem Gerät.</p>
 <h3>Die Kette in Reihenfolge</h3>
 <ul>
   <li><strong>Entzerren (EQ):</strong> sechs Bänder, automatisch anhand der Messung dosiert.</li>
@@ -262,7 +262,7 @@
 <ul>
   <li><strong>JSZip</strong> (MIT) — ZIP-Export im Browser, eigene, mitgelieferte Kopie.</li>
   <li><strong>lamejs</strong> (LGPL-3.0) — MP3-Encoder, eigene, mitgelieferte Kopie.</li>
-  <li><strong>FFmpeg.wasm</strong> (LGPL/GPL, optional) — nur als Notfall-Deoder für Formate, die der Browser selbst nicht öffnet.</li>
+  <li><strong>FFmpeg.wasm</strong> (LGPL/GPL, optional) — nur als Notfall-Dekoder für Formate, die der Browser selbst nicht öffnet.</li>
 </ul>
 <p>Beim Modus „lokal“ liegt keine einzige Fremddatei außerhalb dieses Projekts. Im Modus „CDN“ werden JSZip/lamejs beim ersten Bedarf von einem freien CDN geladen.</p>
 <h3>Lizenz und Haftung</h3>
@@ -484,10 +484,6 @@
 <h3>§ 7 Changes, final provisions</h3>
 <p>These terms may be updated for future versions. German law applies. Should individual provisions be invalid, the remainder stays in force. Last updated: {date}.</p>`,
 
-      'privacy.title': 'Datenschutz',
-      'contact.title': 'Kontakt',
-      'about.title': 'Über die Suite',
-      'help.title': 'So funktioniert es',
       'privacy.title': 'Privacy',
       'contact.title': 'Contact',
       'about.title': 'About the suite',
@@ -525,7 +521,7 @@
 <p>Tips are voluntary and not a purchase — the addresses are in the footer. Thanks for any feedback.</p>`,
 
       'about.body': `
-<p><strong>Version 1.0</strong> — a complete audio restoration chain in the browser. Everything computes on your device.</p>
+<p><strong>Version 1.1</strong> — a complete audio restoration chain in the browser. Everything computes on your device.</p>
 <h3>The chain, in order</h3>
 <ul>
   <li><strong>Corrective EQ:</strong> six bands, dosed automatically from the measurement.</li>
@@ -649,9 +645,9 @@
     const months = lang === 'de'
       ? ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember']
       : ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-    return (lang === 'de' ? `${d.getDate()}. ` : `${months[d.getMonth()]} `)
-      + (lang === 'de' ? months[d.getMonth()] + ' ' : '')
-      + d.getFullYear();
+    return lang === 'de'
+      ? `${d.getDate()}. ${months[d.getMonth()]} ${d.getFullYear()}`
+      : `${months[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
   }
 
   /** Switch language and re-render every tagged node. */

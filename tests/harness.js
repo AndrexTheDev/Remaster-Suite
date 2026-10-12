@@ -14,37 +14,38 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
 
+const procCache = new Map();
+let procFactory = null;
+
 /** Load the AudioWorkletProcessor class (optionally at a given sample rate). */
 function loadProcessor(sr) {
-  const code = fs.readFileSync(path.join(ROOT, 'assets', 'worklets', 'remaster-processor.js'), 'utf8');
+  const rate = sr || 48000;
+  if (procCache.has(rate)) return procCache.get(rate);
+  if (!procFactory) {
+    const code = fs.readFileSync(path.join(ROOT, 'assets', 'worklets', 'remaster-processor.js'), 'utf8');
+    procFactory = vm.runInThisContext(
+      `(function(sampleRate, AudioWorkletProcessor, registerProcessor) {\n${code}\n})`,
+      { filename: 'remaster-processor.js' }
+    );
+  }
   const registry = {};
-  const sandbox = {
-    console, Math, Date, JSON, isFinite, isNaN,
-    Float32Array, Float64Array, Int16Array, Int32Array, Uint8Array, Uint16Array,
-    Uint32Array, ArrayBuffer, DataView,
-    sampleRate: sr || 48000,
-    registerProcessor(name, cls) { registry[name] = cls; },
-    AudioWorkletProcessor: class AudioWorkletProcessorStub {
-      constructor() { this.port = { postMessage() {}, onmessage: null }; }
-    },
-  };
-  sandbox.globalThis = sandbox;
-  vm.createContext(sandbox);
-  vm.runInContext(code, sandbox, { filename: 'remaster-processor.js' });
+  class AudioWorkletProcessorStub {
+    constructor() { this.port = { postMessage() {}, onmessage: null }; }
+  }
+  procFactory(rate, AudioWorkletProcessorStub, (name, cls) => { registry[name] = cls; });
   const P = registry['remaster-processor'];
   if (!P) throw new Error('remaster-processor was not registered');
+  procCache.set(rate, P);
   return P;
 }
 
+let dspCache = null;
+
 /** Load the shared DSP utilities exactly as the browser loads them. */
 function loadDsp() {
-  const code = fs.readFileSync(path.join(ROOT, 'assets', 'js', 'dsp-utils.js'), 'utf8');
-  const sandbox = { console, Math, Date, Float32Array, Float64Array, ArrayBuffer, DataView, Uint8Array };
-  sandbox.globalThis = sandbox;
-  vm.createContext(sandbox);
-  vm.runInContext(code, sandbox, { filename: 'dsp-utils.js' });
-  if (!sandbox.RSDSP) throw new Error('RSDSP not exported');
-  return sandbox.RSDSP;
+  if (dspCache) return dspCache;
+  dspCache = require(path.join(ROOT, 'assets', 'js', 'dsp-utils.js'));
+  return dspCache;
 }
 
 const DEFAULT_PARAMS = {
