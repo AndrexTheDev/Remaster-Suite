@@ -337,7 +337,13 @@ class AirSynth {
     const h3 = lo * lo * lo * 1.15;                // 3rd order harmonics
     let d = (h2 + h3) * drive;
     if (d > 4) d = 4; else if (d < -4) d = -4;     // safety clamp
-    return this.lp.process(this.hp.process(d));
+    const y = this.lp.process(this.hp.process(d));
+    // Memoryless soft compressor: the generated band is rebuilt from harmonics,
+    // which are naturally peakier than recorded air. This tames the peaks
+    // (roughly 3 dB) without adding harmonics of its own, so the new top end
+    // sounds like air rather than like fizz.
+    const ay = y < 0 ? -y : y;
+    return y / (1 + 0.45 * ay);
   }
 }
 
@@ -550,10 +556,26 @@ class ChannelChain {
     this.hpf1 = new Biquad(); this.hpf1.setHighpass(sr, 24, 0.7071);
     this.hpf2 = new Biquad(); this.hpf2.setHighpass(sr, 24, 0.7071);
 
-    // loudness matcher (block-rate, see RemasterProcessor.process)
+    // Loudness matcher (block-rate, see RemasterProcessor.process). It works on
+    // the 300 Hz – 3.4 kHz band, which is where the music lives, so adding a
+    // bottom and a top octave cannot fool the A/B into sounding "louder = better".
+    this.midDry1 = new Biquad(); this.midDry1.setHighpass(sr, 300, 0.707);
+    this.midDry2 = new Biquad(); this.midDry2.setLowpass(sr, 3400, 0.707);
+    this.midWet1 = new Biquad(); this.midWet1.setHighpass(sr, 300, 0.707);
+    this.midWet2 = new Biquad(); this.midWet2.setLowpass(sr, 3400, 0.707);
     this.dryMs = 1e-6;
     this.wetMs = 1e-6;
+    this.midDryMs = 1e-9;
+    this.midWetMs = 1e-9;
     this.alGain = 1;
+
+    // Presence follower: synthesis should follow the music, not merely exceed the
+    // noise floor. `env` is a fast (~13 ms) envelope, `lvl` a slow loud-level
+    // reference (~1 s release); their ratio says whether we are inside the music
+    // or in a quiet passage, and `drive` gates all harmonic generation.
+    this.env = 0;
+    this.lvl = 0;
+    this.drive = 0;
     this.p = null;
   }
 
@@ -566,7 +588,9 @@ class ChannelChain {
     this.click.reset(); this.glue.reset();
     this.hpf1.reset(); this.hpf2.reset();
     this.lowShelf.reset(); this.highShelf.reset();
-    this.dryMs = 1e-6; this.wetMs = 1e-6; this.alGain = 1;
+    this.midDry1.reset(); this.midDry2.reset(); this.midWet1.reset(); this.midWet2.reset();
+    this.dryMs = 1e-6; this.wetMs = 1e-6; this.midDryMs = 1e-9; this.midWetMs = 1e-9; this.alGain = 1;
+    this.env = 0; this.lvl = 0; this.drive = 0;
   }
 
   /** recompute coefficient sets / control constants — once per render block */
@@ -599,6 +623,17 @@ class ChannelChain {
     const p = this.p;
     let y = this.dc.process(x);
 
+    // 0 ── presence follower (drives every synthesis stage)
+    const ax = x < 0 ? -x : x;
+    this.env += (ax - this.env) * 0.0015;
+    this.lvl = ax > this.lvl ? ax : this.lvl + (ax - this.lvl) * 0.00002;
+    const rel = this.env / (this.lvl + 1e-9);
+    const want = rel > 0.30 ? 1 : rel < 0.06 ? 0 : (() => {
+      const t = (rel - 0.06) / 0.24;
+      return t * t * (3 - 2 * t);
+    })();
+    this.drive += (want - this.drive) * 0.004;
+
     // 1 ── static tone shaping
     const eq = this.eq;
     for (let i = 0; i < eq.length; i++) y = eq[i].bq.process(y);
@@ -617,25 +652,26 @@ class ChannelChain {
     y = this.hiss.tick(y, p.dehiss);
     y = this.click.tick(y, p.declick);
 
-    // 4 ── harmonic exciter (level-proportional, noise-gated)
-    if (p.exciter > 0.0001) {
+    // 4 ── harmonic exciter (level-proportional, noise- and presence-gated)
+    const drive = this.drive;
+    if (p.exciter > 0.0001 && drive > 0.001) {
       const mix = this.excMix, ex = this.exc;
       for (let i = 0; i < ex.length; i++) {
         const b = ex[i];
-        const h = b.tick(y, 2.4 + p.exciter * 2.2, this.excEven);
-        y += h * mix[i] * p.exciter * b.prog * 2.1;
+        const h = b.tick(y, (2.4 + p.exciter * 2.2) * drive, this.excEven);
+        y += h * mix[i] * p.exciter * b.prog * drive * 2.1;
       }
     }
 
     // 5 ── air synthesis 8–16 kHz
-    if (p.air > 0.0001) {
+    if (p.air > 0.0001 && drive > 0.001) {
       const ds = this.air.control(y);
-      const h = this.air.tick(y, 2.0 + p.air * 2.0);
-      y += h * p.air * ds * this.air.prog * 1.5;
+      const h = this.air.tick(y, (2.0 + p.air * 2.0) * drive);
+      y += h * p.air * ds * this.air.prog * drive * 1.5;
     }
 
     // 6 ── sub-harmonic synthesis (30–60 Hz)
-    if (p.sub > 0.0001) y += this.sub.tick(y, p.subRatio) * p.sub * 0.5;
+    if (p.sub > 0.0001 && drive > 0.001) y += this.sub.tick(y, p.subRatio) * p.sub * 0.5 * drive;
 
     // 8 ── glue compression
     y = this.glue.tick(y, p.glue);
@@ -766,17 +802,23 @@ class RemasterProcessor extends AudioWorkletProcessor {
       // loudness matching uses the *previous* block's gain (2.7 ms latency at
       // 48 kHz — inaudible) so the sample loop stays allocation- and sqrt-free
       const g = autoLevel ? chain.alGain : 1;
-      let drySq = 0, wetSq = 0;
+      let drySq = 0, wetSq = 0, midDrySq = 0, midWetSq = 0;
 
       if (bypassed) {
         for (let i = 0; i < frames; i++) {
-          const x = src ? src[i] : 0;
+          let x = src ? src[i] : 0;
+          if (!(x > -32 && x < 32)) x = x > 32 ? 1 : x < -32 ? -1 : 0;
           drySq += x * x;
           dst[i] = x;
         }
       } else {
         for (let i = 0; i < frames; i++) {
-          const x = src ? src[i] : 0;
+          // Guard the very entrance of the chain: a single NaN or ±Inf sample —
+          // from a damaged file or a decoder quirk — would otherwise stick in the
+          // filter states for ever and silence (or destroy) the whole output.
+          // NaN fails both comparisons and becomes 0.
+          let x = src ? src[i] : 0;
+          if (!(x > -32 && x < 32)) x = x > 32 ? 1 : x < -32 ? -1 : 0;
           let wet = chain.tick(x) * g;
           // Soft-clip guard, last stage in the chain: a tanh knee above −0.55 dBFS
           // that saturates *below* full scale, so a 16-bit export can never pin a
@@ -785,6 +827,11 @@ class RemasterProcessor extends AudioWorkletProcessor {
           else if (wet < -KNEE) wet = -KNEE + RANGE * ftanh((wet + KNEE) / RANGE);
           drySq += x * x;
           wetSq += wet * wet;
+          // mid-band energy for the loudness match
+          const md = chain.midDry2.process(chain.midDry1.process(x));
+          const mw = chain.midWet2.process(chain.midWet1.process(wet));
+          midDrySq += md * md;
+          midWetSq += mw * mw;
           const mixed = x + pw * (wet - x);
           dst[i] = mixed > 1 ? 1 : mixed < -1 ? -1 : mixed;
         }
@@ -792,12 +839,30 @@ class RemasterProcessor extends AudioWorkletProcessor {
 
       if (autoLevel) {
         const n = Math.max(1, frames);
-        // slow (≈250 ms) block-rate moving RMS for both paths
-        chain.dryMs += (drySq / n - chain.dryMs) * 0.06;
-        chain.wetMs += (wetSq / n - chain.wetMs) * 0.06;
+        // Block-rate energy followers with a fast attack and a slow release:
+        // they track the *loud* parts of the music, which is where the ear
+        // compares levels, and they hold their value through quiet passages so
+        // the gain does not pump along with the song.
+        const RISE = 0.25, FALL = 0.004;
+        const follow = (prev, e) => (e > prev ? prev + (e - prev) * RISE : prev + (e - prev) * FALL);
+        chain.dryMs = follow(chain.dryMs, drySq / n);
+        chain.wetMs = follow(chain.wetMs, wetSq / n);
+        chain.midDryMs = follow(chain.midDryMs, midDrySq / n);
+        chain.midWetMs = follow(chain.midWetMs, midWetSq / n);
+
         const dr = Math.sqrt(chain.dryMs), wr = Math.sqrt(chain.wetMs);
-        if (dr > 1e-6 && wr > 1e-6) {
-          chain.alGain += (clamp(Math.sqrt(dr / wr), 0.60, 1.70) - chain.alGain) * 0.12;
+        const md = Math.sqrt(chain.midDryMs), mw = Math.sqrt(chain.midWetMs);
+        if (md > 1e-7 && mw > 1e-7) {
+          // match the mid band, which is what the ear calls "as loud"
+          let target = Math.sqrt(md / mw);
+          // safety rail: whatever the chain did to the spectrum, the broadband
+          // level may not move more than −6 … +4 dB
+          if (dr > 1e-7 && wr > 1e-7) {
+            const r = target * (wr / dr);
+            if (r > 1.5849) target = 1.5849 * (dr / wr);
+            else if (r < 0.5012) target = 0.5012 * (dr / wr);
+          }
+          chain.alGain += (clamp(target, 0.25, 2.5) - chain.alGain) * 0.12;
         }
       }
     }

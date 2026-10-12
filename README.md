@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/img/logo.svg" alt="Harmonic Restoration — a record whose groove becomes a waveform" width="140">
+</p>
+
 # Harmonic Restoration · Remaster Suite
 
 **Audio restoration that runs entirely in your browser.** Drop in an old, muffled, hissy or
@@ -165,11 +169,22 @@ assets/
   worklets/
     remaster-processor.js        the complete DSP chain (the heart of the suite)
   vendor/                        jszip.min.js (MIT), lame.min.js (LGPL-3.0) + licence note
+  img/
+    logo.svg                     the brand mark (vector, scales to any size)
+    logo.png                     512×512 raster version
+    apple-touch-icon.png         180×180 home-screen icon
+    og-image.jpg                 512×512 social preview
+    favicon.svg                  the waveform alone — the record ring is unreadable at 16 px
   img/favicon.svg
 tests/
   harness.js                     Node harness + signal simulators
   dsp.test.js                    DSP/engine suite (56 checks)
-  web.test.js                    static, DOM and end-to-end suite (85 checks)
+  web.test.js                    static, DOM and app suite (85 checks)
+  audit.test.js                  repository hygiene, markup, contrast, i18n, parameter,
+                                 codec and robustness audit (159 checks)
+  e2e.test.js                    realistic journeys: five problem recordings, slider sweep,
+                                 profile overrides, 10-file batch → ZIP, mono/32 k/96 k,
+                                 hostile input (107 checks)
   webaudio-stub.js               miniature Web Audio implementation for Node
 ```
 
@@ -182,11 +197,15 @@ belong to the test suite.
 
 ```bash
 npm install          # only for the test suite (jsdom)
-npm test             # runs both suites
-node tests/dsp.test.js   # engine: transparency, sub, air, exciter, de-hiss, de-click,
-                         # de-resonator, level match, power scaling, WAV/MP3/ZIP, classification
-node tests/web.test.js   # static integrity, bilingual coverage, boot, drop → analyse → render →
-                         # save → ZIP, error handling, resampling  (85 checks)
+npm test             # runs all four suites
+node tests/dsp.test.js     # engine: transparency, sub, air, exciter, de-hiss, de-click,
+                           # de-resonator, level match, power scaling, WAV/MP3/ZIP, classification
+node tests/web.test.js     # static integrity, bilingual coverage, boot, drop → analyse → render
+                           # → save → ZIP, error handling, resampling
+node tests/audit.test.js   # repository hygiene, markup, stylesheet, contrast, bilingual
+                           # coverage, parameter ranges, DSP edge cases, codec round-trips, budgets
+node tests/e2e.test.js     # realistic journeys: five problem recordings, slider sweep, profile
+                           # overrides, 10-file batch → ZIP, mono/32 k/96 k, hostile input
 ```
 
 Signals are simulated (garage session, cassette, vinyl rip, low-bitrate, clean) and the whole
@@ -208,6 +227,14 @@ Decoding uses the browser's own codecs — MP3, WAV, FLAC, OGG/Vorbis and M4A/AA
 wherever the browser supports them. Anything the browser refuses is handed to FFmpeg.wasm.
 
 ---
+
+## Branding
+
+The mark is a record whose groove turns into a waveform — gold where the original
+was, green where the restoration begins. Vector version (`assets/img/logo.svg`)
+for anything that scales, raster (`logo.png`) for stores and social cards,
+`favicon.svg` for the browser tab: the waveform alone, because record rings turn
+to mush at 16 px.
 
 ## Credits, licences and tips
 

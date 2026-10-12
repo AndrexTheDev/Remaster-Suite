@@ -61,7 +61,6 @@
       const power = P.power(card);
       if (!metrics) return null;
       const params = Presets.buildParams(resolved, metrics, power);
-      params.power = 1;                        // anchors already carry the scaling
       params.bypass = 0;                       // A/B is handled separately
       params.autoLevel = 1;
       return params;

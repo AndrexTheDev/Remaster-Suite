@@ -1,15 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Harmonic Restoration">
+  <title>Harmonic Restoration · Remaster Suite</title>
   <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+    <linearGradient id="w" x1="0" y1="0" x2="1" y2="0">
       <stop offset="0" stop-color="#FFD700"/>
-      <stop offset="0.55" stop-color="#FFC800"/>
+      <stop offset="0.5" stop-color="#FFC800"/>
       <stop offset="1" stop-color="#00E676"/>
     </linearGradient>
   </defs>
+  <!-- favicon: the waveform alone — the record ring turns to mush below 24 px -->
   <rect width="64" height="64" rx="14" fill="#0d0f12"/>
-  <rect x="1" y="1" width="62" height="62" rx="13" fill="none" stroke="#2A2E37" stroke-width="2"/>
-  <path d="M8 44 L17 44 L22 24 L27 52 L32 14 L37 42 L42 28 L47 44 L56 44"
-        fill="none" stroke="url(#g)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="32" cy="14" r="3.4" fill="#FFD700"/>
-  <path d="M8 53 h48" stroke="#00E676" stroke-width="2.5" stroke-linecap="round" opacity=".55"/>
+  <rect x="1.25" y="1.25" width="61.5" height="61.5" rx="12.75" fill="none" stroke="#2A2E37" stroke-width="2.5"/>
+  <circle cx="32" cy="32" r="20" fill="none" stroke="#23262e" stroke-width="2"/>
+  <path d="M7 32 L12 32 L15 24 L18 41 L21 17 L24 44 L27 22 L30 38 L32.5 32 L35 38 L38 22 L41 44 L44 17 L47 41 L50 24 L53 32 L57 32"
+        fill="none" stroke="url(#w)" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

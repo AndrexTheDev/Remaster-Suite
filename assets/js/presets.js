@@ -11,6 +11,18 @@
 
   const clamp = (x, lo, hi) => (x < lo ? lo : x > hi ? hi : x);
 
+  /* Global calibration of the two synthesis engines.
+   * Tuned against a naturally bright reference recording so that restored
+   * material lands *near* a normal spectral balance instead of sounding
+   * artificially bright: a half-repaired top end is worth more than a fake one.
+   * (Measured: top-to-mid balance relative to a reference master.) */
+  const SYNTH_CAL = 0.55;
+  /** 0 below lo, 1 above hi, smooth in between (Hermite). */
+  const smoothstep = (lo, hi, x) => {
+    const t = clamp((x - lo) / (hi - lo || 1e-9), 0, 1);
+    return t * t * (3 - 2 * t);
+  };
+
   /* -------------------------------------------------------------------------
    * Anchors (100 % power)
    *   band0  low shelf    60 Hz
@@ -166,13 +178,29 @@
       a.reso += 0.18 * d.mud;
     }
 
-    // ── top end ────────────────────────────────────────────────────────────
+    // ── top end: synthesis follows demand ──────────────────────────────────
+    // Harmonic generation is only worth anything where something is missing, so
+    // how much was measured as absent (dull top, codec cliff) scales the
+    // exciter, the air synth and the 7 kHz shelf. Material that already has a
+    // proper top end gets a fraction of the default — it needs no repair.
+    const demand = clamp(Math.max(d.dull, d.brick, 0), 0, 1);
+    const scaleTop = 0.34 + 0.72 * demand;
+    a.air *= scaleTop;
+    a.exciter *= 0.40 + 0.70 * demand;
+    a.bands[5] *= 0.45 + 0.60 * demand;
     if (d.dull > 0.2) {
-      a.air += 0.34 * d.dull;
-      a.exciter += 0.18 * d.dull;
-      a.bands[5] += 2.2 * d.dull;
+      a.air += 0.30 * d.dull * demand;
+      a.exciter += 0.16 * d.dull;
+      a.bands[5] += 2.0 * d.dull;
     }
-    if (m.airiness > 0.7) { a.air *= 0.5; a.bands[5] *= 0.45; }
+    if (m.airiness > 0.7) {
+      const extra = 1 - 0.5 * clamp((m.airiness - 0.7) / 0.3, 0, 1);
+      a.air *= extra * extra;                 // already bright: back off harder
+      a.exciter *= extra;
+      a.bands[5] *= extra;
+    }
+    a.air = clamp(a.air * SYNTH_CAL, 0, 0.95);
+    a.exciter = clamp(a.exciter * SYNTH_CAL, 0, 0.95);
 
     // ── harshness / ringing ────────────────────────────────────────────────
     if (d.harsh > 0.3) {
@@ -192,12 +220,16 @@
     if (d.crackle > 0.1) a.declick = clamp(0.25 + 0.7 * d.crackle, 0, 0.95);
 
     // ── dynamics ───────────────────────────────────────────────────────────
-    if (m.dynamicRangeDb < 10) a.glue *= 0.5;
+    if (m.dynamicRangeDb < 12) a.glue *= 0.5;
     else if (m.dynamicRangeDb > 20) a.glue = clamp(a.glue + 0.1, 0, 0.55);
     a.glue = clamp(a.glue, 0, 0.6);
 
-    // ── warmth: back off on already saturated material ─────────────────────
-    if (m.crestDb > 18 || m.clipRatio > 0.002) a.warmth *= 0.6;
+    // ── warmth: for material that still has room ───────────────────────────
+    // Saturation adds density, so it belongs on sparse, dynamic recordings.
+    // A modern, heavily limited master must not be squashed any further.
+    if (m.crestDb > 18) a.warmth *= 0.7;                       // very sparse
+    if (m.crestDb < 8 || m.clipRatio > 0.002) a.warmth *= 0.5; // dense or clipped
+    if (m.dynamicRangeDb < 12) a.warmth = Math.min(a.warmth, 0.20);
     a.warmth = clamp(a.warmth, 0, 0.65);
 
     // ── tone balance tilt (brightness relative to a neutral recording) ─────
@@ -221,12 +253,22 @@
     const base = PRESETS[id] || PRESETS.auto;
     const a = adapt(base.anchors, metrics, diag);
     const p = clamp(power, 0, 1);
-    // amounts follow a slightly concave curve → useful action in the low range
-    const amt = Math.pow(p, 0.85);
+    // Amounts follow a slightly concave curve, so the low range of the slider is
+    // useful. `on` is the "switched on at all" factor: it is *exactly* 0 at 0 %,
+    // which is what makes 0 % a bit-transparent copy of the original, and it is
+    // exactly 1 from 10 % upwards, so nothing else about the curve changes.
+    const on = smoothstep(0, 0.10, p);
+    const amt = Math.pow(p, 0.85) * on;
+    // the dry/wet crossfade only exists in the first few percent; above that the
+    // signal is fully wet and the amounts alone carry the intensity
+    const wet = smoothstep(0, 0.06, p);
+    // repair stages (de-hiss, de-click) engage a little earlier than the
+    // creative ones — but never before the slider has left zero
+    const repair = (x) => x * (0.35 + 0.65 * amt) * on;
 
     const bands = a.bands.map((g) => g * p);
     const params = {
-      power: 1,                      // scaling already applied to every anchor
+      power: wet,                    // dry/wet crossfade (0 % = untouched original)
       bypass: 0,
       band0: bands[0], band1: bands[1], band2: bands[2],
       band3: bands[3], band4: bands[4], band5: bands[5],
@@ -235,8 +277,8 @@
       subRatio: a.subRatio,
       exciter: a.exciter * amt,
       air: a.air * amt,
-      dehiss: a.dehiss * (0.35 + 0.65 * amt),
-      declick: a.declick * (0.35 + 0.65 * amt),
+      dehiss: repair(a.dehiss),
+      declick: repair(a.declick),
       glue: a.glue * amt,
       warmth: a.warmth * amt,
       tilt: a.tilt * p,

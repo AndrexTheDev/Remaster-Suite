@@ -26,7 +26,6 @@
   --green-2:       #00c853;
   --green-soft:    rgba(0, 230, 118, .14);
   --red:           #ff5c5c;
-  --blue:          #6aa9ff;
 
   --r-sm:          8px;
   --r-md:          12px;
@@ -36,7 +35,7 @@
   --sh-1:          0 1px 0 rgba(255,255,255,.03), 0 6px 20px rgba(0,0,0,.35);
   --sh-2:          0 18px 50px rgba(0,0,0,.55);
   --ring:          0 0 0 3px rgba(255,215,0,.35);
-  --ring-green:    0 0 0 3px rgba(0,230,118,.35);
+  --fill:          70;      /* range-input fill percentage, painted by ui.js */
 
   --wrap:          1180px;
   --ease:          cubic-bezier(.22,.61,.36,1);
@@ -116,7 +115,12 @@ code { font-family: var(--mono); }
 .flag-bar i:nth-child(3) { background: linear-gradient(90deg, var(--green-2), transparent); }
 
 /* ---------------------------------------------------------------- 4 · hero */
-.hero { padding: 54px 20px 26px; text-align: center; }
+.hero { padding: 44px 20px 26px; text-align: center; }
+.hero-logo {
+  margin: 0 auto 16px; width: 104px; height: 104px;
+  filter: drop-shadow(0 10px 26px rgba(255,200,0,.16));
+}
+.foot-logo { width: 52px; height: 52px; opacity: .92; }
 .hero h1 { font-size: clamp(1.9rem, 5vw, 3.1rem); margin-bottom: .35em; }
 .hero h1::after {
   content: ""; display: block; width: 92px; height: 4px; margin: 18px auto 0; border-radius: 4px;
@@ -397,6 +401,8 @@ input[type="range"]::-moz-range-thumb {
   border-radius: var(--r-lg); padding: 26px 26px 18px; box-shadow: var(--sh-2);
 }
 .dialog::backdrop { background: rgba(6,8,10,.72); backdrop-filter: blur(3px); }
+dialog.dialog[open] { display: block; }            /* fallback for showModal() */
+dialog.dialog:not([open]) { display: none; }
 .dialog h2 { font-size: 1.24rem; }
 .dialog-body { color: var(--ink-dim); font-size: .92rem; }
 .dialog-body h3 { color: var(--ink); font-size: .96rem; margin-top: 1.2em; }
@@ -426,7 +432,8 @@ input[type="range"]::-moz-range-thumb {
   .ctl-actions { margin-left: 0; }
 }
 @media (max-width: 720px) {
-  .hero { padding-top: 34px; }
+  .hero { padding-top: 26px; }
+  .hero-logo { width: 78px; height: 78px; }
   .dropzone { padding: 32px 16px 28px; border-radius: var(--r-lg); }
   .card { padding: 14px; }
   .hide-sm { display: none; }

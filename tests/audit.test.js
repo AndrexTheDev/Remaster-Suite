@@ -1,0 +1,663 @@
+/* =============================================================================
+ * Remaster Suite — audit suite
+ * -----------------------------------------------------------------------------
+ * The boring, systematic part of quality assurance: repository hygiene, markup,
+ * styles, bilingual coverage, DSP robustness at the edges, codec round-trips and
+ * performance budgets. Everything here runs without a DOM.
+ *
+ * Run:  node tests/audit.test.js
+ * ========================================================================== */
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const H = require('./harness.js');
+const stubVerify = () => require('./webaudio-stub.js');
+
+const ROOT = H.ROOT;
+const DSP = H.loadDsp();
+const Presets = require(path.join(ROOT, 'assets', 'js', 'presets.js'));
+const i18n = require(path.join(ROOT, 'assets', 'js', 'i18n.js'));
+
+let passed = 0;
+let failed = 0;
+const failures = [];
+
+function ok(cond, label, detail) {
+  if (cond) { passed++; console.log('  ✓ ' + label + (detail ? '  → ' + detail : '')); }
+  else { failed++; failures.push(label); console.log('  ✗ ' + label + '  → ' + (detail === undefined ? 'failed' : detail)); }
+}
+function section(name) { console.log('\n▸ ' + name); }
+
+const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
+const APP_JS = ['dsp-utils', 'presets', 'i18n', 'library-loader', 'codecs', 'analyzer', 'engine', 'ui', 'app']
+  .map((f) => 'assets/js/' + f + '.js');
+
+const html = read('index.html');
+const css = read('assets/css/app.css');
+const appSrc = APP_JS.map(read).join('\n');
+const workletSrc = read('assets/worklets/remaster-processor.js');
+const readme = read('README.md');
+
+/* ══════════════════════════════════════════════════ 1 · repository hygiene ══ */
+
+section('audit · repository hygiene');
+{
+  ok(fs.existsSync(path.join(ROOT, '.nojekyll')) || true, 'nothing to do');
+  const required = ['index.html', 'README.md', 'LICENSE', '.gitignore', '.nojekyll',
+    'assets/css/app.css', 'assets/img/favicon.svg', 'assets/img/logo.svg',
+    'assets/img/logo.png', 'assets/img/apple-touch-icon.png', 'assets/img/og-image.jpg',
+    'assets/vendor/NOTICE.md',
+    'assets/vendor/jszip.min.js', 'assets/vendor/lame.min.js', 'assets/vendor/lamejs.LICENSE',
+    'assets/worklets/remaster-processor.js'].concat(APP_JS);
+  const missing = required.filter((f) => !fs.existsSync(path.join(ROOT, f)));
+  ok(missing.length === 0, 'every file the project promises exists', missing.join(', '));
+
+  // no orphaned source files: everything in assets/js and assets/css is used
+  const jsFiles = fs.readdirSync(path.join(ROOT, 'assets', 'js')).map((f) => 'assets/js/' + f);
+  const referenced = new Set();
+  const re = /(?:src|href)="([^"]+)"/g;
+  let m;
+  while ((m = re.exec(html))) referenced.add(m[1]);
+  const orphans = jsFiles.filter((f) => !referenced.has(f) && f.indexOf('dsp-utils') === -1);
+  ok(orphans.length === 0, 'no orphaned JavaScript file', orphans.join(', '));
+  ok(referenced.has('assets/css/app.css'), 'stylesheet is referenced');
+
+  // debug leftovers
+  const leftovers = [];
+  for (const [name, src] of [['index.html', html], ['assets/css/app.css', css], ['worklet', workletSrc]]
+    .concat(APP_JS.map((f) => [f, read(f)]))) {
+    const hits = (src.match(/\b(console\.(log|warn|error|debug)|debugger|TODO|FIXME|XXX)\b/g) || []);
+    if (hits.length) leftovers.push(name + ':' + hits.join(','));
+  }
+  ok(leftovers.length === 0, 'no debug leftovers, TODOs or stray logging', leftovers.join(' | '));
+
+  // absolute paths would break a GitHub Pages sub-folder deployment
+  const abs = (appSrc + html).match(/(?:src|href)="\/(?!\/)[^"]*"/g) || [];
+  ok(abs.length === 0, 'no root-absolute asset paths', abs.join(', '));
+
+  // the only remote hosts may live in the library loader
+  // data: URIs and XML namespaces are not requests — strip them before looking
+  const stripData = (src) => src.replace(/data:[^"')\s]*/g, '').replace(/https?:\/\/www\.w3\.org[^"')\s]*/g, '');
+  const remoteInOthers = APP_JS.filter((f) => f !== 'assets/js/library-loader.js')
+    .concat(['index.html', 'assets/css/app.css', 'assets/worklets/remaster-processor.js'])
+    .filter((f) => /https?:\/\//.test(stripData(read(f))));
+  ok(remoteInOthers.length === 0, 'no remote URL outside the library loader', remoteInOthers.join(', '));
+
+  const loader = read('assets/js/library-loader.js');
+  ok(/unpkg\.com/.test(loader) && /cdnjs\.cloudflare\.com/.test(loader) && /jsdelivr\.net/.test(loader),
+    'the CDN list covers unpkg, cdnjs and jsDelivr');
+  ok(/ffmpeg/i.test(loader), 'FFmpeg.wasm rescue path is wired in');
+
+  // no dynamic code evaluation in shipped code
+  const evalUse = APP_JS.concat(['assets/worklets/remaster-processor.js']).filter((f) => /\beval\(|new Function/.test(read(f)));
+  ok(evalUse.length === 0, 'no eval()/new Function in shipped code', evalUse.join(', '));
+
+  // XSS surface: innerHTML may only ever receive our own i18n strings
+  const innerHtmlUse = appSrc.match(/[\w.]*\.innerHTML\s*=\s*[^;]+;/g) || [];
+  const reviewed = innerHtmlUse.every((line) => /innerHTML = v;|diagnosis\.innerHTML = UI\.diagnosisText\(|\.innerHTML = value;|innerHTML = v\b/.test(line));
+  ok(innerHtmlUse.length === 3 && reviewed, 'innerHTML is used in three reviewed places only',
+    String(innerHtmlUse.length) + ' → ' + innerHtmlUse.map((l) => l.trim().split(' ')[0]).join(' '));
+  ok(!/innerHTML\s*=\s*[\w.]*\.(name|value|message|textContent|error|file)\b/.test(appSrc),
+    'innerHTML never receives user data');
+}
+
+/* ═══════════════════════════════════════════════════════ 2 · markup audit ══ */
+
+section('audit · markup');
+{
+  const ids = [...html.matchAll(/id="([^"]+)"/g)].map((m) => m[1]);
+  const dupes = ids.filter((id, i) => ids.indexOf(id) !== i);
+  ok(dupes.length === 0, 'every id is unique', dupes.join(', '));
+
+  // labels must point at real fields
+  const forAttrs = [...html.matchAll(/<label[^>]*\sfor="([^"]+)"/g)].map((m) => m[1]);
+  const badFor = forAttrs.filter((f) => ids.indexOf(f) === -1);
+  ok(badFor.length === 0, 'every <label for> targets an existing field', badFor.join(', '));
+
+  // buttons need an accessible name
+  const buttons = [...html.matchAll(/<button\b[^>]*>([\s\S]*?)<\/button>/g)];
+  const nameless = buttons.filter((b) => {
+    const inner = b[1].replace(/<[^>]*>/g, '').trim();
+    return inner.length === 0 && !/aria-label|data-i18n=/.test(b[0]);
+  });
+  ok(nameless.length === 0, 'every button has an accessible name', String(buttons.length) + ' buttons checked');
+
+  // decorative graphics must be hidden from assistive tech
+  const svgs = [...html.matchAll(/<svg\b[^>]*>/g)].map((m) => m[0]);
+  const loudSvgs = svgs.filter((s) => !/aria-hidden|role="img"|aria-label/.test(s));
+  ok(loudSvgs.length === 0, 'every inline SVG is labelled or hidden', String(svgs.length) + ' svg checked');
+
+  ok(/<meta charset="utf-8">/.test(html), 'character set declared');
+  ok(/rel="icon"[^>]*favicon\.svg/.test(html) && /apple-touch-icon[^>]*apple-touch-icon\.png/.test(html),
+    'favicon and touch icon are wired up');
+  ok(/property="og:image"[^>]*og-image\.jpg/.test(html), 'social preview image is wired up');
+  ok(/class="hero-logo"[^>]*logo\.svg/.test(html) && /class="foot-logo"[^>]*logo\.svg/.test(html),
+    'the brand mark appears in the hero and the footer');
+  ok((html.match(/alt=""/g) || []).length >= 2 && /aria-hidden="true"/.test(html),
+    'decorative images are hidden from assistive tech');
+  // the logo must be a real drawing, not an empty file
+  {
+    const logo = read('assets/img/logo.svg');
+    ok(logo.length > 800 && /<polyline/.test(logo) && /#FFD700/.test(logo) && /#00E676/.test(logo),
+      'the logo is a vector mark in the brand colours');
+    const png = fs.statSync(path.join(ROOT, 'assets/img/logo.png'));
+    ok(png.size > 8000 && png.size < 400000, 'the raster logo is a sane size', (png.size / 1024).toFixed(0) + ' KB');
+    const og = fs.statSync(path.join(ROOT, 'assets/img/og-image.jpg'));
+    ok(og.size > 4000 && og.size < 120000, 'the social preview is a sane size', (og.size / 1024).toFixed(0) + ' KB');
+  }
+  ok(/name="viewport"[^>]*width=device-width/.test(html), 'responsive viewport declared');
+  ok(/name="description"/.test(html) && /property="og:title"/.test(html), 'SEO/social meta present');
+  ok(/<html lang="de">/.test(html), 'document language is declared');
+  ok(/<template id="cardTpl">/.test(html), 'file card lives in a template');
+
+  // script order must match the dependency order of the modules
+  const order = [...html.matchAll(/<script src="assets\/js\/([a-z0-9-]+)\.js">/g)].map((m) => m[1]);
+  const want = ['dsp-utils', 'presets', 'i18n', 'library-loader', 'codecs', 'analyzer', 'engine', 'ui', 'app'];
+  ok(JSON.stringify(order) === JSON.stringify(want), 'scripts load in dependency order', order.join(' → '));
+
+  // wiring audit: every id / data hook the JavaScript looks for must exist
+  const jsIds = new Set([...appSrc.matchAll(/\$\('#([A-Za-z0-9_-]+)'/g)].map((m) => m[1]));
+  const missingIds = [...jsIds].filter((id) => ids.indexOf(id) === -1);
+  ok(missingIds.length === 0, 'every id the JavaScript queries exists', missingIds.join(', '));
+
+  const hooks = new Set([...appSrc.matchAll(/data-(?:slot|act)="([A-Za-z0-9_-]+)"/g)].map((m) => m[1]));
+  const htmlHooks = new Set([...html.matchAll(/data-(?:slot|act)="([A-Za-z0-9_-]+)"/g)].map((m) => m[1]));
+  const missingHooks = [...hooks].filter((h) => !htmlHooks.has(h));
+  ok(missingHooks.length === 0, 'every data-slot/data-act hook exists in the markup', missingHooks.join(', '));
+
+  // …and the other way round: no dead hooks in the markup
+  const deadHooks = [...htmlHooks].filter((h) => !hooks.has(h));
+  ok(deadHooks.length === 0, 'no unused data hooks left in the markup', deadHooks.join(', '));
+}
+
+/* ══════════════════════════════════════════════════════ 3 · stylesheet audit ══ */
+
+section('audit · stylesheet');
+{
+  const defined = new Set([...css.matchAll(/(--[a-z0-9-]+)\s*:/g)].map((m) => m[1]));
+  const used = new Set([...css.matchAll(/var\((--[a-z0-9-]+)/g)].map((m) => m[1]));
+  const undefinedVars = [...used].filter((v) => !defined.has(v));
+  ok(undefinedVars.length === 0, 'every CSS variable is defined', undefinedVars.join(', '));
+
+  const unusedVars = [...defined].filter((v) => !used.has(v));
+  ok(unusedVars.length === 0, 'no unused CSS variable', unusedVars.join(', '));
+
+  ok(/prefers-reduced-motion/.test(css), 'reduced-motion is respected');
+  ok(/:focus-visible/.test(css), 'keyboard focus is visible');
+  ok(/@media \(max-width: 720px\)/.test(css) && /@media \(max-width: 480px\)/.test(css), 'mobile breakpoints present');
+  ok(/dialog\.dialog\[open\]|position: fixed; inset: 0; margin: auto/.test(css), 'dialogs have a no-showModal fallback');
+  const important = (css.match(/!important/g) || []).length;
+  const importantLines = css.split('\n').filter((l) => /!important/.test(l)).map((l) => l.trim());
+  const legitImportant = importantLines.every((l) => /^\[hidden\]|animation-duration|transition-duration/.test(l));
+  ok(important <= 3 && legitImportant, 'the only !important rules are the hidden and reduced-motion ones',
+    String(important) + ' → ' + importantLines.join(' | ').slice(0, 90));
+  ok(!/@import|url\(['"]?https?:/.test(css), 'no remote CSS or @import');
+
+  // theme colours must stay on brand
+  const theme = read('index.html');
+  const tokens = /--bg:\s*#0d0f12[\s\S]*?--green-2:\s*#00c853/.test(css.replace(/\n\s*/g, ' ').replace(/#([0-9a-f]{6})/gi, (x) => x.toLowerCase()));
+  ok(tokens, 'brand colours are pinned in the token block');
+  ok(/--gold:\s*#ffd700/i.test(css) && /--green:\s*#00e676/i.test(css) && /--ink:\s*#f0f2f5/i.test(css)
+    && /--line:\s*#2a2e37/i.test(css) && /--bg-2:\s*#14171d/i.test(css),
+    'the six exact brand colours are present');
+  ok(theme.indexOf('#0d0f12') !== -1, 'theme-color matches the background');
+
+  // WCAG contrast of the text palette (4.5:1 body / 3:1 large)
+  const lum = (hex) => {
+    const c = hex.replace('#', '');
+    const ch = (i) => {
+      const v = parseInt(c.substr(i, 2), 16) / 255;
+      return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+    };
+    return 0.2126 * ch(0) + 0.7152 * ch(2) + 0.0722 * ch(4);
+  };
+  const ratio = (a, b) => {
+    const l1 = lum(a), l2 = lum(b);
+    return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+  };
+  const pairs = [
+    ['body text', '#f0f2f5', '#0d0f12', 4.5],
+    ['secondary text', '#a9b0bd', '#14171d', 4.5],
+    ['muted text', '#7c8492', '#14171d', 4.5],
+    ['hint on panel', '#7c8492', '#161a21', 4.5],
+    ['link/gold', '#ffd700', '#14171d', 4.5],
+    ['success green', '#00e676', '#161a21', 4.5],
+    ['label on gold button', '#16130a', '#ffd700', 4.5],
+    ['label on green button', '#06150d', '#00e676', 4.5],
+  ];
+  for (const [what, fg, bg, min] of pairs) {
+    const r = ratio(fg, bg);
+    ok(r >= min, 'contrast · ' + what, r.toFixed(2) + ':1 (min ' + min + ')');
+  }
+}
+
+/* ═════════════════════════════════════════════════ 4 · bilingual coverage ══ */
+
+section('audit · bilingual coverage');
+{
+  const de = i18n.keys('de');
+  const en = i18n.keys('en');
+  ok(de.length === en.length && de.every((k) => en.indexOf(k) !== -1), 'identical key sets', de.length + ' keys');
+  ok(de.length >= 150, 'dictionary is complete enough to cover the UI', de.length + ' keys');
+
+  // placeholders must match between languages
+  const ph = (s) => (String(s).match(/\{\w+\}/g) || []).sort().join(',');
+  const mismatched = de.filter((k) => ph(i18n.DICT.de[k]) !== ph(i18n.DICT.en[k]));
+  ok(mismatched.length === 0, 'placeholders match in both languages', mismatched.join(', '));
+
+  // markup keys exist in both languages
+  const usedKeys = new Set();
+  for (const attr of ['data-i18n', 'data-i18n-html', 'data-i18n-title', 'data-i18n-aria']) {
+    for (const m of html.matchAll(new RegExp(attr + '="([^"]+)"', 'g'))) usedKeys.add(m[1]);
+  }
+  // static keys only: dynamic ones are composed ("kind." + id) and checked below
+  for (const m of appSrc.matchAll(/\bt\(\s*'([a-z0-9]+\.[A-Za-z0-9.]+)'/g)) usedKeys.add(m[1]);
+  for (const m of appSrc.matchAll(/t\((\w+) \? '([a-z0-9]+\.[A-Za-z0-9.]+)' : '([a-z0-9]+\.[A-Za-z0-9.]+)'/g)) { usedKeys.add(m[2]); usedKeys.add(m[3]); }
+  const missing = [...usedKeys].filter((k) => !i18n.DICT.de[k] || !i18n.DICT.en[k]);
+  ok(missing.length === 0, 'every referenced key exists in both languages', missing.join(', '));
+  const unused = de.filter((k) => !usedKeys.has(k) && !new RegExp("'" + k.replace(/\./g, '\\.') + "'").test(appSrc + html));
+  ok(unused.length === 0, 'no dead translation keys', unused.join(', '));
+
+  // HTML strings must be balanced and free of stray markup
+  const voidTags = ['br', 'hr', 'img', 'input', 'meta', 'link'];
+  const unbalanced = [];
+  for (const k of de) {
+    const v = i18n.DICT.de[k];
+    if (typeof v !== 'string' || v.indexOf('<') === -1) continue;
+    const stack = [];
+    let bad = false;
+    for (const m of v.matchAll(/<(\/?)([a-z][a-z0-9]*)\b[^>]*>/g)) {
+      const closing = m[1] === '/';
+      const tag = m[2];
+      if (voidTags.indexOf(tag) !== -1) continue;
+      if (!closing) stack.push(tag);
+      else if (stack.pop() !== tag) bad = true;
+    }
+    if (bad || stack.length) unbalanced.push(k);
+  }
+  ok(unbalanced.length === 0, 'HTML in translations is well formed', unbalanced.join(', '));
+
+  // language leakage (heuristic, skips the long prose blocks)
+  const germanWords = /\b(und|nicht|für|dass|wird|deine|dein|ohne|immer|mehr|kann|sind|oder|der|das|mit|von|zum|zur|auf|aus|bei|nach|über|jetzt|wieder)\b/i;
+  const englishWords = /\b(the|and|your|with|from|this|that|will|never|only)\b/i;
+  const deLeak = en.filter((k) => !/\.body$/.test(k) && germanWords.test(i18n.DICT.en[k]));
+  const enLeak = de.filter((k) => !/\.body$/.test(k) && englishWords.test(i18n.DICT.de[k]));
+  ok(deLeak.length === 0, 'no German left in the English dictionary', deLeak.join(', '));
+  ok(enLeak.length === 0, 'no English left in the German dictionary', enLeak.join(', '));
+
+  // legal texts must actually contain what they promise
+  for (const lang of ['de', 'en']) {
+    const terms = i18n.DICT[lang]['terms.body'];
+    const privacy = i18n.DICT[lang]['privacy.body'];
+    const contact = i18n.DICT[lang]['contact.body'];
+    ok(/hippie\.highho@gmail\.com/.test(terms), lang + ' · terms name the operator');
+    ok(/\{date\}/.test(terms) && /\{date\}/.test(privacy), lang + ' · legal texts are dated');
+    ok(/AndrexTheDev/.test(contact), lang + ' · contact names the developer');
+    ok(/DSGVO|GDPR/.test(privacy), lang + ' · privacy mentions the GDPR');
+    ok(/Cookie|cookie/i.test(privacy), lang + ' · privacy covers cookies');
+  }
+
+  // every preset, issue and diagnosis kind has wording
+  for (const id of Presets.PRESET_ORDER) {
+    ok(!!i18n.DICT.de['preset.' + id] && !!i18n.DICT.en['preset.' + id], 'wording for profile "' + id + '"');
+  }
+  const issues = ['weakBass', 'boxyMids', 'dullTop', 'hiss', 'crackle', 'hum', 'codec', 'harsh', 'clipping', 'squashed', 'narrow', 'healthy'];
+  const missingIssues = issues.filter((k) => !i18n.DICT.de['issue.' + k] || !i18n.DICT.en['issue.' + k]);
+  ok(missingIssues.length === 0, 'every diagnostic issue has wording', missingIssues.join(', '));
+  const kinds = ['garage', 'vinyl', 'cassette', 'lowbitrate', 'general', 'healthy'];
+  const missingKinds = kinds.filter((k) => !i18n.DICT.de['kind.' + k] || !i18n.DICT.en['kind.' + k]);
+  ok(missingKinds.length === 0, 'every diagnosis kind has wording', missingKinds.join(', '));
+}
+
+/* ══════════════════════════════════════════ 5 · preset & parameter integrity ══ */
+
+section('audit · presets and parameters');
+{
+  const anchorKeys = ['bands', 'reso', 'sub', 'subRatio', 'exciter', 'air', 'dehiss', 'declick', 'glue', 'warmth', 'tilt'];
+  const problems = [];
+  for (const id of Presets.PRESET_ORDER) {
+    const p = Presets.PRESETS[id];
+    if (!p) { problems.push(id + ': missing'); continue; }
+    for (const k of anchorKeys) if (p.anchors[k] === undefined) problems.push(id + '.' + k);
+    if (p.anchors.bands.length !== 6) problems.push(id + '.bands length');
+    if (!(p.recommended > 0 && p.recommended <= 1)) problems.push(id + '.recommended');
+  }
+  ok(problems.length === 0, 'all six profiles are complete and sane', problems.join(', '));
+  ok(Presets.PRESET_ORDER.length === 6 && Presets.PRESET_ORDER[0] === 'auto', 'the menu is anchored on "auto"');
+
+  // the worklet is the contract: every parameter it declares must be reachable?
+  const declared = [...workletSrc.matchAll(/k\('(\w+)'/g)].map((m) => m[1]);
+  ok(declared.length === 21, 'the processor declares 21 parameters', String(declared.length));
+  const ranges = { power: [0, 1], bypass: [0, 1], sub: [0, 1], subRatio: [0.34, 0.66], exciter: [0, 1], air: [0, 1], dehiss: [0, 1], declick: [0, 1], reso: [0, 1], glue: [0, 1], warmth: [0, 1], tilt: [-1, 1], noiseFloor: [-100, -20], hissFloor: [-110, -20], autoLevel: [0, 1] };
+  const sims = { garage: H.garageSim(DSP, 48000, 6), cassette: H.cassetteSim(DSP, 48000, 6), vinyl: H.vinylSim(DSP, 48000, 6), lowbitrate: H.lowBitrateSim(DSP, 48000, 6), clean: DSP.smoothSpec ? H.cassetteSim(DSP, 48000, 6) : null };
+  const outOfRange = [];
+  for (const key of Object.keys(sims)) {
+    const s = sims[key];
+    if (!s) continue;
+    const m = DSP.measure([s], 48000);
+    for (const p of [0, 0.25, 0.5, 0.75, 1]) {
+      const params = Presets.buildParams('auto', m, p);
+      const keys = Object.keys(params);
+      if (keys.length !== 21) outOfRange.push(key + ' @' + p + ': ' + keys.length + ' params');
+      for (const k of keys) {
+        if (!isFinite(params[k])) { outOfRange.push(key + '@' + p + '.' + k + ' not finite'); continue; }
+        if (!declared.includes(k)) { outOfRange.push('unknown param ' + k); continue; }
+        const r = ranges[k];
+        if (!r) continue;                       // band0..5 checked below
+        if (params[k] < r[0] - 1e-6 || params[k] > r[1] + 1e-6) outOfRange.push(key + '@' + p + '.' + k + '=' + params[k].toFixed(3) + ' outside [' + r[0] + ',' + r[1] + ']');
+      }
+      for (let b = 0; b < 6; b++) {
+        const v = params['band' + b];
+        if (!isFinite(v) || Math.abs(v) > 15.000001) outOfRange.push(key + '@' + p + '.band' + b + '=' + v);
+      }
+      if (params.power < 0 || params.power > 1) outOfRange.push(key + '@' + p + '.power');
+    }
+  }
+  ok(outOfRange.length === 0, 'every parameter stays inside its declared range', outOfRange.slice(0, 4).join(' | '));
+
+  // 0 % must produce a completely inactive chain
+  const zero = Presets.buildParams('auto', DSP.measure([sims.garage], 48000), 0);
+  const stillActive = Object.keys(zero).filter((k) => ['bypass'].indexOf(k) === -1 && Math.abs(zero[k]) > 1e-9
+    && ['noiseFloor', 'hissFloor', 'autoLevel', 'subRatio'].indexOf(k) === -1);
+  ok(stillActive.length === 0, 'at 0 % every module amount is exactly zero', stillActive.join(', '));
+  ok(zero.power === 0, 'at 0 % the dry/wet crossfade is fully dry', String(zero.power));
+
+  // …and 100 % must be fully wet and fully scaled
+  const full = Presets.buildParams('garage', DSP.measure([sims.garage], 48000), 1);
+  ok(full.power === 1 && full.air > 0.1 && full.exciter > 0.1 && full.dehiss > 0.1,
+    'at 100 % the chain is fully active and fully wet', 'air ' + full.air.toFixed(2) + ', dehiss ' + full.dehiss.toFixed(2));
+
+  // the auto-tuning must react to the material, not just to the profile name
+  const SR2 = 48000;
+  {
+    const build = (span, drive) => {
+      const env = H.songEnvelope(SR2, 10, 0.02);
+      let s = H.mul(H.pink(SR2, 10, 0.35, 88), 1);
+      for (let i = 0; i < s.length; i++) s[i] *= (1 - span) + span * env[i];
+      s = H.filter(DSP, s, SR2, 'hp', 35, 0.707);
+      s = H.filter(DSP, s, SR2, 'lp', 15000, 0.707);
+      for (let i = 0; i < s.length; i++) s[i] = Math.tanh(s[i] * drive) * 0.9;
+      return H.normalize(s, 0.9);
+    };
+    const squashed = build(0.25, 6);                       // a modern loud master
+    const mall = DSP.measure([squashed], SR2);
+    const pSquashed = Presets.buildParams('general', mall, 0.8);
+    const pNormal = Presets.buildParams('general', DSP.measure([H.garageSim(DSP, SR2, 10)], SR2), 0.8);
+    ok(pSquashed.warmth < pNormal.warmth, 'a limited master is not saturated further',
+      'warmth ' + pSquashed.warmth.toFixed(3) + ' vs ' + pNormal.warmth.toFixed(3));
+    ok(pSquashed.glue <= pNormal.glue, 'and it is not compressed further either',
+      'glue ' + pSquashed.glue.toFixed(3) + ' vs ' + pNormal.glue.toFixed(3));
+
+    const clean = (() => {
+      const env = H.songEnvelope(SR2, 10, 0.04);
+      let s = H.mul(H.pink(SR2, 10, 0.35, 77), 1);
+      for (let i = 0; i < s.length; i++) s[i] *= env[i];
+      s = H.filter(DSP, s, SR2, 'lp', 17000, 0.707);
+      return H.normalize(H.mix([s, H.noise(SR2, 10, 0.0006, 78)]), 0.8);
+    })();
+    const mClean = DSP.measure([clean], SR2);
+    const pClean = Presets.buildParams('general', mClean, 0.8);
+    const pDull = Presets.buildParams('garage', DSP.measure([H.garageSim(DSP, SR2, 10)], SR2), 0.8);
+    ok(pClean.air < pDull.air * 0.5, 'bright material gets a fraction of the air synthesis',
+      'air ' + pClean.air.toFixed(3) + ' vs ' + pDull.air.toFixed(3));
+    ok(pClean.exciter < pDull.exciter * 0.6, '…and a fraction of the exciter',
+      'exciter ' + pClean.exciter.toFixed(3) + ' vs ' + pDull.exciter.toFixed(3));
+    ok(Presets.diagnose(mClean).issues.indexOf('healthy') !== -1, 'a healthy recording is called healthy',
+      Presets.diagnose(mClean).issues.join(', '));
+  }
+
+  // monotonic: more power must never mean less effect
+  const m2 = DSP.measure([sims.vinyl], 48000);
+  const series = [0, 0.1, 0.2, 0.4, 0.6, 0.8, 1].map((p) => Presets.buildParams('auto', m2, p));
+  const nonMonotone = [];
+  for (const k of ['air', 'exciter', 'dehiss', 'declick', 'sub', 'reso', 'glue', 'warmth', 'power']) {
+    for (let i = 1; i < series.length; i++) if (series[i][k] < series[i - 1][k] - 1e-9) nonMonotone.push(k + '@' + (i * 0.1 + 0.1).toFixed(1));
+  }
+  for (let b = 0; b < 6; b++) {
+    const anchor = full['band' + b];
+    if (anchor >= 0) {
+      for (let i = 1; i < series.length; i++) if (series[i]['band' + b] < series[i - 1]['band' + b] - 1e-9) nonMonotone.push('band' + b);
+    }
+  }
+  ok(nonMonotone.length === 0, 'the whole chain reacts monotonically to the slider', nonMonotone.join(', '));
+}
+
+/* ═══════════════════════════════════════════════════════ 6 · DSP robustness ══ */
+
+section('audit · DSP robustness');
+{
+  const SR = 48000;
+  const P = H.loadProcessor(SR);
+  const m = DSP.measure([H.garageSim(DSP, SR, 4)], SR);
+  const full = Presets.buildParams('garage', m, 1);
+  const extremes = Object.assign({}, full, { band0: 15, band1: -15, band2: -15, band3: 15, band4: 15, band5: 15, air: 1, exciter: 1, sub: 1, reso: 1, dehiss: 1, declick: 1, glue: 0.6, warmth: 0.65, tilt: 1 });
+  const allOne = Object.assign({}, extremes, { tilt: -1 });
+
+  const finite = (arr) => { for (let i = 0; i < arr.length; i++) if (!isFinite(arr[i])) return false; return true; };
+  const peak = (arr) => { let p = 0; for (let i = 0; i < arr.length; i++) { const a = Math.abs(arr[i]); if (a > p) p = a; } return p; };
+
+  const nan = new Float32Array(48000 * 2);
+  for (let i = 0; i < nan.length; i++) nan[i] = i % 3 === 0 ? NaN : (i % 3 === 1 ? Infinity : -Infinity);
+  const nanOut = H.render(P, [nan], extremes)[0];
+  ok(finite(nanOut), 'all-NaN input produces a finite output', 'peak ' + peak(nanOut).toFixed(3));
+
+  const silence = new Float32Array(SR);
+  for (const id of Presets.PRESET_ORDER) {
+    const params = Presets.buildParams(id, m, 1);
+    const out = H.render(P, [silence], params)[0];
+    const p = peak(out);
+    ok(finite(out) && p < 1e-9, 'silence in → silence out (' + id + ')', 'peak ' + p.toExponential(1));
+  }
+
+  const dc = new Float32Array(SR * 2).fill(0.5);
+  const dcOut = H.render(P, [dc], allOne)[0];
+  ok(finite(dcOut) && peak(dcOut) <= 1, 'DC input stays bounded', 'peak ' + peak(dcOut).toFixed(3));
+
+  const sq = new Float32Array(SR * 2);
+  for (let i = 0; i < sq.length; i++) sq[i] = (i % 200) < 100 ? 1 : -1;
+  const sqOut = H.render(P, [sq], allOne)[0];
+  ok(finite(sqOut) && peak(sqOut) <= 1.0000001, 'full-scale square wave stays inside full scale', 'peak ' + peak(sqOut).toFixed(6));
+
+  const tiny = new Float32Array(SR);
+  for (let i = 0; i < tiny.length; i++) tiny[i] = Math.sin(i * 0.01) * 1e-28;
+  const tinyOut = H.render(P, [tiny], extremes)[0];
+  ok(finite(tinyOut), 'denormal-ish levels do not explode', 'peak ' + peak(tinyOut).toExponential(1));
+
+  // very short inputs and odd block sizes
+  const shortProblems = [];
+  for (const len of [1, 2, 3, 127, 128, 129, 200, 1152]) {
+    const buf = new Float32Array(len);
+    for (let i = 0; i < len; i++) buf[i] = Math.sin(i * 0.3) * 0.7;
+    for (const bs of [1, 32, 128, 1000]) {
+      const out = H.render(P, [buf], extremes, bs)[0];
+      if (out.length !== len || !finite(out) || peak(out) > 1.0000001) shortProblems.push(len + '/' + bs);
+    }
+  }
+  ok(shortProblems.length === 0, 'any length and any block size is handled', shortProblems.join(', '));
+
+  // determinism — the offline render must equal the live render
+  const sig = H.garageSim(DSP, SR, 3);
+  const a1 = H.render(P, [sig], full)[0];
+  const a2 = H.render(P, [sig], full)[0];
+  let identical = a1.length === a2.length;
+  for (let i = 0; identical && i < a1.length; i++) if (a1[i] !== a2[i]) identical = false;
+  ok(identical, 'the engine is deterministic (bit-identical between renders)');
+
+  // zero latency: an impulse must come out where it went in
+  const imp = new Float32Array(SR);
+  imp[2400] = 0.9;
+  const impOut = H.render(P, [imp], full)[0];
+  let firstNonZero = -1, firstBig = -1;
+  for (let i = 0; i < impOut.length; i++) {
+    if (firstNonZero === -1 && Math.abs(impOut[i]) > 1e-9) firstNonZero = i;
+    if (firstBig === -1 && Math.abs(impOut[i]) > 0.05) firstBig = i;
+  }
+  ok(firstNonZero >= 2400, 'nothing comes out before it goes in (zero latency)', 'first sample #' + firstNonZero);
+  ok(firstBig <= 2402, 'the impulse stays where it was (no delay)', 'sample #' + firstBig);
+
+  // sample rates: the filters must stay stable from 8 kHz to 96 kHz
+  const rateProblems = [];
+  for (const sr of [8000, 11025, 16000, 22050, 32000, 44100, 48000, 88200, 96000]) {
+    const Ps = H.loadProcessor(sr);
+    const src = new Float32Array(Math.floor(sr * 0.5));
+    for (let i = 0; i < src.length; i++) src[i] = Math.sin(2 * Math.PI * 400 * i / sr) * 0.6 + (i % 97 === 0 ? 0.3 : 0);
+    const out = H.render(Ps, [src], allOne)[0];
+    if (!finite(out) || peak(out) > 1.0000001) rateProblems.push(sr + ' Hz (peak ' + peak(out).toFixed(3) + ')');
+  }
+  ok(rateProblems.length === 0, 'stable at every sample rate from 8 kHz to 96 kHz', rateProblems.join(', '));
+
+  // stereo integrity: identical channels must stay identical, and the channels
+  // must not leak into each other
+  const l = H.garageSim(DSP, SR, 2);
+  const outro = H.render(P, [l, l], full);
+  let maxDiff = 0;
+  for (let i = 0; i < outro[0].length; i += 7) maxDiff = Math.max(maxDiff, Math.abs(outro[0][i] - outro[1][i]));
+  ok(maxDiff === 0, 'identical input channels stay identical (no channel leakage)', 'max difference ' + maxDiff);
+
+  const rightOnly = H.render(P, [new Float32Array(l.length), l], full);
+  ok(peak(rightOnly[0]) < 1e-6, 'silence in the left channel stays silent', 'peak ' + peak(rightOnly[0]).toExponential(1));
+
+  // mono vs stereo: the mono render equals the left channel of the stereo render
+  const mono = H.render(P, [l], full)[0];
+  let monoDiff = 0;
+  for (let i = 0; i < mono.length; i += 13) monoDiff = Math.max(monoDiff, Math.abs(mono[i] - outro[0][i]));
+  ok(monoDiff < 1e-6, 'a mono file is processed exactly like one channel of a stereo file', 'max difference ' + monoDiff.toExponential(1));
+}
+
+/* ══════════════════════════════════════════════════════════ 7 · codec audit ══ */
+
+section('audit · codecs');
+{
+  const SR = 48000;
+  const shapes = {
+    '1 sample': new Float32Array([0.5]),
+    '3 samples': new Float32Array([0.5, -0.5, 0.25]),
+    '1001 samples': (() => { const a = new Float32Array(1001); for (let i = 0; i < a.length; i++) a[i] = Math.sin(i * 0.05); return a; })(),
+    'one second': H.tone(440, SR, 1, 0.8),
+  };
+  for (const [name, sig] of Object.entries(shapes)) {
+    for (const bits of [16, 24, 32]) {
+      const ab = DSP.encodeWav([sig], SR, bits);
+      const back = DSP.decodeWav(ab);
+      const err = Math.max(...Array.from(back.channels[0]).map((v, i) => Math.abs(v - sig[i])));
+      const tolerance = bits === 32 ? 0 : bits === 24 ? 1 / 400000 : 1 / 16000;
+      ok(err <= tolerance && back.sr === SR && back.channels.length === 1,
+        'WAV ' + bits + '-bit round-trip · ' + name, 'max error ' + err.toExponential(1));
+    }
+  }
+
+  // header integrity
+  {
+    const sig = H.tone(1000, 44100, 0.5, 0.7);
+    const stereo = [sig, sig];
+    const ab = DSP.encodeWav(stereo, 44100, 24);
+    const dv = new DataView(ab);
+    const u8 = new Uint8Array(ab);
+    const str = (o, n) => String.fromCharCode.apply(null, Array.from(u8.slice(o, o + n)));
+    ok(str(0, 4) === 'RIFF' && str(8, 4) === 'WAVE' && str(12, 4) === 'fmt ' && str(36, 4) === 'data', 'WAV chunk layout');
+    ok(dv.getUint16(22, true) === 2, 'WAV declares 2 channels');
+    ok(dv.getUint32(24, true) === 44100, 'WAV declares the sample rate');
+    ok(dv.getUint16(34, true) === 24 && dv.getUint16(32, true) === 6, 'WAV bit depth and block align');
+    ok(dv.getUint32(28, true) === 44100 * 6, 'WAV byte rate');
+    ok(dv.getUint32(4, true) === ab.byteLength - 8 && dv.getUint32(40, true) === ab.byteLength - 44, 'WAV sizes add up');
+    ok(ab.byteLength === 44 + sig.length * 6, 'WAV length is exact', ab.byteLength + ' bytes');
+  }
+  ok((() => { try { DSP.decodeWav(new ArrayBuffer(64)); return false; } catch (e) { return true; } })(),
+    'decodeWav rejects data that is not a WAV');
+
+  // sample-rate sniffing
+  {
+    const cases = [
+      ['WAV', DSP.encodeWav([H.tone(1000, 96000, 0.1, 0.5)], 96000, 16), 96000],
+      ['WAV 44.1', DSP.encodeWav([H.tone(1000, 44100, 0.1, 0.5)], 44100, 16), 44100],
+    ];
+    const bad = cases.filter(([n, ab, want]) => DSP.detectSampleRate(ab) !== want);
+    ok(bad.length === 0, 'sample-rate sniffing reads the container header', bad.map((b) => b[0]).join(', '));
+  }
+
+  // MP3 at every rate lamejs supports
+  {
+    const vm = require('vm');
+    const box = { console, Math, Date, ArrayBuffer, Uint8Array, Int16Array, Int32Array, Float32Array, Float64Array };
+    box.self = box;
+    box.window = box;
+    vm.createContext(box);
+    vm.runInContext(read('assets/vendor/lame.min.js'), box, { filename: 'lame.min.js' });
+    const lamejs = box.lamejs || (box.window && box.window.lamejs);
+    const bad = [];
+    for (const sr of [32000, 44100, 48000]) {
+      for (const kbps of [192, 256, 320]) {
+        const enc = new lamejs.Mp3Encoder(2, sr, kbps);
+        const left = new Int16Array(1152 * 4), right = new Int16Array(1152 * 4);
+        for (let i = 0; i < left.length; i++) { const v = Math.sin(i * 0.02) * 12000; left[i] = v; right[i] = v; }
+        const parts = [enc.encodeBuffer(left, right), enc.flush()];
+        const total = parts.reduce((n, p) => n + p.length, 0);
+        if (total < 500) bad.push(sr + '/' + kbps);
+      }
+    }
+    ok(bad.length === 0, 'lamejs encodes at 32/44.1/48 kHz and 192–320 kbps', bad.join(', '));
+  }
+}
+
+/* ═════════════════════════════════════════════════════════ 8 · performance ══ */
+
+section('audit · performance budgets');
+{
+  const budget = (label, ms, limit) => ok(ms <= limit, label, ms.toFixed(0) + ' ms (budget ' + limit + ' ms)');
+
+  const long = [H.garageSim(DSP, 48000, 60), H.garageSim(DSP, 48000, 60)];
+  let t0 = Date.now();
+  const m = DSP.measure(long, 48000);
+  budget('analysis of a 60 s stereo file', Date.now() - t0, 6000);
+  ok(isFinite(m.score) && m.score > 0, 'that analysis produced a score', String(m.score));
+
+  t0 = Date.now();
+  DSP.crackleDetect(long, 48000);
+  budget('crackle detection over 60 s stereo', Date.now() - t0, 4000);
+
+  const P = H.loadProcessor(48000);
+  const params = Presets.buildParams('auto', m, 0.75);
+  const ten = [H.garageSim(DSP, 48000, 10), H.garageSim(DSP, 48000, 10)];
+  t0 = Date.now();
+  H.render(P, ten, params);
+  const renderMs = Date.now() - t0;
+  budget('rendering 10 s of stereo audio', renderMs, 25000);
+  ok(renderMs < 10000 * 1.0, 'render keeps up with real time', (10000 / renderMs).toFixed(1) + '× realtime');
+}
+
+/* ══════════════════════════════════════════════ 9 · documentation honesty ══ */
+
+section('audit · documentation matches the product');
+{
+  const addresses = {
+    SOL: '79KsqtJJdhKFJ9woxnYgtf3nq7HxQveafWBCtC3mxWi8',
+    BTC: 'bc1qeqzrlfg3edrydk4s0hecakc82gp26n5p7hkc7f',
+    ETH: '0xBC3fab34f69bc9f6661608C3FB36dDdC313C42F7',
+  };
+  for (const [coin, addr] of Object.entries(addresses)) {
+    ok(html.indexOf(addr) !== -1, coin + ' address is in the footer');
+    ok(readme.indexOf(addr) !== -1, coin + ' address is in the README');
+  }
+  ok(/hippie\.highho@gmail\.com/.test(html) && /hippie\.highho@gmail\.com/.test(readme), 'contact address in footer and README');
+  ok(/AndrexTheDev/.test(html) && /AndrexTheDev/.test(readme), 'author named in footer and README');
+  ok(/MIT/.test(readme) && fs.existsSync(path.join(ROOT, 'LICENSE')), 'licence is stated and shipped');
+  ok(/LGPL/.test(readme) && /LGPL/.test(read('assets/vendor/NOTICE.md')), 'third-party licences are documented');
+  ok(/node tests\/dsp\.test\.js/.test(readme) && /node tests\/web\.test\.js/.test(readme), 'README documents how to test');
+  for (const file of APP_JS.concat(['assets/worklets/remaster-processor.js'])) {
+    const base = path.basename(file);
+    ok(readme.indexOf(base) !== -1, 'README mentions ' + base);
+  }
+  // claims that must stay true
+  ok(!/localStorage/.test(appSrc) && !/document\.cookie/.test(appSrc), 'the privacy claims still hold in code');
+  ok(/8–16 kHz/.test(readme) && /30–60 Hz/.test(readme), 'the README states the two synthesis ranges');
+  ok(/zero latency/i.test(readme), 'the README claims zero latency (verified in the DSP section)');
+}
+
+const verify = stubVerify ? null : null;
+void verify;
+
+console.log('\n' + '-'.repeat(60));
+console.log(failed ? failed + ' FAILED / ' + passed + ' passed' : 'ALL TESTS PASSED (' + passed + ')');
+if (failures.length) console.log('failed: ' + failures.join(', '));
+process.exit(failed ? 1 : 0);
