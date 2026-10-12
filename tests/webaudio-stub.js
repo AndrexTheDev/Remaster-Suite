@@ -97,6 +97,7 @@ class SourceNodeStub extends NodeStub {
     this._offset = 0;
     this._pos = 0;
     this.onended = null;
+    this._scratch = null;
   }
   start(when, offset) {
     this._playing = true;
@@ -110,23 +111,37 @@ class SourceNodeStub extends NodeStub {
     const buf = this.buffer;
     const rate = this.playbackRate.value * (buf.sampleRate / ctxRate);
     const nCh = this.buffer.numberOfChannels;
+    if (!this._scratch || this._scratch.length !== nCh || this._scratch[0].length < n) {
+      this._scratch = [];
+      for (let c = 0; c < nCh; c++) this._scratch.push(new Float32Array(Math.max(128, n)));
+    }
     const out = [];
-    for (let c = 0; c < nCh; c++) out.push(new Float32Array(n));
+    for (let c = 0; c < nCh; c++) {
+      const s = this._scratch[c].length === n ? this._scratch[c] : this._scratch[c].subarray(0, n);
+      s.fill(0);
+      out.push(s);
+    }
     let pos = this._pos;
     const end = buf.length;
     const loopFrom = (this.loop ? this.loopStart : this._offset) * buf.sampleRate;
     const loopTo = this.loop ? this.loopEnd * buf.sampleRate : end;
-    for (let i = 0; i < n; i++) {
-      if (this.loop && pos >= loopTo) pos = loopFrom + ((pos - loopFrom) % Math.max(1, loopTo - loopFrom));
-      if (pos >= end) { this._playing = false; break; }
-      const i0 = Math.floor(pos);
-      const i1 = Math.min(end - 1, i0 + 1);
-      const f = pos - i0;
-      for (let c = 0; c < nCh; c++) {
-        const d = buf._data[c];
-        out[c][i] = d[i0] * (1 - f) + d[i1] * f;
+    if (rate === 1 && !this.loop && Math.floor(pos) === pos && pos + n <= end) {
+      const p0 = pos | 0;
+      for (let c = 0; c < nCh; c++) out[c].set(buf._data[c].subarray(p0, p0 + n));
+      pos += n;
+    } else {
+      for (let i = 0; i < n; i++) {
+        if (this.loop && pos >= loopTo) pos = loopFrom + ((pos - loopFrom) % Math.max(1, loopTo - loopFrom));
+        if (pos >= end) { this._playing = false; break; }
+        const i0 = Math.floor(pos);
+        const i1 = Math.min(end - 1, i0 + 1);
+        const f = pos - i0;
+        for (let c = 0; c < nCh; c++) {
+          const d = buf._data[c];
+          out[c][i] = d[i0] * (1 - f) + d[i1] * f;
+        }
+        pos += rate;
       }
-      pos += rate;
     }
     this._pos = pos;
     this._emit(out);
@@ -175,18 +190,33 @@ class WorkletNodeStub extends NodeStub {
     if (!Cls) throw new Error('worklet not loaded');
     this.processor = new Cls({ processorOptions: { channels: this._wantChannels } });
     this.parameters = new Map();
-    for (const d of (Cls.parameterDescriptors || [])) this.parameters.set(d.name, new ParamStub(d));
+    this._paramArrays = {};
+    for (const d of (Cls.parameterDescriptors || [])) {
+      const p = new ParamStub(d);
+      this.parameters.set(d.name, p);
+      this._paramArrays[d.name] = new Float32Array([p.value]);
+    }
     this.port = this.processor.port;
+    this._zero = new Float32Array(128);
+    this._outScratch = [];
+    for (let c = 0; c < this._wantChannels; c++) this._outScratch.push(new Float32Array(128));
   }
   _render(n) {
     const nCh = this._wantChannels;
+    if (this._zero.length < n) {
+      this._zero = new Float32Array(n);
+      this._outScratch = [];
+      for (let c = 0; c < nCh; c++) this._outScratch.push(new Float32Array(n));
+    }
+    const zero = this._zero.length === n ? this._zero : this._zero.subarray(0, n);
     const inCh = [];
-    for (let c = 0; c < nCh; c++) inCh.push(this._in && this._in[c] ? this._in[c] : new Float32Array(n));
     const outCh = [];
-    for (let c = 0; c < nCh; c++) outCh.push(new Float32Array(n));
-    const params = {};
-    for (const [k, p] of this.parameters) params[k] = Float32Array.from([p.value]);
-    this.processor.process([inCh], [outCh], params);
+    for (let c = 0; c < nCh; c++) {
+      inCh.push(this._in && this._in[c] ? this._in[c] : zero);
+      outCh.push(this._outScratch[c].length === n ? this._outScratch[c] : this._outScratch[c].subarray(0, n));
+    }
+    for (const [k, p] of this.parameters) this._paramArrays[k][0] = p.value;
+    this.processor.process([inCh], [outCh], this._paramArrays);
     this._emit(outCh);
   }
 }

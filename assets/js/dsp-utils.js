@@ -242,24 +242,28 @@
 
   /** Integrated-style loudness (ITU-R BS.1770 flavour, approx ±1.5 LU). */
   function loudness(channels, sr) {
-    const hp = biquadHP(sr, 60, 0.5);
-    const shelf = [1.53512485958697, -2.69169618940638, 1.19839281085285,
-      -1.69065929318241, 0.73248077421585]; // BS.1770 high-shelf @ ~1.5 kHz
-    let ms = 0, n = 0;
     const nCh = channels.length;
-    const processed = channels.map((c) => applyBiquad(applyBiquad(c, hp), shelf));
-    const len = processed[0].length;
+    if (!nCh || !channels[0].length) return -70;
+    const len = channels[0].length;
+    const [hb0, hb1, hb2, ha1, ha2] = biquadHP(sr, 60, 0.5);
+    const sb0 = 1.53512485958697, sb1 = -2.69169618940638, sb2 = 1.19839281085285;
+    const sa1 = -1.69065929318241, sa2 = 0.73248077421585; // BS.1770 high-shelf @ ~1.5 kHz
+    const invCh = 1 / nCh;
+    let hz1 = 0, hz2 = 0, sz1 = 0, sz2 = 0, ms = 0;
     for (let i = 0; i < len; i++) {
-      let v = 0;
-      for (let c = 0; c < nCh; c++) v += processed[c][i];
-      v /= nCh;
-      ms += v * v; n++;
+      let x = 0;
+      for (let c = 0; c < nCh; c++) x += channels[c][i];
+      x *= invCh;
+      const hy = Math.fround(hb0 * x + hz1);
+      hz1 = hb1 * x - ha1 * hy + hz2;
+      hz2 = hb2 * x - ha2 * hy;
+      const sy = Math.fround(sb0 * hy + sz1);
+      sz1 = sb1 * hy - sa1 * sy + sz2;
+      sz2 = sb2 * hy - sa2 * sy;
+      ms += sy * sy;
     }
-    if (!n) return -70;
-    return -0.691 + 10 * Math.log10(ms / n);
+    return -0.691 + 10 * Math.log10(ms / len);
   }
-
-  /** RMS of the quietest 10 % of 50 ms frames → good noise-floor proxy. */
 
   /**
    * Crackle / click detection.
@@ -273,17 +277,20 @@
    * Reference values: clean music ≈ 13 dB · light crackle ≈ 20 dB · worn vinyl ≈ 24 dB+.
    */
   function crackleDetect(channels, sr, winSec) {
-    const hp = biquadHP(sr, 8500, 0.707);
+    const [b0, b1, b2, a1, a2] = biquadHP(sr, 8500, 0.707);
     const win = Math.max(64, Math.round(sr * (winSec || 0.02)));
     const crests = [];
     let gPeak = 0, gSum = 0, gCount = 0, pops = 0;
     for (const ch of channels) {
-      const hi = applyBiquad(ch, hp);
-      const len = hi.length;
+      const len = ch.length;
+      let z1 = 0, z2 = 0;
       for (let off = 0; off + win <= len; off += win) {
         let peak = 0, ms = 0;
         for (let i = off; i < off + win; i++) {
-          const x = hi[i];
+          const raw = ch[i];
+          const x = Math.fround(b0 * raw + z1);
+          z1 = b1 * raw - a1 * x + z2;
+          z2 = b2 * raw - a2 * x;
           const a = x < 0 ? -x : x;
           if (a > peak) peak = a;
           ms += x * x;
@@ -291,7 +298,11 @@
         gSum += ms; gCount += win;
         if (peak > gPeak) gPeak = peak;
         const rms = Math.sqrt(ms / win);
-        if (rms > 1e-5) crests.push(peak / rms);
+        if (rms > 1e-5) {
+          const cf = peak / rms;
+          crests.push(cf);
+          if (cf > 4.5) pops++;
+        }
       }
     }
     const grms = Math.sqrt(gSum / Math.max(1, gCount));
@@ -541,9 +552,8 @@
     const high = bandMedian(spec, 6000, 12000);
     const veryHigh = bandMedian(spec, 12500, 16000);
 
-    m.subDeficit = clamp((-3 * Math.log2(113 / 42) + bass - sub) / 15, 0, 1);
     m.bassRoll = clamp((-3 * Math.log2(121 / 45) + bass - sub) / 16, 0, 1);
-    m.subDeficit = clamp((-3 * Math.log2(121 / 45) + bass - sub) / 16, 0, 1);
+    m.subDeficit = m.bassRoll;
     m.mudScore = clamp((-3 * Math.log2(1130 / 347) + lowMid - mid) / 12, 0, 1);
     m.harshness = clamp((-3 * Math.log2(2830 / 1130) + upperMid - mid - 2) / 10, 0, 1);
     m.airiness = clamp((-3 * Math.log2(8500 / 113) + high - bass) / 24, 0, 1);
@@ -815,7 +825,9 @@
     }
     if (!fmt) throw new Error('WAV: no fmt chunk');
     const bytes = fmt.bits / 8;
-    const frames = Math.floor(dataLen / (bytes * fmt.channels));
+    if (!bytes || fmt.channels < 1) throw new Error('WAV: invalid format');
+    const avail = Math.max(0, Math.min(dataLen, u8.length - dataOff));
+    const frames = Math.floor(avail / (bytes * fmt.channels));
     const chans = [];
     for (let c = 0; c < fmt.channels; c++) chans.push(new Float32Array(frames));
     for (let i = 0; i < frames; i++) {

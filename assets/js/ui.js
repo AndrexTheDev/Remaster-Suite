@@ -151,10 +151,18 @@
         this._ro = new global.ResizeObserver(() => this.schedule());
         this._ro.observe(c);
       } else {
-        global.addEventListener('resize', () => this.schedule());
+        this._onResize = () => this.schedule();
+        global.addEventListener('resize', this._onResize);
       }
-      const onVis = () => { if (!doc.hidden) this.schedule(); };
-      doc.addEventListener('visibilitychange', onVis);
+      this._onVis = () => { if (!doc.hidden) this.schedule(); };
+      doc.addEventListener('visibilitychange', this._onVis);
+    }
+
+    destroy() {
+      if (this._raf) { global.cancelAnimationFrame(this._raf); this._raf = 0; }
+      if (this._ro) { try { this._ro.disconnect(); } catch (e) { /* ignore */ } this._ro = null; }
+      if (this._onResize) { global.removeEventListener('resize', this._onResize); this._onResize = null; }
+      if (this._onVis && doc) { doc.removeEventListener('visibilitychange', this._onVis); this._onVis = null; }
     }
 
     _seek(ev) {

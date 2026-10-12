@@ -271,6 +271,13 @@ async function run() {
   const res24 = await win.RSApp.renderCard(card, { force: true });
   const d24 = DSP.decodeWav(res24.bytes.buffer);
   ok(d24.bitDepth === 24, '24-bit WAV export', d24.bitDepth + ' bit');
+  win.document.querySelector('#wavDepth').value = '32';
+  win.document.querySelector('#wavDepth').dispatchEvent(new win.Event('change'));
+  ok(win.RSApp.State.wavDepth === 32, '32-bit float WAV option is selectable in the UI');
+  const res32 = await win.RSApp.renderCard(card, { force: true });
+  const d32 = DSP.decodeWav(res32.bytes.buffer);
+  ok(d32.bitDepth === 32 && d32.format === 3, '32-bit float WAV export', d32.bitDepth + ' bit float');
+  win.RSApp.State.wavDepth = 16;
 
   section('flow · MP3 export through lamejs');
   win.RSApp.State.format = 'mp3';
@@ -339,8 +346,10 @@ async function run() {
   const card3 = win.RSApp.State.cards[win.RSApp.State.cards.length - 1];
   ok(card3 && card3.status === 'error', 'broken file ends up in the error state', card3 && card3.status);
   ok(!card3.el.note.hidden && card3.el.note.textContent.length > 3, 'card explains itself', card3.el.note.textContent.slice(0, 40));
+  ok(/\(2\)/.test(win.document.querySelector('#btnZip').textContent), 'ZIP button shows count for multiple cards');
   win.RSApp.removeCard(card3);
   ok(win.RSApp.State.cards.length === 1, 'broken card can be removed');
+  ok(!/\(2\)/.test(win.document.querySelector('#btnZip').textContent), 'ZIP button count updates when a card is removed');
 
   /* summary */
   console.log('\n' + '-'.repeat(60));

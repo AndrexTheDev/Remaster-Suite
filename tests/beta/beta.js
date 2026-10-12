@@ -505,15 +505,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   md += `| keyboard focus | \`12-desktop-de-focus.png\` | — |\n`;
   md += `| full page | \`17-desktop-de-fullpage.png\` | — |\n\n`;
   md += `All screenshots live in \`docs/beta/\`. Captured sizes: ` + shots.map((s) => s.name + ' ' + s.size).join(' · ') + '.\n';
-  md += `\n## Harness notes\n\n` +
-    `- The suite drives a packaged headless Chromium (\\`@sparticuz/chromium\\`, an optional\n` +
-    `  dev dependency) over the raw DevTools protocol — no puppeteer needed.\n` +
-    `- Awaiting the MP3 render through \\`Runtime.evaluate\\`'s \\`awaitPromise\\` deadlocks in\n` +
-    `  this headless sandbox (page and Node both idle; isolated repros with programmatic\n` +
-    `  clicks pass). The suite therefore uses fire-and-forget + polling for that one\n` +
-    `  call, which is equally strict: the promise must settle and the page must keep\n` +
-    `  answering.\n` +
-    `- Analysis/render timings are sandbox-CPU numbers; real hardware is faster.\n`;
+  md += '\n## Harness notes\n\n' +
+    '- The suite drives a packaged headless Chromium (`@sparticuz/chromium`, an optional\n' +
+    '  dev dependency) over the raw DevTools protocol — no puppeteer needed.\n' +
+    '- Awaiting the MP3 render through `Runtime.evaluate`\'s `awaitPromise` deadlocks in\n' +
+    '  this headless sandbox (page and Node both idle; isolated repros with programmatic\n' +
+    '  clicks pass). The suite therefore uses fire-and-forget + polling for that one\n' +
+    '  call, which is equally strict: the promise must settle and the page must keep\n' +
+    '  answering.\n' +
+    '- Analysis/render timings are sandbox-CPU numbers; real hardware is faster.\n';
   fs.writeFileSync(path.join(ROOT, 'docs', 'BETA-REPORT.md'), md);
 
   console.log('\n' + '-'.repeat(60));

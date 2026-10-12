@@ -60,7 +60,7 @@
 
   /** Handy file name for the result. */
   function outputName(name, ext, suffix) {
-    const base = String(name || 'audio').replace(/\.[^.]+$/, '').replace(/[\\/:*?"<>|]+/g, '_');
+    const base = String(name || 'audio').replace(/\.[^.]+$/, '').replace(/[\\/:*?"<>|]+/g, '_').trim() || 'audio';
     return base + (suffix === undefined ? ' (restored)' : suffix) + '.' + ext;
   }
 
@@ -84,7 +84,6 @@
     return Promise.reject(new Error('cannot read file'));
   }
 
-  let decodeCtxCache = null;
   let liveDecodeCtx = null;
   function decodeContext(sr) {
     const rate = clamp(sr || 44100, 8000, 96000);

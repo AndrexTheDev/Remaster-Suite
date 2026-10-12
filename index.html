@@ -88,7 +88,7 @@
       <p class="dz-hint" id="dzHint" data-i18n="drop.hint">… oder klicken und auswählen. Mehrere Dateien auf einmal sind erlaubt.</p>
       <button type="button" class="btn btn-primary btn-lg" id="btnPick"
               aria-describedby="dzHint dzFormats" data-i18n="drop.button">Dateien auswählen</button>
-      <p class="dz-formats" id="dzFormats" data-i18n="drop.formats">MP3 · WAV · FLAC · OGG · M4A/AAC — bis zu 2 GB, ohne Upload</p>
+      <p class="dz-formats" id="dzFormats" data-i18n="drop.formats">MP3 · WAV · FLAC · OGG · M4A/AAC — ohne Größenlimit, ohne Upload</p>
       <input type="file" id="fileInput" class="sr-only" multiple
              accept="audio/*,.mp3,.wav,.wave,.flac,.ogg,.oga,.opus,.m4a,.mp4,.aac,.aif,.aiff,.webm">
     </div>
@@ -114,7 +114,7 @@
       </div>
 
       <div class="ctl-group">
-        <span class="ctl-label" data-i18n="ctl.profile">Klangprofil</span>
+        <label class="ctl-label" for="presetSelect" data-i18n="ctl.profile">Klangprofil</label>
         <select id="presetSelect" class="select">
           <option value="auto" data-i18n="preset.auto">Automatisch (empfohlen)</option>
           <option value="garage" data-i18n="preset.garage">Garage / Ein-Mikrofon (60er/70er)</option>
@@ -141,8 +141,8 @@
       </div>
 
       <div class="ctl-group">
-        <span class="ctl-label" data-i18n="ctl.export">Export</span>
-        <div class="seg" role="group" aria-labelledby="abLabel">
+        <span class="ctl-label" id="exportLabel" data-i18n="ctl.export">Export</span>
+        <div class="seg" role="group" aria-labelledby="exportLabel">
           <button type="button" data-format="wav" class="is-active">WAV</button>
           <button type="button" data-format="mp3">MP3</button>
         </div>
@@ -154,6 +154,7 @@
         <select id="wavDepth" class="select select-sm" aria-label="WAV Bit-Tiefe / bit depth">
           <option value="16" selected>WAV 16 Bit</option>
           <option value="24">WAV 24 Bit</option>
+          <option value="32">WAV 32 Bit</option>
         </select>
       </div>
 
@@ -261,7 +262,7 @@
         <svg viewBox="0 0 24 24" class="ico-play" aria-hidden="true"><path d="M8 5 l12 7 -12 7 z"/></svg>
         <svg viewBox="0 0 24 24" class="ico-pause" aria-hidden="true"><path d="M7 5 h4 v14 h-4 z M13 5 h4 v14 h-4 z"/></svg>
       </button>
-      <div class="seek" data-act="seek" role="slider" tabindex="0" aria-label="Position">
+      <div class="seek" data-act="seek" role="slider" tabindex="0" aria-label="Position" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
         <div class="seek-track"><div class="seek-fill" data-slot="seek"></div></div>
       </div>
       <span class="time" data-slot="time">0:00 / 0:00</span>

@@ -240,6 +240,17 @@ section('audit · bilingual coverage');
   const en = i18n.keys('en');
   ok(de.length === en.length && de.every((k) => en.indexOf(k) !== -1), 'identical key sets', de.length + ' keys');
   ok(de.length >= 150, 'dictionary is complete enough to cover the UI', de.length + ' keys');
+  {
+    const i18nSrc = read('assets/js/i18n.js');
+    const deBlock = i18nSrc.split(/^\s*en:\s*\{/m)[0];
+    const enBlock = i18nSrc.split(/^\s*en:\s*\{/m)[1] || '';
+    const findDupes = (blk) => {
+      const ks = [...blk.matchAll(/^\s*'([a-z0-9.]+)'\s*:/gm)].map((m) => m[1]);
+      return ks.filter((k, idx) => ks.indexOf(k) !== idx);
+    };
+    const dupes = findDupes(deBlock).concat(findDupes(enBlock));
+    ok(dupes.length === 0, 'no duplicate keys in i18n dictionary literals', dupes.join(', '));
+  }
 
   // placeholders must match between languages
   const ph = (s) => (String(s).match(/\{\w+\}/g) || []).sort().join(',');
@@ -565,6 +576,12 @@ section('audit · codecs');
   }
   ok((() => { try { DSP.decodeWav(new ArrayBuffer(64)); return false; } catch (e) { return true; } })(),
     'decodeWav rejects data that is not a WAV');
+  {
+    const full = DSP.encodeWav([H.tone(440, 44100, 0.2, 0.5)], 44100, 16);
+    const trunc = full.slice(0, 60);
+    const dec = DSP.decodeWav(trunc);
+    ok(dec.channels[0].length === 8 && dec.sr === 44100, 'decodeWav handles truncated WAV data without throwing', dec.channels[0].length + ' frames');
+  }
 
   // sample-rate sniffing
   {
