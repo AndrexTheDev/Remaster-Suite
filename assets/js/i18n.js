@@ -30,6 +30,8 @@
       'steps.3': 'Vergleichen & speichern',
       'drop.title': 'Audiodateien hier ablegen',
       'drop.hint': '… oder klicken und auswählen. Mehrere Dateien auf einmal sind erlaubt.',
+      'drop.titleTouch': 'Audiodateien auswählen',
+      'drop.hintTouch': 'Tippe hier und wähle eine oder mehrere Dateien. Alles bleibt auf deinem Gerät.',
       'drop.button': 'Dateien auswählen',
       'drop.formats': 'MP3 · WAV · FLAC · OGG · M4A/AAC — ohne Größenlimit, ohne Upload',
       'drop.privacy': 'Null Upload, null Konto, null Kosten. Deine Dateien verlassen dieses Gerät nicht.',
@@ -70,8 +72,6 @@
       'foot.donateLegal': 'Spenden sind freiwillig und kein Kauf: Es entsteht kein Anspruch auf Leistung.',
       'foot.developedBy': 'Entwickelt von',
       'foot.localOnly': 'Diese Anwendung arbeitet zu 100 % in deinem Browser. Es werden keine Audiodaten übertragen.',
-      'foot.copied': 'kopiert',
-      'foot.copyHint': 'Adresse in die Zwischenablage kopieren',
 
       'legal.terms': 'AGB',
       'legal.privacy': 'Datenschutz',
@@ -79,7 +79,6 @@
       'legal.about': 'Über & Quellen',
       'ui.close': 'Schließen',
       'ui.percent': '{v} %',
-      'ui.seconds': '{v} s',
 
       'card.remove': 'Datei entfernen',
       'card.waveAria': 'Wellenform-Vergleich Original und Repariert',
@@ -95,6 +94,7 @@
       'card.loop': 'Loop',
       'card.loopHint': 'Nur die Vorschau in Dauerschleife abspielen',
       'card.window': 'Vorschau: Sekunde {a}–{b}',
+      'work.aria': 'Fortschritt',
       'card.play': 'Abspielen',
       'card.pause': 'Pause',
       'meta.line': '{dur} · {ch} · {sr} · {size}',
@@ -107,6 +107,19 @@
       'status.done': 'Fertig',
       'status.error': 'Fehler',
       'status.export': 'Speichert …',
+      'work.decode': 'Datei wird gelesen …',
+      'work.analyze': 'Klang wird vermessen …',
+      'work.diagnose': 'Klangprofil wird bestimmt …',
+      'work.window': 'Vorschau-Stelle wird gesucht …',
+      'work.envelope': 'Wellenform wird aufbereitet …',
+      'work.preview': 'Vorschau wird gerechnet …',
+      'work.render': 'Aufnahme wird repariert …',
+      'work.encode': 'Datei wird geschrieben …',
+      'work.zip': 'ZIP wird gepackt …',
+      'work.wait': 'Warteschlange …',
+      'work.eta': 'noch ~{s} s',
+      'work.etaMin': 'noch ~{m} min',
+      'job.file': 'Datei {i} von {n}: {name}',
 
       'kind.garage': 'Garage- bzw. Ein-Mikrofon-Aufnahme der 60er/70er',
       'kind.vinyl': 'Vinyl-Rip mit Knacksen und Rauschen',
@@ -133,31 +146,23 @@
       'issue.healthy': 'keine größeren Schwächen',
 
       'chip.score': 'Klang-Qualität',
-      'chip.scorePlain': 'Qualität',
       'chip.peak': 'Spitze',
-      'chip.loudness': 'Lautheit',
       'chip.hf': 'Höhen bis',
       'chip.noise': 'Rauschteppich',
       'chip.dynamics': 'Dynamik',
       'chip.width': 'Stereo',
       'chip.clip': 'Clipping',
-      'chip.before': 'vorher',
-      'chip.after': 'nachher',
 
-      'batch.progress': 'Datei {i} von {n}: {name}',
-      'batch.processing': 'Verarbeite {i} von {n} …',
       'batch.done': 'Alle {n} Dateien sind fertig.',
-      'batch.zipPrep': 'Sammle {n} Dateien …',
 
-      'note.ready': 'Vorschau fertig — höre oben zwischen Original und Repariert umschalten.',
       'note.done': 'Fertig. „{fmt}“ speichern legt die Datei auf deinem Gerät ab.',
       'note.realtime': 'Vorschau in Echtzeit (kein Warten). Die volle Datei entsteht beim Speichern.',
       'note.decode': 'Wird gelesen …',
       'note.analyze': 'Der Klang wird vermessen …',
 
       'toast.added': '{n} Datei(en) hinzugefügt.',
+      'toast.addedOne': 'Hinzugefügt: {name}',
       'toast.noFiles': 'Keine Audiodateien gefunden.',
-      'toast.unsupported': '„{name}“ lässt sich in diesem Browser nicht öffnen.',
       'toast.skipped': '{n} Datei(en) übersprungen (zu groß oder nicht lesbar).',
       'toast.copyOk': '{label}-Adresse kopiert.',
       'toast.copyFail': 'Kopieren nicht möglich — bitte Text markieren.',
@@ -175,13 +180,10 @@
       'toast.mp3Slow': 'MP3 wird encodiert — das dauert etwas länger als WAV.',
       'toast.needDecode': 'Die Datei ist noch nicht bereit.',
       'toast.renderFail': 'Rendern fehlgeschlagen: {msg}',
-      'toast.auto': 'Automatik: {kind}',
 
       'err.decode': 'Die Datei konnte nicht gelesen werden.',
-      'err.worklet': 'Der DSP-Prozessor konnte nicht geladen werden.',
+      'err.broken': 'Diese Datei enthält beschädigte Audiodaten (keine gültigen Samples) — sie lässt sich nicht reparieren.',
       'err.render': 'Das Rendern ist fehlgeschlagen.',
-      'err.encode': 'Das Speichern ist fehlgeschlagen.',
-      'err.worker': 'Hintergrund-Worker nicht verfügbar — es wird im Hauptthread gerechnet.',
 
       /* -------------------------------------------------------- German legal */
       'terms.body': `
@@ -238,7 +240,7 @@
 <p>Spenden sind freiwillig und kein Kauf — die Adressen stehen im Fußbereich. Danke für jede Rückmeldung.</p>`,
 
       'about.body': `
-<p><strong>Version 1.1</strong> — eine komplette Audio-Restaurations-Kette im Browser. Alles rechnet auf deinem Gerät.</p>
+<p><strong>Version 1.4</strong> — eine komplette Audio-Restaurations-Kette im Browser. Alles rechnet auf deinem Gerät.</p>
 <h3>Die Kette in Reihenfolge</h3>
 <ul>
   <li><strong>Entzerren (EQ):</strong> sechs Bänder, automatisch anhand der Messung dosiert.</li>
@@ -246,7 +248,7 @@
   <li><strong>Harmonischer Exciter:</strong> erzeugt fehlende Obertöne mit 2. und 3. Ordnung — der Kern der Obertonsynthese.</li>
   <li><strong>Air-Synthese 8–16 kHz:</strong> baut den obersten Bereich aus dem verbliebenen Hochtonanteil auf.</li>
   <li><strong>Sub-Bass 30–60 Hz:</strong> gewinnt die fehlende unterste Oktave über eine Oktav-Teilung mit Mitten-Folgung.</li>
-  <li><strong>Ent-Rauschen:</strong> dynamischer Hinweis-Filter in der Höhenlage, der nur zwischen den Tönen zumacht.</li>
+  <li><strong>Ent-Rauschen:</strong> dynamischer Hinweis-Filter in der Höhenlage, der nur zwischen den Tönen zumacht — offen lässt er das Signal unangetastet.</li>
   <li><strong>Ent-Knacksen:</strong> erkennt kurze Nadel- und Digital-Pops und ersetzt sie durch die Vorhersage des Signals.</li>
   <li><strong>Glue-Kompressor, Wärme, Neigung:</strong> Kleben, Sättigung, letzter Feinschliff — mit Pegelanpassung für ein ehrliches A/B.</li>
 </ul>
@@ -256,6 +258,8 @@
   <li>Ein einziger Echtzeit-Kern: dieselbe Kette läuft für die Vorschau live und für den Export offline (<code>OfflineAudioContext</code>).</li>
   <li>Analyse: 8192-Punkt-FFT, Rauschboden-, Crest- und Clipping-Messung; daraus Klangprofil und Diagnose in normaler Sprache.</li>
   <li>Ausgabe: WAV 16/24/32 Bit ohne Verluste oder MP3 bis 320 kbps über lamejs.</li>
+  <li>Fortschritt in zwei Balken: pro Datei mit Stufe und Restzeit, dazu ein Job-Balken über der Liste, der auf dem Handy am unteren Rand andockt.</li>
+  <li>Für Handy-Browser gebaut: 44-px-Ziele, keine Hover-Abhängigkeit, sichere Ränder für Notch und Gestenleiste, kleinere Speichergrenze.</li>
   <li>Keine Frameworks, kein Build-Schritt, kein Server — statische Dateien, direkt auf GitHub Pages.</li>
 </ul>
 <h3>Bibliotheken</h3>
@@ -313,6 +317,8 @@
       'steps.3': 'Compare & save',
       'drop.title': 'Drop audio files here',
       'drop.hint': '… or click to browse. Several files at once are welcome.',
+      'drop.titleTouch': 'Choose audio files',
+      'drop.hintTouch': 'Tap here and pick one or more files. Nothing leaves your device.',
       'drop.button': 'Choose files',
       'drop.formats': 'MP3 · WAV · FLAC · OGG · M4A/AAC — no size limit, no upload',
       'drop.privacy': 'No upload, no account, no cost. Your files never leave this device.',
@@ -353,8 +359,6 @@
       'foot.donateLegal': 'Tips are voluntary and not a purchase: no service obligation is created.',
       'foot.developedBy': 'Developed by',
       'foot.localOnly': 'This application works 100 % inside your browser. No audio data is transmitted.',
-      'foot.copied': 'copied',
-      'foot.copyHint': 'Copy address to clipboard',
 
       'legal.terms': 'Terms',
       'legal.privacy': 'Privacy',
@@ -362,7 +366,6 @@
       'legal.about': 'About & credits',
       'ui.close': 'Close',
       'ui.percent': '{v} %',
-      'ui.seconds': '{v} s',
 
       'card.remove': 'Remove file',
       'card.waveAria': 'Waveform comparison of original and restored audio',
@@ -378,6 +381,7 @@
       'card.loop': 'Loop',
       'card.loopHint': 'Repeat the preview continuously',
       'card.window': 'Preview: second {a}–{b}',
+      'work.aria': 'Progress',
       'card.play': 'Play',
       'card.pause': 'Pause',
       'meta.line': '{dur} · {ch} · {sr} · {size}',
@@ -390,6 +394,19 @@
       'status.done': 'Done',
       'status.error': 'Error',
       'status.export': 'Saving …',
+      'work.decode': 'Reading the file …',
+      'work.analyze': 'Measuring the sound …',
+      'work.diagnose': 'Picking the profile …',
+      'work.window': 'Looking for the preview spot …',
+      'work.envelope': 'Preparing the waveform …',
+      'work.preview': 'Rendering the preview …',
+      'work.render': 'Restoring the recording …',
+      'work.encode': 'Writing the file …',
+      'work.zip': 'Packing the ZIP …',
+      'work.wait': 'Waiting in the queue …',
+      'work.eta': '~{s} s left',
+      'work.etaMin': '~{m} min left',
+      'job.file': 'File {i} of {n}: {name}',
 
       'kind.garage': 'a 1960s/70s garage or one-microphone recording',
       'kind.vinyl': 'a vinyl rip with crackle and surface noise',
@@ -416,31 +433,23 @@
       'issue.healthy': 'no major weaknesses',
 
       'chip.score': 'Sound quality',
-      'chip.scorePlain': 'Quality',
       'chip.peak': 'Peak',
-      'chip.loudness': 'Loudness',
       'chip.hf': 'Highs to',
       'chip.noise': 'Noise floor',
       'chip.dynamics': 'Dynamics',
       'chip.width': 'Stereo',
       'chip.clip': 'Clipping',
-      'chip.before': 'before',
-      'chip.after': 'after',
 
-      'batch.progress': 'File {i} of {n}: {name}',
-      'batch.processing': 'Processing {i} of {n} …',
       'batch.done': 'All {n} files are done.',
-      'batch.zipPrep': 'Collecting {n} files …',
 
-      'note.ready': 'Preview ready — switch between original and restored above.',
       'note.done': 'Done. “{fmt}” saves the file to your device.',
       'note.realtime': 'Real-time preview (no waiting). The full file is rendered when you save.',
       'note.decode': 'Reading file …',
       'note.analyze': 'Measuring the sound …',
 
       'toast.added': '{n} file(s) added.',
+      'toast.addedOne': 'Added: {name}',
       'toast.noFiles': 'No audio files found.',
-      'toast.unsupported': '“{name}” cannot be opened in this browser.',
       'toast.skipped': '{n} file(s) skipped (too large or unreadable).',
       'toast.copyOk': '{label} address copied.',
       'toast.copyFail': 'Copy failed — please select the text manually.',
@@ -458,13 +467,10 @@
       'toast.mp3Slow': 'Encoding MP3 — this takes a bit longer than WAV.',
       'toast.needDecode': 'This file is not ready yet.',
       'toast.renderFail': 'Rendering failed: {msg}',
-      'toast.auto': 'Automatic: {kind}',
 
       'err.decode': 'The file could not be read.',
-      'err.worklet': 'The DSP processor could not be loaded.',
+      'err.broken': 'This file contains corrupted audio data (no valid samples) — it cannot be repaired.',
       'err.render': 'Rendering failed.',
-      'err.encode': 'Saving failed.',
-      'err.worker': 'No background worker available — falling back to the main thread.',
 
       /* ------------------------------------------------------- English legal */
       'terms.body': `
@@ -521,7 +527,7 @@
 <p>Tips are voluntary and not a purchase — the addresses are in the footer. Thanks for any feedback.</p>`,
 
       'about.body': `
-<p><strong>Version 1.1</strong> — a complete audio restoration chain in the browser. Everything computes on your device.</p>
+<p><strong>Version 1.4</strong> — a complete audio restoration chain in the browser. Everything computes on your device.</p>
 <h3>The chain, in order</h3>
 <ul>
   <li><strong>Corrective EQ:</strong> six bands, dosed automatically from the measurement.</li>
@@ -529,7 +535,7 @@
   <li><strong>Harmonic exciter:</strong> rebuilds missing overtones with 2nd and 3rd order generation — the core of the harmonic restoration.</li>
   <li><strong>Air synthesis 8–16 kHz:</strong> rebuilds the very top from the remaining high-frequency content.</li>
   <li><strong>Sub-bass 30–60 Hz:</strong> recovers the missing lowest octave with octave division and pitch tracking.</li>
-  <li><strong>De-hiss:</strong> a dynamic high-frequency gate that only closes between notes.</li>
+  <li><strong>De-hiss:</strong> a dynamic high-frequency gate that only closes between notes — wide open it hands the signal through untouched.</li>
   <li><strong>De-click:</strong> detects short needle and digital pops and replaces them with the signal's own prediction.</li>
   <li><strong>Glue compressor, warmth, tilt:</strong> cohesion, saturation, final polish — with level matching for an honest A/B.</li>
 </ul>
@@ -539,6 +545,8 @@
   <li>One single real-time core: the same chain runs live for the preview and offline for the export (<code>OfflineAudioContext</code>).</li>
   <li>Analysis: 8192-point FFT, noise-floor, crest and clipping measurement; from that comes the sound profile and the plain-language diagnosis.</li>
   <li>Output: lossless WAV 16/24/32-bit or MP3 up to 320 kbps via lamejs.</li>
+  <li>Progress in two bars: per file with stage and time left, plus a job bar above the list that docks to the bottom edge on a phone.</li>
+  <li>Built for phone browsers: 44 px targets, no hover-only affordances, safe areas for the notch and the gesture bar, a smaller memory budget.</li>
   <li>No frameworks, no build step, no server — static files, ready for GitHub Pages.</li>
 </ul>
 <h3>Libraries</h3>

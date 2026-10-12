@@ -145,8 +145,17 @@ async function run() {
     let out = DSP.decodeWav((await bytesOf(win, res)).buffer).channels;
     const hf = [bandOf([sims.garage], 9000, 15000), bandOf(out, 9000, 15000)];
     ok(hf[1] > hf[0] + 4, 'garage: the missing top end comes back', num(hf[0]) + ' → ' + num(hf[1]) + ' dB');
-    const lf = [bandOf([sims.garage], 32, 58), bandOf(out, 32, 58)];
+    // Below the mains hum: the sub octave is built in the same 30–60 Hz region
+    // the 50 Hz hum lives in, so the band is read *under* it and the hum itself is
+    // checked separately, with the same detector the app uses to decide whether to
+    // notch at all. (Measuring 32–58 Hz would add the two opposite repairs
+    // together — a restored sub octave and a removed hum — and call it bass.)
+    const lf = [bandOf([sims.garage], 25, 40), bandOf(out, 25, 40)];
     ok(lf[1] > lf[0] + 2, 'garage: deep bass is synthesised', num(lf[0]) + ' → ' + num(lf[1]) + ' dB');
+    const humBefore = DSP.measure([sims.garage], SR).hum50;
+    const humAfter = DSP.measure(out, SR).hum50;
+    ok(humAfter < humBefore - 3, 'garage: the 50 Hz mains hum is removed',
+      num(humBefore) + ' → ' + num(humAfter) + ' dB above its own neighbourhood');
     const box = [bandOf([sims.garage], 300, 360), bandOf(out, 300, 360)];
     ok(box[1] < box[0] + 1, 'garage: the boxy 320 Hz resonance is not amplified', num(box[0]) + ' → ' + num(box[1]) + ' dB');
 
@@ -242,7 +251,8 @@ async function run() {
       card.power = p;
       res = await App.renderCard(card, { force: true });
       const dec = DSP.decodeWav((await bytesOf(win, res)).buffer).channels;
-      series.push({ p, hf: bandOf(dec, 9000, 15000), sub: bandOf(dec, 32, 58), peak: peakOf(dec), finite: finite(dec) });
+      // the sub octave is read below the mains line the notch has to take out
+      series.push({ p, hf: bandOf(dec, 9000, 15000), sub: bandOf(dec, 32, 45), peak: peakOf(dec), finite: finite(dec) });
     }
     const rising = series.every((s, i) => i === 0 || s.hf >= series[i - 1].hf - 0.5);
     ok(rising, 'the top-end synthesis grows with the slider',

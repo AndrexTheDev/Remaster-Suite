@@ -98,7 +98,8 @@ function jsSources(root) {
 
 /* --------------------------------------------------------------- jsdom bootstrap */
 
-function bootApp() {
+function bootApp(opts) {
+  const o = opts || {};
   const html = readIndexHtml();
   const vc = new VirtualConsole();
   vc.on('jsdomError', (err) => {
@@ -117,6 +118,37 @@ function bootApp() {
   Object.defineProperty(win.navigator, 'language', { value: 'de', configurable: true });
   Object.defineProperty(win.navigator, 'languages', { value: ['de'], configurable: true });
   stub.install(win);
+
+  // a phone: no hover, a coarse pointer — the app reads this once at boot, so it
+  // has to be in place *before* the scripts are evaluated
+  if (o.touch) {
+    // one object per query, like a real browser: asking twice must answer the
+    // same way, and a fired change must be visible to the next caller
+    const lists = [];
+    const registry = new Map();
+    win.matchMedia = (query) => {
+      let list = registry.get(query);
+      if (!list) {
+        list = {
+          media: query,
+          matches: /hover:\s*none/.test(query) || /pointer:\s*coarse/.test(query),
+          onchange: null, listeners: [],
+          addListener() {}, removeListener() {},
+          addEventListener(type, fn) { if (type === 'change') list.listeners.push(fn); },
+          removeEventListener() {},
+          dispatchEvent: () => false,
+        };
+        list.fire = (matches) => {
+          list.matches = matches;
+          list.listeners.forEach((fn) => fn({ matches, media: query }));
+        };
+        registry.set(query, list);
+        lists.push(list);
+      }
+      return list;
+    };
+    win.__mqLists = lists;
+  }
 
   // blob URLs and clipboard: not implemented by jsdom
   const urls = [];
@@ -238,8 +270,11 @@ async function run() {
   const hfBefore = band(source, 9000, 15000);
   const hfAfter = band(decoded.channels, 9000, 15000);
   ok(hfAfter > hfBefore + 3, 'restored file has substantially more top end', hfBefore.toFixed(1) + ' → ' + hfAfter.toFixed(1) + ' dB');
-  const lowBefore = band(source, 30, 60);
-  const lowAfter = band(decoded.channels, 30, 60);
+  // Below the mains line. A 30–60 Hz window straddles the 50 Hz notch (this
+  // fixture is hummy on purpose), so it would subtract the hum repair from the
+  // bass restoration and call the difference "sub bass".
+  const lowBefore = band(source, 30, 45);
+  const lowAfter = band(decoded.channels, 30, 45);
   ok(lowAfter > lowBefore + 2, 'restored file has more sub bass', lowBefore.toFixed(1) + ' → ' + lowAfter.toFixed(1) + ' dB');
   let peak = 0, atCeiling = 0;
   for (const c of decoded.channels) {
@@ -350,6 +385,161 @@ async function run() {
   win.RSApp.removeCard(card3);
   ok(win.RSApp.State.cards.length === 1, 'broken card can be removed');
   ok(!/\(2\)/.test(win.document.querySelector('#btnZip').textContent), 'ZIP button count updates when a card is removed');
+
+  /* ════════════════════════════════════════════════ progress & the phone ══ */
+
+  section('progress · the file is on the list with its name, then it is measured');
+  win.RSApp.clearAll();
+  const DICT = win.RSi18n.DICT.de;
+  const SR2 = 48000;
+  const long = DSP.encodeWav([H.garageSim(DSP, SR2, 8)], SR2, 16);
+  const LONG_NAME = 'Phone Memo 2024-05-01 23.14 (take 2).wav';
+  const longFile = new win.File([new Uint8Array(long)], LONG_NAME, { type: 'audio/wav' });
+  const pending = win.RSApp.addFiles([longFile]);
+  await new Promise((r) => setTimeout(r, 60));          // mid-analysis
+  const cardP = win.RSApp.State.cards[0];
+  const jobBar = win.document.getElementById('globalProgress');
+  ok(!!cardP && cardP.el.name.textContent === LONG_NAME,
+    'the name is on the list 60 ms after the drop, before any processing is done',
+    cardP ? JSON.stringify(cardP.el.name.textContent) : 'no card');
+  ok(cardP && !cardP.el.work.hidden && /\S/.test(cardP.el.stage.textContent),
+    'the card shows what it is doing right now', cardP ? cardP.el.stage.textContent : '');
+  ok(!jobBar.hidden, 'the job bar is up while work is running');
+  ok(jobBar.textContent.indexOf('Phone Memo') !== -1,
+    'the job bar names the file it is working on', jobBar.textContent.trim().slice(0, 60));
+  ok(win.document.getElementById('globalProgressTrack').getAttribute('role') === 'progressbar',
+    'the job bar is exposed as a progressbar');
+
+  const seenP = [];
+  const seenStage = [];
+  const noteStage = () => {
+    if (cardP && !cardP.el.work.hidden && cardP.el.stage.textContent) seenStage.push(cardP.el.stage.textContent);
+  };
+  // the stage words are painted in bursts shorter than a timer tick, so watch the
+  // DOM itself instead of polling it
+  const stageWatch = new win.MutationObserver(noteStage);
+  stageWatch.observe(cardP.el.card, { subtree: true, characterData: true, childList: true, attributes: true });
+  const sampler = setInterval(() => {
+    const j = win.RSApp.State.job;
+    if (j) seenP.push(j.p);
+    noteStage();
+  }, 12);
+  await pending;
+  clearInterval(sampler);
+  stageWatch.disconnect();
+  ok(seenP.length > 2 && seenP.every((p, i) => i === 0 || p >= seenP[i - 1] - 1e-9),
+    'progress is sampled often and never goes backwards', seenP.length + ' samples, max ' + Math.max.apply(null, seenP).toFixed(2));
+  const stages = Array.from(new Set(seenStage));
+  ok(stages.indexOf(DICT['work.analyze']) !== -1,
+    'the measurement phase is named as measuring, not as waiting', stages.join(' · '));
+  ok(stages.indexOf(DICT['work.wait']) === -1 || seenStage[0] === DICT['work.wait'],
+    'the queue wording never covers work that is already running');
+  const later = ['work.diagnose', 'work.window', 'work.envelope', 'work.preview'];
+  const missed = later.filter((k) => stages.indexOf(DICT[k]) === -1);
+  ok(missed.length === 0, 'every later stage announces itself as well — nothing falls back to a generic word',
+    stages.length + ' distinct stage words, missing: ' + (missed.join(', ') || 'none'));
+  ok(cardP.el.work.hidden && jobBar.hidden, 'both bars are gone when the file is ready');
+  ok(cardP.status === 'ready' && cardP.el.name.textContent === LONG_NAME,
+    'the card keeps its name and ready state', cardP.status + ' · ' + JSON.stringify(cardP.el.name.textContent));
+
+  section('progress · the bar itself answers to the contract');
+  const track = cardP.el.track;
+  win.RSApp.setCardWork(cardP, 'decode', null);
+  ok(!cardP.el.work.hidden && cardP.el.work.classList.contains('is-indeterminate'),
+    'an unmeasurable step (browser decode) animates instead of inventing a number');
+  ok(cardP.el.pct.textContent === '', 'and shows no percentage at all', JSON.stringify(cardP.el.pct.textContent));
+  win.RSApp.setCardWork(cardP, 'render', 0.4, 45);
+  ok(!cardP.el.work.classList.contains('is-indeterminate') && cardP.el.pct.textContent === '40 %',
+    'a measured step shows its share', cardP.el.pct.textContent);
+  ok(cardP.el.bar.style.width === '40%' && track.getAttribute('aria-valuenow') === '40',
+    'the fill and the accessibility value agree', cardP.el.bar.style.width + ' / ' + track.getAttribute('aria-valuenow'));
+  ok(cardP.el.eta.textContent === DICT['work.eta'].replace('{s}', '45'),
+    'the time left is spelled out, not guessed to the second', cardP.el.eta.textContent);
+  win.RSApp.setCardWork(cardP, 'render', 0.4, 200);
+  ok(cardP.el.eta.textContent === DICT['work.etaMin'].replace('{m}', '3'),
+    'long waits switch to minutes', cardP.el.eta.textContent);
+  ok(cardP.el.stage.textContent === DICT['work.render'], 'the stage word follows the stage', cardP.el.stage.textContent);
+  win.RSApp.setCardWork(cardP, null, 0, 0);
+  ok(cardP.el.work.hidden, 'clearing the work hides the block');
+
+  section('progress · the job bar counts files honestly');
+  win.RSApp.Job.start(4, cardP);
+  ok(win.document.getElementById('globalProgressFill').style.width === '0%', 'a fresh job starts at zero');
+  win.RSApp.Job.file(2, 'third-of-four.wav', cardP);
+  win.RSApp.Job.at(0.5, 'render');
+  ok(win.document.getElementById('globalProgressPct').textContent === '63 %',
+    'file 3 of 4, half rendered = 63 % of the batch', win.document.getElementById('globalProgressPct').textContent);
+  ok(win.document.getElementById('globalProgressText').textContent.indexOf('third-of-four.wav') !== -1,
+    'and it still names the file', win.document.getElementById('globalProgressText').textContent);
+  ok(/3/.test(win.document.getElementById('globalProgressText').textContent),
+    'the file counter is on the bar too');
+  win.RSApp.Job.start(1, cardP);
+  ok(win.document.getElementById('globalProgressText').textContent.indexOf(cardP.name) === 0,
+    'a single-file job leads with that file, not with a count of one',
+    win.document.getElementById('globalProgressText').textContent.slice(0, 46));
+  const jobFill = win.document.getElementById('globalProgressFill');
+  win.RSApp.Job.unknown('decode');
+  ok(win.document.getElementById('globalProgress').classList.contains('is-indeterminate')
+    && jobFill.style.width === '',
+    'an uncountable step sweeps the docked bar instead of freezing at 0 %');
+  win.RSApp.Job.at(0.25, 'render');
+  ok(!win.document.getElementById('globalProgress').classList.contains('is-indeterminate')
+    && jobFill.style.width === '25%',
+    'the next measurable step puts the fill back on the number', jobFill.style.width);
+  win.RSApp.Job.end();
+  ok(win.document.getElementById('globalProgress').hidden, 'the job bar disappears when the job ends');
+
+  section('progress · the play button speaks the current language');
+  win.RSi18n.setLang('en');
+  win.RSApp.refreshAllText();
+  const playBtn = cardP.el.card.querySelector('[data-act="play"]');
+  ok(playBtn.getAttribute('aria-label') === win.RSi18n.DICT.en['card.play'],
+    'the label is translated after a language switch', playBtn.getAttribute('aria-label'));
+  ok(cardP.el.card.querySelector('[data-slot="name"]').textContent === LONG_NAME,
+    'the file name is never translated, of course');
+  win.RSi18n.setLang('de');
+
+  section('mobile · a phone gets phone wording and a tighter budget');
+  const phone = bootApp({ touch: true });
+  await new Promise((r) => setTimeout(r, 30));
+  const pw = phone.win;
+  ok(pw.RSApp.isTouchDevice() === true && pw.RSApp.State.touch === true,
+    'the app recognises a touch device');
+  ok(pw.RSApp.CONFIG.softMemoryMB === 420 && win.RSApp.CONFIG.softMemoryMB === 900,
+    'the memory budget is halved on a phone and kept on the desktop',
+    pw.RSApp.CONFIG.softMemoryMB + ' vs ' + win.RSApp.CONFIG.softMemoryMB + ' MB');
+  ok(pw.document.getElementById('dzTitle').textContent === pw.RSi18n.DICT.de['drop.titleTouch'],
+    'the drop zone asks to be tapped, not dragged', pw.document.getElementById('dzTitle').textContent);
+  ok(pw.document.getElementById('dzTitle').getAttribute('data-i18n') === 'drop.titleTouch',
+    'the touch wording survives a repaint because the key is rewritten too');
+  pw.RSi18n.setLang('en');
+  pw.RSApp.refreshAllText();
+  ok(pw.document.getElementById('dzTitle').textContent === pw.RSi18n.DICT.en['drop.titleTouch']
+    && pw.document.getElementById('dzHint').textContent === pw.RSi18n.DICT.en['drop.hintTouch'],
+    'and it follows the language switch', pw.document.getElementById('dzTitle').textContent);
+  pw.RSi18n.apply();
+  ok(pw.document.getElementById('dzTitle').textContent === pw.RSi18n.DICT.en['drop.titleTouch'],
+    'a bare repaint cannot bring the desktop wording back');
+  ok(win.document.getElementById('dzTitle').textContent === win.RSi18n.DICT.de['drop.title'],
+    'the desktop window still says "drop here"', win.document.getElementById('dzTitle').textContent);
+  ok(typeof pw.RSApp.State.power === 'number' && pw.document.getElementById('fileInput') !== null,
+    'the phone boots a working app');
+
+  // a phone that becomes a desktop (keyboard attached, window widened): the app
+  // must not stay stuck in phone mode for the rest of the session
+  // (a bare isTouchDevice() check above has already opened another query list —
+  //  the one that matters is the one the app subscribed to)
+  const mq = pw.__mqLists.filter((l) => /hover:\s*none/.test(l.media) && l.listeners.length > 0).pop();
+  ok(!!mq, 'the app listens for a pointer change');
+  mq.fire(false);
+  ok(pw.RSApp.State.touch === false && pw.RSApp.CONFIG.softMemoryMB === 900,
+    'the memory budget goes back up when the pointer does', pw.RSApp.CONFIG.softMemoryMB + ' MB');
+  ok(pw.document.getElementById('dzTitle').textContent === pw.RSi18n.DICT.en['drop.title'],
+    'and the drop zone stops saying "tap"', pw.document.getElementById('dzTitle').textContent);
+  mq.fire(true);
+  ok(pw.RSApp.State.touch === true && pw.RSApp.CONFIG.softMemoryMB === 420
+    && pw.document.getElementById('dzTitle').textContent === pw.RSi18n.DICT.en['drop.titleTouch'],
+    'a phone again — without a reload');
 
   /* summary */
   console.log('\n' + '-'.repeat(60));

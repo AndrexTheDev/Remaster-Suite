@@ -20,11 +20,32 @@
 
   /* ------------------------------------------------------------------- config */
 
+  /** Touch-first device? Decides the copy, the wake lock and the memory budget. */
+  function isTouchDevice() {
+    try {
+      if (global.matchMedia && global.matchMedia('(hover: none) and (pointer: coarse)').matches) return true;
+    } catch (e) { /* no matchMedia: fall through */ }
+    return !!(global.navigator && global.navigator.maxTouchPoints > 0);
+  }
+
+  /**
+   * Read the pointer again — a phone that gets a keyboard, a tablet that is
+   * rotated, a desktop window that is resized onto a touch screen. The wording
+   * and the memory budget follow; nothing is decided once and forever.
+   */
+  function applyPointer() {
+    const touch = isTouchDevice();
+    State.touch = touch;
+    CONFIG.softMemoryMB = touch ? 420 : 900;
+    return touch;
+  }
+
   const CONFIG = {
     previewSeconds: 40,        // live A/B window; the full file is rendered on save
     previewMin: 12,
     maxFileBytes: 2 * 1024 * 1024 * 1024,
-    softMemoryMB: 900,         // warn above this before packing a ZIP
+    // a phone browser has far less room for a ZIP full of WAVs than a desktop
+    softMemoryMB: isTouchDevice() ? 420 : 900,
     maxLiveTools: 120,
   };
 
@@ -41,6 +62,8 @@
     wavDepth: 16,
     busy: false,
     powerTouched: false,
+    touch: false,
+    job: null,
   };
 
   /* ------------------------------------------------------------- formatting */
@@ -109,28 +132,204 @@
     n.classList.toggle('is-error', !!isError);
   }
 
-  function setProgress(card, p) {
-    card.progress = p;
-    const bar = card.el.bar;
-    if (bar) {
-      bar.style.width = Math.round(Math.max(0, Math.min(1, p)) * 100) + '%';
-      bar.classList.toggle('is-error', card.status === 'error');
+  /* ---------------------------------------------------------------- progress */
+
+  const nowMs = () => (global.performance && global.performance.now ? global.performance.now() : Date.now());
+
+  /** The stage words. Referenced literally so the translation audit sees them. */
+  const STAGE_TEXT = {
+    wait: () => t('work.wait'),
+    decode: () => t('work.decode'),
+    // `measure` is the analyzer's word for the measurement slice, `analyze` the
+    // card's word for "the analysis has started" — the user sees one stage.
+    measure: () => t('work.analyze'),
+    analyze: () => t('work.analyze'),
+    diagnose: () => t('work.diagnose'),
+    window: () => t('work.window'),
+    envelope: () => t('work.envelope'),
+    preview: () => t('work.preview'),
+    render: () => t('work.render'),
+    encode: () => t('work.encode'),
+    zip: () => t('work.zip'),
+  };
+  const stageText = (stage) => (STAGE_TEXT[stage] ? STAGE_TEXT[stage]() : t('work.wait'));
+
+  /** "noch ~12 s" / "noch ~3 min" — deliberately coarse, never fake-precise. */
+  function timeLeftText(seconds) {
+    if (!isFinite(seconds) || seconds <= 0) return '';
+    if (seconds < 90) return t('work.eta', { s: Math.max(1, Math.round(seconds)) });
+    return t('work.etaMin', { m: Math.max(2, Math.round(seconds / 60)) });
+  }
+
+  /** Seconds left at the current rate — 0 when that cannot be estimated yet. */
+  function estimateLeft(card, p) {
+    const t0 = card && card._workT0;
+    if (!t0 || !p || p >= 1) return 0;
+    const elapsed = (nowMs() - t0) / 1000;
+    const left = (elapsed * (1 - p)) / p;
+    return left > 1 && left < 3 * 3600 ? left : 0;
+  }
+
+  /** Give the browser one frame to paint — before a long, blocking step starts. */
+  const nextPaint = () => new Promise((resolve) => {
+    const raf = global.requestAnimationFrame || ((fn) => global.setTimeout(fn, 16));
+    raf(() => resolve());
+  });
+
+  /**
+   * Paint one card's progress. `p === null` means "running, but not measurable"
+   * (decoding a file happens inside the browser's decodeAudioData) — the bar
+   * then animates instead of inventing a percentage.
+   */
+  function setCardWork(card, stage, p, etaSeconds) {
+    const el = card.el;
+    const busy = !!stage;
+    const known = p !== null && p !== undefined;
+    card.progress = known ? Math.max(0, Math.min(1, p)) : 0;
+    if (!busy) card._workT0 = 0;
+    else if (!card._workT0) card._workT0 = nowMs();
+    if (el.work) {
+      el.work.hidden = !busy;
+      el.work.classList.toggle('is-indeterminate', busy && !known);
+      if (busy) {
+        const pct = known ? Math.round(card.progress * 100) : null;
+        el.stage.textContent = stageText(stage);
+        el.pct.textContent = pct === null ? '' : t('ui.percent', { v: pct });
+        el.bar.style.width = (pct === null ? 0 : pct) + '%';
+        el.bar.classList.toggle('is-error', card.status === 'error');
+        if (el.track) el.track.setAttribute('aria-valuenow', String(pct === null ? 0 : pct));
+        el.eta.textContent = etaSeconds ? timeLeftText(etaSeconds) : '';
+      }
     }
-    if (card === State.current && State.busy) {
-      const text = t('status.rendering', { p: Math.round(Math.max(0, Math.min(1, p)) * 100) });
-      if (card.el.pill) { card.el.pill.textContent = text; card.el.pill.hidden = false; }
+    // the status pill keeps the short state word — with the percentage while a
+    // file is being written, because that is the number people watch
+    if (busy && card.status === 'processing' && known && card.el.pill) {
+      card.el.pill.textContent = t('status.rendering', { p: Math.round(card.progress * 100) });
+      card.el.pill.hidden = false;
+    }
+    // …and the job bar follows the card that is currently in the queue
+    if (State.job && State.job.card === card) {
+      if (busy && !known) Job.unknown(stage);
+      else Job.at(card.progress, stage);
     }
   }
 
-  function globalProgress(show, ratio, text) {
+  const clearCardWork = (card) => setCardWork(card, null, 0, 0);
+
+  /**
+   * Keep the screen awake while a long job runs: a phone that dims the display
+   * can suspend the tab and stall the queue mid-file. Best effort — the API is
+   * optional and the work still finishes if it is missing.
+   */
+  const Wake = {
+    lock: null,
+    async request() {
+      if (this.lock) return;
+      const wl = global.navigator && global.navigator.wakeLock;
+      if (!wl || !wl.request) return;
+      try { this.lock = await wl.request('screen'); } catch (e) { this.lock = null; }
+    },
+    async release() {
+      const lock = this.lock;
+      this.lock = null;
+      if (!lock) return;
+      try { await lock.release(); } catch (e) { /* already gone */ }
+    },
+  };
+
+  /**
+   * The job bar: one honest line for "what is running, how far, how long".
+   * A queue of files reports per file; a ZIP reports as a whole.
+   */
+  const Job = {
+    start(total, card) {
+      State.job = {
+        total: Math.max(1, total), index: 0, name: (card && card.name) || '',
+        card: card || null, stage: 'wait', p: 0, t0: nowMs(), indeterminate: false,
+      };
+      Wake.request();
+      paintJob();
+    },
+    file(index, name, card) {
+      if (!State.job) return;
+      State.job.index = Math.max(0, index);
+      State.job.name = name || '';
+      if (card !== undefined) State.job.card = card;
+      State.job.p = 0;
+      State.job.indeterminate = false;
+      paintJob();
+    },
+    at(p, stage) {
+      if (!State.job) return;
+      State.job.indeterminate = false;
+      State.job.p = Math.max(0, Math.min(1, p || 0));
+      if (stage) State.job.stage = stage;
+      paintJob();
+    },
+    /**
+     * The step that is running cannot be counted (the browser's own decode, a
+     * ZIP write) — the bar sweeps instead of sitting frozen at the last number.
+     * The percentage keeps showing the last thing we could actually measure.
+     */
+    unknown(stage) {
+      if (!State.job) return;
+      State.job.indeterminate = true;
+      if (stage) State.job.stage = stage;
+      paintJob();
+    },
+    end() {
+      State.job = null;
+      const wrap = $('#globalProgress');
+      if (wrap) wrap.hidden = true;
+      Wake.release();
+    },
+  };
+
+  function paintJob() {
+    const job = State.job;
     const wrap = $('#globalProgress');
-    if (!wrap) return;
-    wrap.hidden = !show;
-    if (!show) return;
+    if (!wrap || !job) return;
+    wrap.hidden = false;
+    const overall = Math.max(0, Math.min(1, (job.index + job.p) / job.total));
+    const pct = Math.round(overall * 100);
     const fill = $('#globalProgressFill');
     const label = $('#globalProgressText');
-    if (fill) fill.style.width = Math.round(Math.max(0, Math.min(1, ratio || 0)) * 100) + '%';
-    if (label) label.textContent = text || '';
+    const pctOut = $('#globalProgressPct');
+    const track = $('#globalProgressTrack');
+    wrap.classList.toggle('is-indeterminate', !!job.indeterminate);
+    // an animated fill has no width of its own — the stylesheet sweeps it
+    if (fill) fill.style.width = job.indeterminate ? '' : pct + '%';
+    if (pctOut) pctOut.textContent = t('ui.percent', { v: pct });
+    if (track) track.setAttribute('aria-valuenow', String(pct));
+    // one line that answers "which file" first, then "what is it doing": a queue
+    // names the file it is on, a single save names that file, and the batch-wide
+    // steps (packing the ZIP) only have the stage to show.
+    let text;
+    if (job.total > 1) {
+      text = t('job.file', { i: Math.min(job.index + 1, job.total), n: job.total, name: job.name || '…' })
+        + ' · ' + stageText(job.stage);
+    } else if (job.name) {
+      text = job.name + ' · ' + stageText(job.stage);
+    } else {
+      text = stageText(job.stage);
+    }
+    const left = estimateJobLeft(job, overall);
+    if (left) text += ' · ' + timeLeftText(left);
+    if (label) { label.textContent = text; label.title = text; }
+  }
+
+  function estimateJobLeft(job, overall) {
+    if (!overall || overall <= 0.02) return 0;
+    const elapsed = (nowMs() - job.t0) / 1000;
+    const left = (elapsed * (1 - overall)) / overall;
+    return left > 1.5 && left < 3 * 3600 ? left : 0;
+  }
+
+  if (global.document) {
+    global.document.addEventListener('visibilitychange', () => {
+      // coming back to a running job: re-acquire what the browser dropped
+      if (!global.document.hidden && (State.job || State.busy)) Wake.request();
+    });
   }
 
   function totalBytesOf(list) {
@@ -174,6 +373,11 @@
         preset: $('[data-slot="preset"]', node),
         power: $('[data-act="power"]', node),
         powerOut: $('[data-slot="power"]', node),
+        work: $('[data-slot="work"]', node),
+        stage: $('[data-slot="stage"]', node),
+        eta: $('[data-slot="eta"]', node),
+        pct: $('[data-slot="pct"]', node),
+        track: $('[data-slot="track"]', node),
         bar: $('[data-slot="bar"]', node),
         note: $('[data-slot="note"]', node),
       },
@@ -200,9 +404,11 @@
       },
     });
 
+    const playBtn = $('[data-act="play"]', node);
+    if (playBtn) playBtn.setAttribute('aria-label', t('card.play'));
     wireCard(card);
     setStatus(card, 'queued');
-    setProgress(card, 0);
+    clearCardWork(card);
     refreshCardText(card);
     return card;
   }
@@ -320,9 +526,14 @@
     const params = P.params(card);
     if (!params) return;
     try {
+      // even a 40 s window takes a moment on a phone: say what is happening
+      const slow = card.analysis.duration > 180;
+      if (slow) { card._workT0 = nowMs(); setCardWork(card, 'preview', 0); }
       const res = await Engine.render(card.analysisWindowChannels, card.analysis.sampleRate, params, {
-        progressSteps: 0,
+        progressSteps: slow ? 12 : 0,
+        onProgress: slow ? (p) => setCardWork(card, 'preview', p, estimateLeft(card, p)) : undefined,
       });
+      if (slow) clearCardWork(card);
       const env = Analyzer.envelope(res.channels, card.analysis.windowEnvelope.max.length);
       card.after = { envelope: env, chips: Analyzer.analyzeChannels(res.channels, res.sampleRate).chips };
       refreshCardText(card);
@@ -359,7 +570,14 @@
   }
 
   function markPlaying(card) {
-    for (const c of State.cards) c.el.card.classList.toggle('is-playing', c === card && Engine.playing);
+    for (const c of State.cards) {
+      const on = c === card && Engine.playing;
+      c.el.card.classList.toggle('is-playing', on);
+      // a screen reader (and a phone's accessibility tree) should hear what the
+      // button will do now, not what it did when the card was built
+      const btn = $('[data-act="play"]', c.el.card);
+      if (btn) btn.setAttribute('aria-label', t(on ? 'card.pause' : 'card.play'));
+    }
   }
 
   function setAB(mode) {
@@ -413,27 +631,48 @@
     if (!fresh.length) return;
     const n = fresh.length;
     refreshLibraryLabels();
+    // the file is on the list *now*, with its name — on a phone the new card is
+    // often below the fold, so it is brought into view instead of being silent
+    revealCard(fresh[0]);
+    UI.toast(n === 1 ? t('toast.addedOne', { name: fresh[0].name }) : t('toast.added', { n: n }), 'ok');
+    Job.start(n, fresh[0]);
     let done = 0;
     for (const card of fresh) {
-      const i = ++done;
-      globalProgress(true, (i - 1) / n, t('batch.progress', { i: i, n: n, name: card.name }));
+      Job.file(done, card.name, card);
       // sequential on purpose: one file in memory at a time keeps RAM flat
       await prepareCard(card);
-      globalProgress(true, i / n, t('batch.progress', { i: i, n: n, name: card.name }));
+      done++;
     }
-    globalProgress(false, 1, '');
+    Job.end();
     if (skipped) UI.toast(t('toast.skipped', { n: skipped }), 'bad');
-    UI.toast(t('toast.added', { n: n }), 'ok');
+  }
+
+  /** Scroll a fresh card into view (guarded: headless DOMs have no scrolling). */
+  function revealCard(card) {
+    const node = card && card.el && card.el.card;
+    if (!node || typeof node.scrollIntoView !== 'function') return;
+    try {
+      node.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    } catch (e) {
+      try { node.scrollIntoView(); } catch (e2) { /* nothing to do */ }
+    }
   }
 
   /**
    * Decode + measure a file, then render the short preview so the A/B waveform
    * and the before/after numbers are real, never estimated.
+   *
+   * Every stage reports what it is doing and how far along it is: decoding and
+   * the browser's own work are indeterminate, the measurement and the render
+   * are measured (the measurement is sliced, see RSDSP), so the bar never lies
+   * about a file that takes a minute on a phone.
    */
   async function prepareCard(card, again) {
     if (card.status === 'analyzing' || card.status === 'rendering') return;
     setStatus(card, 'analyzing', t('note.decode'));
-    setProgress(card, 0.05);
+    card._workT0 = nowMs();
+    setCardWork(card, 'decode', null);
+    await nextPaint();                       // let the bar paint before the work starts
     try {
       const dec = await Codecs.decodeFile(card.file);
       const buffer = dec.buffer;
@@ -441,14 +680,20 @@
       card.buffer = buffer;
 
       setNote(card, t('note.analyze'));
-      setProgress(card, 0.35);
-      const analysis = Analyzer.analyze(buffer, { previewSeconds: previewSecondsFor(buffer.duration), buckets: 1400 });
+      card._workT0 = nowMs();
+      setCardWork(card, 'analyze', 0);
+      // sliced measurement: the page keeps painting while a long file is measured
+      const analysis = await Analyzer.analyzeAsync(
+        buffer,
+        { previewSeconds: previewSecondsFor(buffer.duration), buckets: 1400 },
+        (p, stage) => setCardWork(card, stage, p, estimateLeft(card, p))
+      );
       card.analysis = analysis;
       // first file, untouched slider: adopt the strength the profile recommends
       if (!State.powerTouched && analysis.recommendedPower) adoptRecommendedPower(analysis.recommendedPower);
       card.el.waveEmpty.hidden = true;
       if (again) card.result = null;
-      setProgress(card, 0.6);
+      setCardWork(card, 'window', null);
 
       // the live monitor only ever holds the preview window, not the whole file
       const from = Math.floor(analysis.window.start * analysis.sampleRate);
@@ -460,26 +705,34 @@
       card.analysisWindowChannels = chans;
       card.previewBuffer = Codecs.makeBuffer(chans, analysis.sampleRate);
       card.buffer = null;                    // let the full decode go
-      setProgress(card, 0.7);
 
       // the restored side of the comparison (short window → fast, always real)
       const params = P.params(card);
       if (params) {
-        const res = await Engine.render(chans, analysis.sampleRate, params, { progressSteps: 0 });
+        card._workT0 = nowMs();
+        setCardWork(card, 'preview', 0);
+        const res = await Engine.render(chans, analysis.sampleRate, params, {
+          progressSteps: 12,
+          onProgress: (p) => setCardWork(card, 'preview', p, estimateLeft(card, p)),
+        });
         const env = Analyzer.envelope(res.channels, 1400);
         const after = Analyzer.analyzeChannels(res.channels, res.sampleRate);
         card.after = { envelope: env, chips: after.chips };
         card.afterScore = after.score;
       }
       $('[data-act="retry"]', card.el.card).hidden = true;
-      setProgress(card, 1);
+      clearCardWork(card);
       setStatus(card, 'ready');
       refreshCardText(card);
     } catch (err) {
       card.error = err;
       setStatus(card, 'error');
-      setProgress(card, 1);
-      setNote(card, (err && err.message) === 'worklet-load-failed' ? t('toast.workletFail') : t('err.decode') + ' ' + (err && err.message ? '(' + err.message + ')' : ''), true);
+      if (card.el.bar) card.el.bar.classList.add('is-error');
+      clearCardWork(card);
+      const msg = err && err.message;
+      setNote(card, msg === 'worklet-load-failed' ? t('toast.workletFail')
+        : msg === 'broken-audio' ? t('err.broken')
+          : t('err.decode') + ' ' + (msg ? '(' + msg + ')' : ''), true);
       $('[data-act="retry"]', card.el.card).hidden = false;
     }
   }
@@ -524,32 +777,36 @@
     }
 
     setStatus(card, 'processing', t('note.decode'));
-    setProgress(card, 0.02);
+    card._workT0 = nowMs();
+    setCardWork(card, 'decode', null);
+    await nextPaint();
     const dec = await Codecs.decodeFile(card.file);
     const rate = P.exportRate(card);
-    setProgress(card, 0.05);
 
+    card._workT0 = nowMs();
+    setCardWork(card, 'render', 0);
+    setNote(card, t('status.processing'));
     const res = await Engine.render(dec.buffer, rate, params, {
       progressSteps: 24,
-      onProgress: (p) => {
-        setProgress(card, 0.05 + p * 0.8);
-        setNote(card, t('status.rendering', { p: Math.round(p * 100) }));
-      },
+      onProgress: (p) => setCardWork(card, 'render', p, estimateLeft(card, p)),
     });
 
     setNote(card, State.format === 'mp3' ? t('toast.mp3Slow') : t('status.export'));
-    setProgress(card, 0.86);
     let bytes;
     let name;
     if (State.format === 'mp3') {
-      const out = await Codecs.encodeMp3(res.channels, res.sampleRate, State.mp3Rate, (p) => setProgress(card, 0.86 + p * 0.13));
+      card._workT0 = nowMs();
+      setCardWork(card, 'encode', 0);
+      const out = await Codecs.encodeMp3(res.channels, res.sampleRate, State.mp3Rate,
+        (p) => setCardWork(card, 'encode', p, estimateLeft(card, p)));
       bytes = out.bytes;
       name = Codecs.outputName(card.name, 'mp3');
     } else {
+      setCardWork(card, 'encode', null);     // a WAV write is fast, but not instant
       bytes = Codecs.encodeWav(res.channels, res.sampleRate, State.wavDepth);
       name = Codecs.outputName(card.name, 'wav');
     }
-    setProgress(card, 1);
+    clearCardWork(card);
     card.result = { bytes, name, format: State.format, rate: res.sampleRate, signature, stale: false };
     setStatus(card, 'done');
     setNote(card, t('note.done', { fmt: State.format.toUpperCase() }));
@@ -561,6 +818,7 @@
     if (State.busy) return;
     if (!card.analysis) { UI.toast(t('toast.needDecode'), 'bad'); return; }
     State.busy = true;
+    Job.start(1, card);
     try {
       const res = await renderCard(card);
       Codecs.download(res.bytes, res.name);
@@ -570,6 +828,7 @@
       setNote(card, t('err.render') + ' ' + (err && err.message ? err.message : ''), true);
       UI.toast(t('toast.renderFail', { msg: (err && err.message) || '?' }), 'bad', 6000);
     }
+    Job.end();
     State.busy = false;
   }
 
@@ -590,22 +849,22 @@
       if (projected > CONFIG.softMemoryMB * 1e6) {
         UI.toast(t('toast.mp3Slow'), 'warn', 6000);
       }
+      Job.start(todo.length, todo[0]);
       for (let i = 0; i < todo.length; i++) {
         const card = todo[i];
-        globalProgress(true, i / todo.length, t('batch.processing', { i: i + 1, n: todo.length }));
+        Job.file(i, card.name, card);
         try {
           await renderCard(card);
         } catch (err) {
           setStatus(card, 'error');
           setNote(card, (err && err.message) || t('err.render'), true);
         }
-        globalProgress(true, (i + 1) / todo.length, t('batch.processing', { i: i + 1, n: todo.length }));
       }
       UI.toast(t('batch.done', { n: todo.length }), 'ok');
     } catch (err) {
       UI.toast(t('toast.renderFail', { msg: (err && err.message) || '?' }), 'bad', 6000);
     }
-    globalProgress(false, 1, '');
+    Job.end();
     disableControls(false);
     State.busy = false;
   }
@@ -623,22 +882,24 @@
         UI.toast(t('toast.mp3Slow'), 'warn', 6000);
       }
       const entries = [];
+      Job.start(ready.length, ready[0]);
       for (let i = 0; i < ready.length; i++) {
         const card = ready[i];
-        globalProgress(true, (i / ready.length) * 0.9, t('batch.processing', { i: i + 1, n: ready.length }));
+        Job.file(i, card.name, card);
         const res = await renderCard(card);
         entries.push({ name: res.name, bytes: res.bytes });
       }
       entries.readme = buildReadme(ready);
-      globalProgress(true, 0.94, t('batch.zipPrep', { n: entries.length }));
-      const blob = await Codecs.zip(entries, (p) => globalProgress(true, 0.94 + p * 0.05, t('batch.zipPrep', { n: entries.length })));
+      Job.file(Math.max(0, entries.length - 1), entries.length ? entries[entries.length - 1].name : '', null);
+      Job.at(0.9, 'zip');
+      const blob = await Codecs.zip(entries, (p) => Job.at(0.9 + p * 0.1, 'zip'));
       const name = 'remaster-suite-' + new Date().toISOString().slice(0, 10) + '.zip';
       Codecs.download(blob, name);
       UI.toast(t('toast.zipDone', { n: entries.length }), 'ok');
     } catch (err) {
       UI.toast(t('toast.zipFail') + ' ' + (err && err.message ? err.message : ''), 'bad', 6000);
     }
-    globalProgress(false, 1, '');
+    Job.end();
     disableControls(false);
     State.busy = false;
   }
@@ -689,6 +950,7 @@
   function clearAll() {
     Engine.stop();
     State.current = null;
+    Job.end();
     clearTimeout(previewTimer);
     for (const c of State.cards) {
       clearTimeout(c._previewTimer);
@@ -715,6 +977,25 @@
   }
 
   /* ------------------------------------------------------------- global wiring */
+
+  /** The dropzone copy differs for a finger: nothing can be dragged on a phone. */
+  /**
+   * The drop zone is the one place where desktop and phone wording differ:
+   * dragging a file is not something a phone can do. The key is written back to
+   * `data-i18n` so a later language repaint keeps the variant this device needs.
+   */
+  function paintDropzone() {
+    const touch = State.touch;
+    const pairs = [
+      [$('#dzTitle'), touch ? 'drop.titleTouch' : 'drop.title'],
+      [$('#dzHint'), touch ? 'drop.hintTouch' : 'drop.hint'],
+    ];
+    for (const [el, key] of pairs) {
+      if (!el) continue;
+      el.setAttribute('data-i18n', key);
+      el.textContent = t(key);
+    }
+  }
 
   function bindDropzone() {
     const dz = $('#dropzone');
@@ -888,12 +1169,16 @@
       const short = { auto: 'preset.auto.short', garage: 'preset.garage', vinyl: 'preset.vinyl', cassette: 'preset.cassette', lowbitrate: 'preset.lowbitrate', general: 'preset.general' };
       Array.prototype.forEach.call(c.el.preset.options, (o) => { o.textContent = t(short[o.value] || 'preset.general'); });
       c.el.powerOut.textContent = t('ui.percent', { v: c.el.power.value });
+      const play = $('[data-act="play"]', c.el.card);
+      if (play) play.setAttribute('aria-label', t(c === State.current && Engine.playing ? 'card.pause' : 'card.play'));
       c.wave.o.onSeek && c.wave.schedule();
       if (c.analysis) refreshCardText(c);
     }
     const power = $('#power');
     if (power) $('#powerVal').textContent = t('ui.percent', { v: power.value });
     if (global.RSLibs && global.RSLibs._paint) global.RSLibs._paint();
+    paintDropzone();
+    if (State.job) paintJob();
     refreshLibraryLabels();
     for (const c of State.cards) c.wave.draw();
   }
@@ -917,8 +1202,20 @@
 
   function boot() {
     if (!global.document || !$('#dropzone')) return;
+    applyPointer();
+    // …and keep listening: the same tab can be a phone and then a desktop again
+    try {
+      const mq = global.matchMedia && global.matchMedia('(hover: none) and (pointer: coarse)');
+      if (mq && mq.addEventListener) {
+        mq.addEventListener('change', () => {
+          applyPointer();
+          paintDropzone();
+        });
+      }
+    } catch (e) { /* very old browsers: the boot value stands */ }
     global.RSi18n.setLang(global.RSi18n.detect(), { apply: false });
     global.RSi18n.apply();
+    paintDropzone();
     UI.bindDialogs();
     bindHeader();
     bindDropzone();
@@ -934,8 +1231,8 @@
   }
 
   const API = {
-    State, CONFIG, boot, addFiles, prepareCard, renderCard, processAll, downloadZip,
-    adoptRecommendedPower,
+    State, CONFIG, Job, boot, addFiles, prepareCard, renderCard, processAll, downloadZip,
+    adoptRecommendedPower, setCardWork, revealCard, isTouchDevice, refreshAllText,
     setAB, ensurePlaying, clearAll, removeCard, refreshPreview, P,
   };
   global.RSApp = API;

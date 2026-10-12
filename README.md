@@ -59,6 +59,29 @@ crest/clipping analysis) and produces:
 * a **waveform comparison**: the original mirrored above the centre line, the restored version
   below it, in the same timeline
 * measurement chips (peak, loudness, top-end cut-off, noise floor, dynamics, stereo width, clipping)
+* **an honest progress bar while it works** — the stage (*"Measuring the sound …"*, *"Restoring the
+  recording …"*, *"Writing the file …"*), a percentage and a coarse time left, on the file card and
+  on a second bar above the list that names the file the queue is on. Steps that cannot be counted
+  (the browser's own decode) sweep instead of inventing a number.
+
+### On a phone
+
+The suite is built to be used in a phone browser:
+
+* **The card is on the list the moment you pick the file, with its name** — the analysis runs
+  behind it, and a long name wraps instead of being cut off.
+* **The job bar docks to the bottom edge** so it stays visible while you scroll the list.
+* **Thumb-first controls:** every button and segmented control is at least 44 px tall, fields use
+  16 px text (so iOS Safari does not zoom into them), and nothing depends on hovering.
+* **No desktop wording:** with a coarse pointer the drop zone says *tap to choose* instead of
+  *drop files here*, and it switches live if the pointer changes.
+* **Safe-area aware:** the notch and the home indicator are respected — the bar and the footer
+  keep clear of the gesture area.
+* **Smaller memory budget** (420 MB instead of 900 MB estimated output) so a ZIP full of WAVs
+  cannot blow up a mobile browser, and a **screen wake lock** keeps the tab alive during a long
+  render.
+* Verified in a real browser at 320, 360, 390, 414 and 768 px wide — no horizontal scrolling
+  anywhere, in `tests/beta/beta.js` and the screenshot matrix in [`docs/beta/`](docs/beta).
 
 ### The one slider
 
@@ -68,13 +91,35 @@ crest/clipping analysis) and produces:
 detected profile recommends* the moment the first file is analysed. Touch the slider once and
 your value wins from then on.
 
+The profile is a **ceiling**, never a curve to apply. Every amount in the chain is dosed from the
+measurement: a stage that *repairs* something (de-hiss, de-click, de-resonator, corrective EQ) only
+moves when that problem was actually detected, and a stage that *synthesises* something (sub-bass,
+exciter, air) only adds what was measured as missing, capped by the profile's budget. Three of the
+repairs take the measurement literally, because a partial one is worse than none: the **mains notch**
+is exactly as deep as the line it removes (a shallower one leaves the hum, a deeper one cuts the
+bass), the **resonance notches** are exactly as deep as the peaks they remove, and the **de-hisser**
+subtracts exactly the number of decibels of top end the analyser found to be noise. On material
+that needs nothing, the automatic result measures as unchanged — `tests/tuning.test.js` renders
+nine problem recordings and holds every octave band that carries content to ±3 dB, the music band's
+loudness to ±0.8 dB, and the soft-clip guard transparent.
+
+Two bounds tell the difference between "a repair" and "overdriven", because a dull 1960s recording
+has *nothing* above 9 kHz — a strict band-by-band limit would either forbid the repair or allow a
+fake top end:
+
+* a band the recording actually fills may not move by more than a few dB — measured, the automatic
+  mode keeps every such octave within ±2.5 dB and the music band within ±0.3 dB of the original;
+* everything the chain changes **above 6 kHz — synthesis, EQ, saturation — stays at least 18 dB
+  below the music band** (12 dB even for a manually chosen profile pushed to 100 %). Filling a dead
+  top octave is a repair; a top end that arrives at music level is a fake modern sound.
+
 ### Six sound profiles
 
 | Profile | For |
 | --- | --- |
 | **Automatic** | picks the right profile from the measurements |
 | **Garage / one-mic (60s/70s)** | thin bottom, boxy mids, rolled-off top, room noise |
-| **Vinyl rip** | crackle, surface roar, rumble, hum |
+| **Vinyl rip** | crackle, surface roar, rumble (hum is repaired whenever it is measured, whichever profile runs) |
 | **Cassette de-hiss** | steady tape hiss, soft high-frequency loss |
 | **Low bitrate brightener** | hard codec edge around 11–16 kHz (the biggest job for the exciter) |
 | **General polish** | nothing dramatic, just better |
@@ -89,8 +134,9 @@ finished results — with a `README.txt` describing what was done.
 
 The **Original / Restored / A/B** switch cross-fades between dry and wet *inside* the processor
 with an 18 ms ramp, so switching never clicks. The restored path is level-matched to the original
-(running RMS, ±5 dB), so "restored" never wins just by being louder. A/B mode flips every four
-seconds by itself.
+on the music band (300 Hz – 3.4 kHz, measured within ±0.3 dB), so "restored" never wins just by
+being louder — and a rebuilt bottom or top octave cannot fool the comparison either. A/B mode flips
+every four seconds by itself.
 
 ---
 
@@ -101,17 +147,20 @@ and runs per sample, control-rate decimated for speed:
 
 | # | Stage | What it does |
 | --- | --- | --- |
-| 1 | **DC guard** | 14 Hz one-pole, keeps DC out of the envelopes |
+| 1 | **DC guard** | 2 Hz one-pole: removes a damaged file's offset without rotating the phase of the 20–60 Hz region, where the sub-bass repair works |
 | 2 | **Static EQ bank** | 6 biquads: 60 Hz shelf, 200 Hz mud, 450 Hz box, 1.3 kHz honk, 3.2 kHz presence, 7 kHz air — dosed automatically from the measurement |
+| 2b | **Measured resonance notches** | the two strongest narrow peaks the analyser finds (150 Hz – 1.8 kHz, ≥ 3.2 dB above the local trend), each notched at its own frequency, depth and sharpness. A boxy room is a *constant* colouration, which the dynamic de-resonator below cannot see |
 | 3 | **Dynamic de-resonator** | 6 narrow bands (220 Hz … 3.1 kHz) watch their own envelope against a long-term average; anything ringing way above it gets pulled down. Steady tones pass, room ring does not. |
 | 4 | **Harmonic exciter** | 3 bands, each: band-pass → asymmetric saturation (even *and* odd harmonics) → band-pass → envelope gate. Synthesise the overtones that were never recorded. |
 | 5 | **Air synthesis 8–16 kHz** | takes the surviving 4.5–7.5 kHz band and generates 2nd/3rd order content above it, with a de-esser so it never turns into fizz |
 | 6 | **Sub-bass 30–60 Hz** | 6th-order low pass → hysteresis zero-crossing detector → divide-by-two pitch tracking → oscillator with a gated envelope. A 60–120 Hz bass line gains its missing bottom octave. |
-| 7 | **De-hiss** | Linkwitz-Riley split at 3.2 kHz; the top band is a downward expander keyed from the music, so hiss only opens between notes |
+| 7 | **De-hiss** | Linkwitz-Riley split at 3.2 kHz. The key is the *tilt* of the top end (4 kHz+ against the 1.45 kHz band, the same two bands and the same 2048-sample window the analyser measures), so it attenuates where the top end stops following the programme and leaves everything else alone: between the notes the same repair is worth 6 dB, over music less than 0.3 dB |
 | 8 | **De-click** | low-pass prediction (4 kHz, 4th order) plus a fast/slow envelope ratio; impulses are replaced by the prediction, with a short decaying hold for the neighbours of the click |
 | 9 | **Glue compressor** | soft 2:1 with automatic make-up, transient-preserving |
 | 10 | **Warmth + tilt** | gentle saturation and a low/high shelf pair for the final tone balance |
-| 11 | **Output** | 25 Hz infrasonic high-pass, auto level match, then a tanh soft-clip guard that saturates at −0.02 dBFS so a 16-bit export can never hit the rail |
+| 11 | **Mains hum notch** | three biquads, three hertz wide, at the measured mains frequency and its harmonics — dosed from the level the line stands above its own neighbourhood, and placed *after* every stage that can put low-frequency energy back. Bypassed completely when nothing was measured |
+| 12 | **Stereo width** | the high-passed side signal (above 200 Hz) of an image that measured as narrow but not mono is lifted back towards the programme's own bandwidth; a mono master is never widened |
+| 13 | **Output** | 2 Hz DC guard (keeps the offset the saturation stages can add out of the export), auto level match, then a tanh soft-clip guard that saturates at −0.02 dBFS so a 16-bit export can never hit the rail |
 
 The dry/wet cross-fade happens at the very end: `out = dry + power · (wet − dry)`. Because the whole
 chain is minimum-phase IIR, it has **zero latency** — the A/B switch is sample-accurate, and the
@@ -177,13 +226,17 @@ assets/
     favicon.svg                  the waveform alone — the record ring is unreadable at 16 px
 tests/
   harness.js                     Node harness + signal simulators
-  dsp.test.js                    DSP/engine suite (56 checks)
-  web.test.js                    static, DOM and app suite (89 checks)
+  dsp.test.js                    DSP/engine suite: transparency, sub, air, exciter, de-hiss,
+                                 de-click, measured hum/hiss repair, and the contract that a
+                                 broken file never becomes NaN parameters (73 checks)
+  tuning.test.js                 the tuning contract: what the automatic mode may do to a file (17 checks)
+  web.test.js                    static, DOM and app suite (130 checks)
   audit.test.js                  repository hygiene, markup, contrast, i18n, parameter,
-                                 codec and robustness audit (161 checks)
+                                 codec and robustness audit — including the mains-notch law,
+                                 a rich-hum fixture and the effect budgets (224 checks)
   e2e.test.js                    realistic journeys: five problem recordings, slider sweep,
                                  profile overrides, 10-file batch → ZIP, mono/32 k/96 k,
-                                 hostile input (107 checks)
+                                 hostile input (108 checks)
   webaudio-stub.js               miniature Web Audio implementation for Node
 ```
 
@@ -196,7 +249,7 @@ belong to the test suite.
 
 ```bash
 npm install          # only for the test suite (jsdom)
-npm test             # runs all four suites
+npm test             # runs all five suites
 node tests/dsp.test.js     # engine: transparency, sub, air, exciter, de-hiss, de-click,
                            # de-resonator, level match, power scaling, WAV/MP3/ZIP, classification
 node tests/web.test.js     # static integrity, bilingual coverage, boot, drop → analyse → render
@@ -205,15 +258,20 @@ node tests/audit.test.js   # repository hygiene, markup, stylesheet, contrast, b
                            # coverage, parameter ranges, DSP edge cases, codec round-trips, budgets
 node tests/e2e.test.js     # realistic journeys: five problem recordings, slider sweep, profile
                            # overrides, 10-file batch → ZIP, mono/32 k/96 k, hostile input
+node tests/tuning.test.js  # the tuning contract: octave bands, loudness, the level match, the
+                           # soft-clip guard, level-normalised synthesis, honest extremes
 node tests/beta/beta.js    # big beta: drives a real headless Chromium over the DevTools
                            # protocol — real drops, real AudioWorklet, real dialogs and
-                           # downloads — and photographs the screenshot matrix
+                           # downloads, phone emulation at 390 and 320 px with live progress
+                           # sampling — and photographs the screenshot matrix. The recordings
+                           # are the same synthesised fixtures the node suites use, served to
+                           # the page, and the upload path is timed phase by phase
 ```
 
 The beta writes `docs/BETA-REPORT.md` and the screenshot matrix to `docs/beta/`.
 It needs the optional dev dependency `@sparticuz/chromium` (a packaged headless
 Chromium, used because CI machines rarely ship a browser); `npm test` runs the
-four dependency-free suites and stays green everywhere.
+five dependency-free suites and stays green everywhere.
 
 Signals are simulated (garage session, cassette, vinyl rip, low-bitrate, clean) and the whole
 application is exercised in a DOM with a miniature Web Audio implementation that runs the real

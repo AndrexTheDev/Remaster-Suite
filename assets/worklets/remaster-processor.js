@@ -42,6 +42,15 @@ const KNEE = 0.94;
 const CEILING = 0.9975;
 const RANGE = CEILING - KNEE;
 
+/* ---------------------------------------------------------------- synthesis
+ * Overall mix of the two harmonic generators per unit of their parameter
+ * (0…1). These are the calibrated numbers behind "even at 100 % it never
+ * sounds processed": the *rendered* envelope they must produce is asserted in
+ * tests/tuning.test.js, so they cannot be changed by accident.
+ * -------------------------------------------------------------------------- */
+const EXC_MIX = 2.8;
+const AIR_MIX = 1.0;
+
 /* -------------------------------------------------------------------------- */
 /* small math helpers                                                          */
 /* -------------------------------------------------------------------------- */
@@ -133,6 +142,37 @@ class Biquad {
  * every `decim` samples (time constants stay correct), which is inaudible for
  * envelopes but considerably cheaper.
  */
+/**
+ * RMS over the last `n` samples — the *exact* measurement the analyser makes of
+ * the same two bands (it integrates 2048 samples of the filtered signal per
+ * frame). An envelope follower was the obvious way to key a gate, and with a
+ * 3 ms/70 ms pair it keys transients nicely — but it reads peak-ish levels of
+ * the band, not the band's level, so a threshold measured as a band RMS in the
+ * analyser and applied to an envelope in the worklet meant two different numbers
+ * with an arbitrary constant between them. Both sides now integrate the same
+ * window of the same band, so "the top end is 9 dB above where this recording
+ * sits when it is quiet" is a statement that actually transfers.
+ */
+class SlidingRms {
+  constructor(n) {
+    this.n = n;
+    this.buf = new Float32Array(n);
+    this.i = 0;
+    this.sum = 0;
+    this.v = 0;
+  }
+  reset() { this.buf.fill(0); this.i = 0; this.sum = 0; this.v = 0; }
+  tick(x) {
+    const q = x * x;
+    this.sum += q - this.buf[this.i];
+    this.buf[this.i] = q;
+    this.i++;
+    if (this.i >= this.n) this.i = 0;
+    this.v = Math.sqrt(Math.max(this.sum, 0) / this.n);
+    return this.v;
+  }
+}
+
 class EnvFollower {
   constructor(sr, attackSec, releaseSec, decim) {
     this.d = decim || 1;
@@ -241,6 +281,15 @@ class ResoBand {
 
 const EXC_DECIM = 8;
 
+/**
+ * Ceiling of the harmonic generator, relative to the band it is fed from.
+ * The generated overtones may reach this fraction of the source band's own
+ * envelope (+0 dB = as loud as the band itself). Beyond that the exciter stops
+ * being a restorer and starts being an effect. Because the ceiling follows the
+ * source, it holds for any parameter setting, any preset and any material.
+ */
+const EXC_CAP = 0.85;
+
 class ExciterBand {
   constructor(sr, inFreq, inQ, outFreq, outQ) {
     this.pre = new Biquad(); this.pre.setBandpass(sr, inFreq, inQ);
@@ -266,11 +315,25 @@ class ExciterBand {
     const e = this.env.tick(m);
     if (this.env.n === EXC_DECIM - 1) this.prog = smoothstep(this.gLo, this.gLo + 1 / this.gInv, e);
     this.sig = e;
+    // Level-normalise the *input* of the nonlinearity (see AirSynth.tick): the
+    // harmonics are then generated from a band signal of defined level and
+    // scaled back by the band envelope, so the same parameter setting means the
+    // same thing on a quiet and on a loud master.
+    const norm = this.prog / Math.max(e, this.gLo * 4);
+    const sn = s * norm;                     // ≈ ±1 sized band signal
     // odd harmonics (3f, 5f…) from symmetric saturation,
     // even harmonics (2f, 4f…) from the signed-square branch
-    const odd = ftanh(s * drive);
-    const ev = s * m * 1.35;
-    return this.post.process(odd * (1 - even * 0.75) + ev * (even * 1.15));
+    const odd = ftanh(sn * drive);
+    const ev = sn * (sn < 0 ? -sn : sn) * 1.35;
+    let h = this.post.process(odd * (1 - even * 0.75) + ev * (even * 1.15)) * e;
+    // memoryless, source-referenced ceiling (see EXC_CAP): transparent below
+    // the ceiling, asymptotic above it, and never louder than EXC_CAP × band
+    const cap = e * EXC_CAP;
+    if (cap > 1e-12) {
+      const ah = h < 0 ? -h : h;
+      if (ah > cap * 0.25) h = h / (1 + (ah - cap * 0.25) / (cap * 1.75));
+    } else h = 0;
+    return h;
   }
 }
 
@@ -280,16 +343,27 @@ class ExciterBand {
 
 const AIR_DECIM = 8;
 
+/**
+ * Ceiling of the air synthesiser (8–16 kHz), relative to the 4.5–7.5 kHz band
+ * it derives from. This single number is what keeps a dull 1960s recording from
+ * being turned into a bright, fizzy modern one: when the source has almost
+ * nothing left up there, there is almost nothing to derive from, and the
+ * synthesiser stays quiet instead of inventing a top end. −6 dB ≈ 0.5.
+ */
+const AIR_CAP = 0.5;
+
 class AirSynth {
   constructor(sr) {
     // Two harmonic sources so the 8–16 kHz band can be rebuilt even from very
     // dull material:
     //   • high band (≈4.6–7.5 kHz) → squared → 2nd order harmonics = 9–15 kHz
     //   • low  band (≈2.2–5.0 kHz) → cubed  → 3rd order harmonics = 6.6–15 kHz
+    this.sr = sr;
     this.pre = new Biquad(); this.pre.setBandpass(sr, 6000, 0.85);
     this.preLo = new Biquad(); this.preLo.setBandpass(sr, 3300, 0.55);
     this.hp = new Biquad(); this.hp.setHighpass(sr, 8200, 0.60);
     this.lp = new Biquad(); this.lp.setLowpass(sr, Math.min(15500, sr * 0.42), 0.707);
+    this.srcHz = 0;
     this.deess = new Biquad(); this.deess.setBandpass(sr, 6600, 1.3);
     this.env = new EnvFollower(sr, 0.004, 0.070, AIR_DECIM);   // presence
     this.dEnv = new EnvFollower(sr, 0.004, 0.070, AIR_DECIM);  // sibilance (fast)
@@ -308,6 +382,21 @@ class AirSynth {
     this.gLo = clamp(noiseLin * 1.5, 1e-6, 0.02);
     this.gInv = 1 / Math.max(this.gLo * 5.0, 1e-9);
   }
+  /**
+   * Where to derive from. A bitrate low-pass cuts the spectrum at its own
+   * cliff, and the fixed 6 kHz band sits above the cliff on a very low bitrate
+   * file — there is nothing left there to derive anything from. The law passes
+   * the measured cliff, so the synthesizer always works from the band that
+   * survived.
+   */
+  setSource(hz) {
+    // a non-finite source frequency would poison every coefficient below
+    const f = Math.min(6000, Math.max(2200, isFinite(hz) ? hz : 6000));
+    if (f === this.srcHz) return;
+    this.srcHz = f;
+    this.pre.setBandpass(this.sr, f, 0.85);
+    this.preLo.setBandpass(this.sr, f * 0.55, 0.55);
+  }
   /** de-essing gain: ducks synthesis on hot sibilance */
   control(x) {
     const s = this.deess.process(x);
@@ -321,29 +410,48 @@ class AirSynth {
     this.dRamp.set(g);
     return this.dRamp.tick();
   }
-  /** @returns {number} regenerated 8–16 kHz signal */
-  tick(x, drive) {
+  /** @returns {number} regenerated 8–16 kHz signal
+   *  @param {number} room how far above the source band the result may reach */
+  tick(x, drive, room) {
     const sHi = this.pre.process(x);
     const sLo = this.preLo.process(x);
     const mag = (sHi < 0 ? -sHi : sHi) + 0.65 * (sLo < 0 ? -sLo : sLo);
     const e = this.env.tick(mag);
     if (this.env.n === AIR_DECIM - 1) this.prog = smoothstep(this.gLo, this.gLo + 1 / this.gInv, e);
-    const h2 = sHi * sHi * 1.7;                    // 2nd order harmonics
-    // pre-boost before cubing: the 3rd-order products are what reach 8–16 kHz
-    // when the source is dull, and the output band pass discards the low-order
-    // products that the boost also creates
-    let lo = sLo * 4.0;
-    if (lo > 1.2) lo = 1.2; else if (lo < -1.2) lo = -1.2;
-    const h3 = lo * lo * lo * 1.15;                // 3rd order harmonics
-    let d = (h2 + h3) * drive;
+
+    // ── level-normalised harmonic generation ──────────────────────────────
+    // Squaring a band produces a signal whose level is the *square* of the
+    // input level; cubing it, the cube. Left as-is, how much air is generated
+    // depends on how loud the material is — which is what made a dull recording
+    // suddenly sound brighter than a loud one, and what forced the old design
+    // into heavy limiting. Normalising the band signal first and scaling the
+    // harmonics back by the band envelope makes the generated band a fixed
+    // ratio of the band it came from: same dB, loud or quiet.
+    const norm = this.prog / Math.max(e, this.gLo * 4);
+    const nHi = sHi * norm;                        // ≈ ±1 sized band signal
+    // modest pre-boost before cubing: the 3rd-order products are what reach
+    // 8–16 kHz when the source is dull, and the output band pass discards the
+    // low-order products that the boost also creates
+    let nLo = sLo * norm * 2.2;
+    if (nLo > 1.5) nLo = 1.5; else if (nLo < -1.5) nLo = -1.5;
+    const h2 = nHi * nHi * 1.7;                    // 2nd order harmonics
+    const h3 = nLo * nLo * nLo * 1.15;             // 3rd order harmonics
+    let d = (h2 + h3) * drive * e;
     if (d > 4) d = 4; else if (d < -4) d = -4;     // safety clamp
-    const y = this.lp.process(this.hp.process(d));
-    // Memoryless soft compressor: the generated band is rebuilt from harmonics,
-    // which are naturally peakier than recorded air. This tames the peaks
-    // (roughly 3 dB) without adding harmonics of its own, so the new top end
-    // sounds like air rather than like fizz.
-    const ay = y < 0 ? -y : y;
-    return y / (1 + 0.45 * ay);
+    let y = this.lp.process(this.hp.process(d));
+    // Source-referenced ceiling: the synthesised band may never grow louder than
+    // AIR_CAP × the band it was derived from. Transparent below a quarter of the
+    // ceiling; above it the limiter is memoryless, so it cannot pump.
+    // `room` is a rate parameter: a missing or non-finite value must fall back
+    // to the shipped ceiling rather than switch the band off (NaN × e = NaN,
+    // and the branch below would then return silence)
+    const roomCap = isFinite(room) ? room : AIR_CAP;
+    const cap = e * roomCap;
+    if (cap > 1e-12) {
+      const ay = y < 0 ? -y : y;
+      if (ay > cap * 0.25) y = y / (1 + (ay - cap * 0.25) / (cap * 1.75));
+    } else y = 0;
+    return y;
   }
 }
 
@@ -352,6 +460,14 @@ class AirSynth {
 /* -------------------------------------------------------------------------- */
 
 const SUB_DECIM = 4;
+
+/**
+ * Level of the synthesised sub octave, as a share of the tracked bass band's
+ * envelope. 0.55 is roughly a "half again as much bottom" mix; the point is
+ * that it *follows the source* instead of being an absolute oscillator level
+ * that slams on quiet bass and disappears on loud bass.
+ */
+const SUB_CAP = 0.70;
 
 class SubSynth {
   constructor(sr) {
@@ -392,7 +508,12 @@ class SubSynth {
     this.phase += TWO_PI * f / this.sr;
     if (this.phase > TWO_PI) this.phase -= TWO_PI;
     const g = this.gate.tick();
-    return g > 1e-5 ? this.outLP.process(Math.sin(this.phase)) * g : 0;
+    if (g <= 1e-5) return 0;
+    // Source-referenced level: the synthesised octave follows the tracked bass
+    // envelope, so a recording whose bottom octave is already intact can never
+    // receive a second, louder one. SUB_CAP is the sub's share of the bass band.
+    const amp = e * SUB_CAP;
+    return this.outLP.process(Math.sin(this.phase) * amp) * g;
   }
   _edge() {
     const period = this.counter;
@@ -408,39 +529,115 @@ class SubSynth {
 /* -------------------------------------------------------------------------- */
 
 const HISS_DECIM = 8;
+/**
+ * The band the top end is compared with when looking for hiss (700 Hz – 3 kHz).
+ * The analyser measures the *same* two bands — 4–16 kHz against this one — so the
+ * tilt difference it reports is a number this stage can subtract. They have to
+ * stay in step: see HISS_MID_HZ in assets/js/dsp-utils.js.
+ */
+const HISS_MID_HZ = 1450;
+const HISS_MID_Q = 0.63;
+/** Width of each mains notch, in hertz (see HumNotch.prepare). */
+const HUM_BW_HZ = 3;
+/** dB of notch at 100 % dose — the unit a measured mains excess is expressed in. */
+const HUM_DB_PER_DOSE = 42;
 
 class DeHiss {
   constructor(sr, xover) {
+    // Linkwitz-Riley split: the low band is what is left of the signal, the
+    // high band is both the gate key and what the gate attenuates. The split is
+    // not free — LR4 low + high is flat in magnitude but not in phase, so
+    // re-adding the two branches changes the waveform (and its peak) even when
+    // the gate is wide open. tick() therefore returns the input itself when
+    // there is nothing to attenuate, and uses the reconstruction only for the
+    // samples that are actually being repaired.
     this.lp1 = new Biquad(); this.lp1.setLowpass(sr, xover, 0.7071);
     this.lp2 = new Biquad(); this.lp2.setLowpass(sr, xover, 0.7071);
     this.hp1 = new Biquad(); this.hp1.setHighpass(sr, xover, 0.7071);
     this.hp2 = new Biquad(); this.hp2.setHighpass(sr, xover, 0.7071);
-    // keyed on the high band itself, referenced to the *measured* HF noise floor
-    this.envHf = new EnvFollower(sr, 0.003, 0.070, HISS_DECIM);
+    // The gate is keyed on the *tilt* of the top end, not on its level: the
+    // 700 Hz–3 kHz band rides with the programme, the 4–16 kHz band rides with it
+    // too as long as it holds music — and stops riding when what is up there is
+    // noise. Measuring the same two bands here as the analyser does is what makes
+    // the measured number (dB of top end that is not programme) something this
+    // stage can actually subtract.
+    this.mid = new Biquad(); this.mid.setBandpass(sr, HISS_MID_HZ, HISS_MID_Q);
+    this.rmsHf = new SlidingRms(2048);       // same window as the analyser's frames
+    this.rmsMid = new SlidingRms(2048);
+    this.tickCount = 0;
     this.gate = new Ramp(HISS_DECIM, 1);
     this.t1 = 1e-6;
     this.inv = 1;
+    this.tiltRef = 0;          // the programme's own HF − MID tilt (measured)
+    this.maxCut = 0;           // how much of the top end may be taken (measured)
+    this.cutDb = 0;            // the cut the key currently asks for
   }
   reset() {
     this.lp1.reset(); this.lp2.reset(); this.hp1.reset(); this.hp2.reset();
-    this.envHf.v = 0; this.gate.reset(1);
+    this.mid.reset();
+    this.rmsHf.reset(); this.rmsMid.reset();
+    this.gate.reset(1);
   }
   setNoise(hfNoiseLin) {
-    // gate opens ~9 dB above the HF noise floor, fully open ~21 dB above it
-    // (capped so an over-estimated floor can never gate the music itself)
+    // The absolute reference: where the HF band sits, as an RMS of the same band
+    // and the same 2048-sample window, in the passages where there is no music to
+    // hide behind. It bounds the repair from below — the level term can never
+    // silence music that is well above the measured noise floor, whatever the
+    // tilt says.
     this.t1 = clamp(hfNoiseLin * 2.8, 1e-7, 0.01);
     this.inv = 1 / Math.max(this.t1 * 4.0, 1e-9);
+  }
+  /**
+   * @param {number} tiltDb  the programme's own HF − MID tilt, in dB (measured)
+   * @param {number} maxCutDb the measured tilt step: the most top end that may be
+   *                          taken out, i.e. the amount of it that is noise
+   */
+  setTilt(tiltDb, maxCutDb) {
+    this.tiltRef = isFinite(tiltDb) ? tiltDb : 0;
+    this.maxCut = isFinite(maxCutDb) ? clamp(maxCutDb, 0, 24) : 0;
   }
   tick(x, strength) {
     if (strength <= 0.0001) { this.gate.set(1); this.gate.tick(); return x; }
     const low = this.lp2.process(this.lp1.process(x));
     const high = this.hp2.process(this.hp1.process(x));
-    const e = this.envHf.tick(high < 0 ? -high : high);
-    if (this.envHf.n === HISS_DECIM - 1) {
-      this.gate.set(smoothstep(this.t1, this.t1 + 1 / this.inv, e));
+    const e = this.rmsHf.tick(high);
+    const em2 = this.rmsMid.tick(this.mid.process(x));
+    this.tickCount++;
+    if (this.tickCount % HISS_DECIM === 0) {
+      // How much top end is left that the programme cannot explain?
+      //   · the tilt term says how much *more* top end there is than the music
+      //     itself carries — in dB, so it is the repair amount directly;
+      //   · the level term says how far the HF band is below the measured noise
+      //     floor + 9 dB, which is what stops the stage from ever diving into
+      //     music that is simply quiet;
+      // the *smaller* of the two wins, which is what makes the stage transparent
+      // whenever either one says "there is nothing wrong here".
+      // Without a measured tilt step there is nothing to subtract *by tilt* — then
+      // the level key alone decides, which is the plain expander the stage has
+      // always been (and which is all that can be said about a file whose top end
+      // nobody has measured).
+      const tiltNow = (e > 1e-9 && em2 > 1e-9) ? 20 * Math.log10(e / em2) : this.tiltRef;
+      const cutTilt = this.maxCut > 0.01 ? clamp(tiltNow - this.tiltRef, 0, this.maxCut) : 60;
+      const lvl = smoothstep(this.t1, this.t1 + 1 / this.inv, e);
+      const cutLevel = lvl > 1e-6 ? -20 * Math.log10(lvl) : 60;
+      this.cutDb = Math.min(cutTilt, Math.max(cutLevel - 6, 0));
+      this.gate.set(Math.pow(10, -this.cutDb / 20));
     }
+    // The amount is applied in *decibels*, not as a linear crossfade: "half the
+    // repair" has to mean −6 dB of the noise, and a linear blend of the gate
+    // gains is not that (it is far less at the bottom of the range, which is
+    // exactly why the de-hisser used to move the HF floor by 3 dB when the
+    // measurement had asked for 10).
     const g = this.gate.tick();
-    const gEff = 1 - strength * (1 - g);
+    const cutNow = g > 1e-6 ? -20 * Math.log10(g) : 60;
+    const gEff = Math.pow(10, -(cutNow * strength) / 20);
+    // Nothing to attenuate: hand the sample through untouched. This is what
+    // keeps the stage *transparent* rather than "almost transparent" — without
+    // it, every sample ran through the LR4 reconstruction, whose phase rotation
+    // lifted the internal peak of a dense loud master by +4.7 dB and made the
+    // soft-clip guard (and the level matcher behind it) pull the file down. The
+    // de-hisser is a repair: it may only touch samples that need repairing.
+    if (gEff >= 0.9999) return x;
     return low + high * gEff;
   }
 }
@@ -514,6 +711,59 @@ class GlueComp {
   }
 }
 
+/**
+ * Mains hum: a narrow notch at 50/60 Hz plus its 2nd and 3rd harmonic.
+ *
+ * Hum is the one analogue defect that is *exactly* periodic, so it is the one
+ * that can be removed without touching the music — provided you know the mains
+ * frequency and that the recording did not drift. The notches are dosed by the
+ * measurement and swept away entirely when nothing was detected.
+ *
+ * Q is deliberately moderate (≈8, i.e. a ~6 Hz skirt at 50 Hz): a needle-drop
+ * hum is never exactly on frequency — a turntable that runs 0.5 % fast is at
+ * 50.25 Hz — and a razor-thin notch would leave the shoulder behind while
+ * removing a slice of the bass.
+ */
+class HumNotch {
+  constructor(sr) {
+    this.sr = sr;
+    this.cut = [new Biquad(), new Biquad(), new Biquad()];
+    this.lastHz = 0;
+    this.last = [2, 2, 2];         // impossible values → the first prepare() sets up
+  }
+  set(f0) {
+    if (f0 === this.lastHz) return;
+    this.lastHz = f0;
+    this.last = [2, 2, 2];         // force the next prepare() to recompute
+  }
+  reset() { for (const b of this.cut) b.reset(); }
+  prepare(d1, d2, d3, f0) {
+    if (d1 === this.last[0] && d2 === this.last[1] && d3 === this.last[2]) return;
+    this.last = [d1, d2, d3];
+    // One dose per harmonic, each measured against its *own* five-hertz
+    // shoulders. The old law notched the second and third harmonic by a fixed
+    // −34/−26 dB whenever the fundamental was notched at all — which took 20 dB
+    // out of 100 and 150 Hz on a recording whose hum was a pure 50 Hz line and
+    // whose bass lived exactly there. A harmonic that was not measured does not
+    // get notched.
+    const gains = [-HUM_DB_PER_DOSE * d1, -HUM_DB_PER_DOSE * d2, -HUM_DB_PER_DOSE * d3];
+    // Constant *absolute* width, not constant Q. Hum drifts in hertz, not in
+    // octaves — a turntable running 0.5 % fast sits at 50.25 Hz whether that is
+    // its fundamental or the third harmonic, so a notch that is three hertz wide
+    // still lands on it 14 dB down. Width matters because the sub octave lives in
+    // the same 30–60 Hz region: a five-hertz-wide bell measured 2.5 dB out of the
+    // 41 Hz bin (its skirt, not its bandwidth), which is a third of what the sub
+    // synthesiser adds down there — three hertz costs half a decibel instead.
+    for (let i = 0; i < 3; i++) {
+      const f = f0 * (i + 1);
+      this.cut[i].setPeak(this.sr, f, clamp(f / HUM_BW_HZ, 1.2, 60), gains[i]);
+    }
+  }
+  tick(x) {
+    return this.cut[2].process(this.cut[1].process(this.cut[0].process(x)));
+  }
+}
+
 /* -------------------------------------------------------------------------- */
 /* per-channel processing chain                                                */
 /* -------------------------------------------------------------------------- */
@@ -521,7 +771,25 @@ class GlueComp {
 class ChannelChain {
   constructor(sr) {
     this.sr = sr;
-    this.dc = new DCBlocker(sr, 16);
+    // The chain is DC-blocked at both ends. Both blockers sit deliberately low
+    // (2 Hz): a guard is there to remove an *offset*, and the higher the corner,
+    // the more it rotates the phase of the 20–60 Hz region — which is where the
+    // sub-bass repair works and where a rotation shows up as a peak lift.
+    // Measured on a loud dense master: a one-pole at 16 Hz lifts the internal
+    // peak by 1.4 dB, at 8 Hz by 1.2 dB, at 2 Hz by 0.05 dB.
+    this.dc = new DCBlocker(sr, 2);
+
+    // Mains hum and the measurement-driven resonance notches. Both are repairs:
+    // they exist because something was *measured*, and both are bypassed
+    // completely (branch, no filtering) when their amount is zero, so a clean
+    // file pays for neither.
+    this.humNotch = new HumNotch(sr);
+    this.humHz = 50;
+    this.humDepth = 0;
+    this.humDepth2 = 0;
+    this.humDepth3 = 0;
+    this.box = [new Biquad(), new Biquad()];
+    this.boxLast = [NaN, NaN];
 
     // fixed tone stage: 60 Hz shelf · 200 · 450 · 1.3 k · 3.2 k · 7 k shelf
     const eqDefs = [
@@ -543,7 +811,7 @@ class ChannelChain {
       new ExciterBand(sr, 3400, 0.80, 6800, 0.60),
     ];
     this.excMix = [0.42, 0.36, 0.22];
-    this.excEven = 0.55;
+    this.excEven = 0.55;                 // + warmth, see prepare()
 
     this.air = new AirSynth(sr);
     this.sub = new SubSynth(sr);
@@ -553,20 +821,38 @@ class ChannelChain {
 
     this.lowShelf = new Biquad();
     this.highShelf = new Biquad();
-    this.hpf1 = new Biquad(); this.hpf1.setHighpass(sr, 24, 0.7071);
-    this.hpf2 = new Biquad(); this.hpf2.setHighpass(sr, 24, 0.7071);
+    // Output DC guard: the exciter's even-harmonic term and the warmth stage can
+    // add a small offset, so the chain ends with a DC blocker. This used to be a
+    // 24 Hz biquad pair ("infra-sonic guard"), which measured badly on loud,
+    // dense masters: cascading a 24 Hz highpass rotates the phase of the 20–60 Hz
+    // region enough to lift the chain's internal peak by ~6 dB on material that
+    // is already at full scale. The soft-clip guard then had to catch that peak
+    // and the level matcher pulled the whole file down by up to 6 dB — an
+    // audible "overdriven and quieter" result on the material that needed the
+    // least. At 2 Hz the guard costs 0.05 dB of peak on that material, changes
+    // nothing below 100 Hz and still removes a constant offset within a second.
+    this.dcOut = new DCBlocker(sr, 2);
 
     // Loudness matcher (block-rate, see RemasterProcessor.process). It works on
     // the 300 Hz – 3.4 kHz band, which is where the music lives, so adding a
     // bottom and a top octave cannot fool the A/B into sounding "louder = better".
-    this.midDry1 = new Biquad(); this.midDry1.setHighpass(sr, 300, 0.707);
-    this.midDry2 = new Biquad(); this.midDry2.setLowpass(sr, 3400, 0.707);
-    this.midWet1 = new Biquad(); this.midWet1.setHighpass(sr, 300, 0.707);
-    this.midWet2 = new Biquad(); this.midWet2.setLowpass(sr, 3400, 0.707);
+    // Two cascaded Q 0.707 sections per edge — a 4th-order (Linkwitz-Riley) band
+    // — so the band is really the musical band: with a single 2nd-order section
+    // per edge, restored content at 200 Hz or at 4–5 kHz leaked into the measure
+    // and the matcher pulled the whole file down (or up) to compensate for an
+    // addition the ear does not count as loudness.
+    this.midDry = [new Biquad(), new Biquad(), new Biquad(), new Biquad()];
+    this.midDry[0].setHighpass(sr, 300, 0.707); this.midDry[1].setHighpass(sr, 300, 0.707);
+    this.midDry[2].setLowpass(sr, 3400, 0.707); this.midDry[3].setLowpass(sr, 3400, 0.707);
+    this.midWet = [new Biquad(), new Biquad(), new Biquad(), new Biquad()];
+    this.midWet[0].setHighpass(sr, 300, 0.707); this.midWet[1].setHighpass(sr, 300, 0.707);
+    this.midWet[2].setLowpass(sr, 3400, 0.707); this.midWet[3].setLowpass(sr, 3400, 0.707);
     this.dryMs = 1e-6;
     this.wetMs = 1e-6;
     this.midDryMs = 1e-9;
     this.midWetMs = 1e-9;
+    this.dryPk = 1e-6;
+    this.wetPk = 1e-6;
     this.alGain = 1;
 
     // Presence follower: synthesis should follow the music, not merely exceed the
@@ -581,15 +867,19 @@ class ChannelChain {
 
   reset() {
     this.dc.reset();
+    this.humNotch.reset();
+    this.box[0].reset(); this.box[1].reset();
     for (const e of this.eq) { e.bq.reset(); e.last = 1e9; }
     for (const r of this.reso) r.reset();
     for (const e of this.exc) e.reset();
     this.air.reset(); this.sub.reset(); this.hiss.reset();
     this.click.reset(); this.glue.reset();
-    this.hpf1.reset(); this.hpf2.reset();
+    this.dcOut.reset();
     this.lowShelf.reset(); this.highShelf.reset();
-    this.midDry1.reset(); this.midDry2.reset(); this.midWet1.reset(); this.midWet2.reset();
-    this.dryMs = 1e-6; this.wetMs = 1e-6; this.midDryMs = 1e-9; this.midWetMs = 1e-9; this.alGain = 1;
+    for (const b of this.midDry) b.reset();
+    for (const b of this.midWet) b.reset();
+    this.dryMs = 1e-6; this.wetMs = 1e-6; this.midDryMs = 1e-9; this.midWetMs = 1e-9;
+    this.dryPk = 1e-6; this.wetPk = 1e-6; this.alGain = 1;
     this.env = 0; this.lvl = 0; this.drive = 0;
   }
 
@@ -607,12 +897,37 @@ class ChannelChain {
         else bq.setPeak(this.sr, band.f, band.q, g);
       }
     }
+    // mains hum: notch depth from the measurement, frequency from the measurement
+    if (p.hum !== this.humDepth || p.hum2 !== this.humDepth2 || p.hum3 !== this.humDepth3
+      || p.humHz !== this.humHz) {
+      this.humDepth = p.hum;
+      this.humDepth2 = p.hum2;
+      this.humDepth3 = p.hum3;
+      this.humHz = p.humHz;
+      this.humNotch.set(p.humHz);
+    }
+    this.humNotch.prepare(this.humDepth, this.humDepth2, this.humDepth3, this.humHz);
+
+    // the two strongest measured resonances, notched precisely
+    const boxDefs = [[p.boxF1, p.boxQ1, p.boxG1], [p.boxF2, p.boxQ2, p.boxG2]];
+    for (let i = 0; i < 2; i++) {
+      const d = boxDefs[i];
+      const key = d[0] * 1e6 + d[1] * 1e3 + d[2];
+      if (key !== this.boxLast[i]) {
+        this.boxLast[i] = key;
+        this.box[i].setPeak(this.sr, d[0], d[1], d[2]);
+      }
+    }
+
     for (let i = 0; i < this.reso.length; i++) this.reso[i].depth = p.reso;
     this.excEven = 0.55 + p.warmth * 0.25;
     for (let i = 0; i < this.exc.length; i++) this.exc[i].setNoise(p.noiseLin);
     this.air.setNoise(p.noiseLin);
+    this.air.setSource(p.airF);
+    this.airRoom = p.airRoom;
     this.sub.setNoise(p.noiseLin);
     this.hiss.setNoise(p.hfNoiseLin);
+    this.hiss.setTilt(p.hissTilt, p.hissMax);
     this.lowShelf.setLowShelf(this.sr, 700, 0.60, -p.tilt * 5.0);
     this.highShelf.setHighShelf(this.sr, 3200, 0.60, p.tilt * 5.0);
     this.warm = p.warmth;
@@ -638,6 +953,10 @@ class ChannelChain {
     const eq = this.eq;
     for (let i = 0; i < eq.length; i++) y = eq[i].bq.process(y);
 
+    // 1b ── measured resonance notches (boxiness / honk), before the synthesizers
+    if (p.boxG1 < -0.05) y = this.box[0].process(y);
+    if (p.boxG2 < -0.05) y = this.box[1].process(y);
+
     // 2 ── dynamic de-resonating
     if (p.reso > 0.0001) {
       const rs = this.reso;
@@ -653,34 +972,49 @@ class ChannelChain {
     y = this.click.tick(y, p.declick);
 
     // 4 ── harmonic exciter (level-proportional, noise- and presence-gated)
+    // The saturation drive is deliberately independent of the amount: the
+    // amount belongs in the mix only. Putting it in both places made the
+    // parameter quadratic, which is what made small automatic doses sound so
+    // much louder than they measured.
     const drive = this.drive;
     if (p.exciter > 0.0001 && drive > 0.001) {
       const mix = this.excMix, ex = this.exc;
+      const g = p.exciter * drive * EXC_MIX;
       for (let i = 0; i < ex.length; i++) {
         const b = ex[i];
-        const h = b.tick(y, (2.4 + p.exciter * 2.2) * drive, this.excEven);
-        y += h * mix[i] * p.exciter * b.prog * drive * 2.1;
+        const h = b.tick(y, 2.6 * drive, this.excEven);
+        y += h * mix[i] * g * b.prog;
       }
     }
 
     // 5 ── air synthesis 8–16 kHz
     if (p.air > 0.0001 && drive > 0.001) {
       const ds = this.air.control(y);
-      const h = this.air.tick(y, (2.0 + p.air * 2.0) * drive);
-      y += h * p.air * ds * this.air.prog * drive * 1.5;
+      const h = this.air.tick(y, 2.6 * drive, this.airRoom);
+      y += h * p.air * ds * this.air.prog * drive * AIR_MIX;
     }
 
     // 6 ── sub-harmonic synthesis (30–60 Hz)
-    if (p.sub > 0.0001 && drive > 0.001) y += this.sub.tick(y, p.subRatio) * p.sub * 0.5 * drive;
+    if (p.sub > 0.0001 && drive > 0.001) y += this.sub.tick(y, p.subRatio) * p.sub * drive;
 
     // 8 ── glue compression
     y = this.glue.tick(y, p.glue);
 
-    // 9 ── tone tilt + analog warmth + infra-sonic guard
+    // 9 ── tone tilt + analog warmth + DC guard
     y = this.highShelf.process(this.lowShelf.process(y));
     const w = this.warm;
     if (w > 0.0001) y = y * (1 - w * 0.55) + ftanh(y * (1 + w * 1.8)) * w * 0.62;
-    return this.hpf2.process(this.hpf1.process(y));
+    y = this.dcOut.process(y);
+
+    // 9b ── mains hum, and it belongs *here*: every stage above can create or
+    // amplify low-frequency energy — the exciter and the saturator make
+    // harmonics of whatever they are fed, and the sub synthesizer builds its
+    // output out of the signal it is given. Notching before them removed the
+    // hum and then let the chain put part of it back (10 dB of notch measured as
+    // 3 dB of repair). Placed last, the notch has the final word, and it is
+    // still three biquads, bypassed completely when nothing was measured.
+    if (p.hum > 0.0001 || p.hum2 > 0.0001 || p.hum3 > 0.0001) y = this.humNotch.tick(y);
+    return y;
   }
 }
 
@@ -715,8 +1049,23 @@ class RemasterProcessor extends AudioWorkletProcessor {
       k('band3', 0, -15, 15),   // 1.3 kHz honk
       k('band4', 0, -15, 15),   // 3.2 kHz presence
       k('band5', 0, -15, 15),   // 7 kHz air shelf
+      k('hum', 0),                      // mains notch depth · fundamental (a repair)
+      k('hum2', 0),                     // mains notch depth · second harmonic
+      k('hum3', 0),                     // mains notch depth · third harmonic
+      k('humHz', 50, 50, 60),           // mains frequency the notches sit on
+      k('boxG1', 0, -12, 0),            // measured resonance 1 · depth in dB
+      k('boxF1', 200, 80, 2000),        // measured resonance 1 · frequency
+      k('boxQ1', 3, 1, 10),             // measured resonance 1 · sharpness
+      k('boxG2', 0, -12, 0),            // measured resonance 2 · depth in dB
+      k('boxF2', 400, 80, 2000),        // measured resonance 2 · frequency
+      k('boxQ2', 3, 1, 10),             // measured resonance 2 · sharpness
+      k('width', 0),                    // stereo width restoration (M/S, above 200 Hz)
+      k('airRoom', 0.5, 0.3, 1.2),      // ceiling of the synthesised band vs its source
+      k('airF', 6000, 2000, 8000),      // where the missing top end is derived from
       k('noiseFloor', -70, -100, -20),  // measured broadband noise floor (dBFS)
       k('hissFloor', -80, -110, -20),   // measured high-frequency noise floor (dBFS)
+      k('hissTilt', 0, -40, 40),        // measured HF − MID tilt of the programme (dB)
+      k('hissMax', 0, 0, 24),           // measured tilt step = the top end that is noise
       k('autoLevel', 1),
     ];
   }
@@ -729,14 +1078,24 @@ class RemasterProcessor extends AudioWorkletProcessor {
     this.prm = {
       power: 0, bypass: 1, sub: 0, subRatio: 0.5, exciter: 0, air: 0, dehiss: 0,
       declick: 0, reso: 0, glue: 0, warmth: 0, tilt: 0,
+      hum: 0, hum2: 0, hum3: 0, humHz: 50, boxF1: 200, boxQ1: 3, boxG1: 0, boxF2: 400, boxQ2: 3, boxG2: 0,
+      width: 0, airRoom: 0.5, airF: 6000, hissTilt: 0, hissMax: 0,
       bands: [0, 0, 0, 0, 0, 0], noiseLin: 1e-4, hfNoiseLin: 1e-5, autoLevel: 1,
     };
+    // stereo width restoration: M/S above 200 Hz, so the bass stays exactly
+    // where it was (and a mono file has nothing to widen in the first place)
+    this.sideHP = new Biquad();
+    this.sideHP.setHighpass(this.sr, 200, 0.707);
     this.powerSm = 0;
     this.forceBypass = !!opts.bypass;
     this._ensureChannels(opts.channels || 2);
     this.port.onmessage = (ev) => {
       const d = ev.data || {};
-      if (d.type === 'reset') { for (const c of this.chains) c.reset(); this.powerSm = 0; }
+      if (d.type === 'reset') {
+        for (const c of this.chains) c.reset();
+        this.sideHP.reset();
+        this.powerSm = 0;
+      }
     };
   }
 
@@ -760,6 +1119,17 @@ class RemasterProcessor extends AudioWorkletProcessor {
     pr.glue = g('glue', 0);
     pr.warmth = g('warmth', 0);
     pr.tilt = g('tilt', 0);
+    pr.hum = g('hum', 0);
+    pr.hum2 = g('hum2', 0);
+    pr.hum3 = g('hum3', 0);
+    pr.humHz = g('humHz', 50);
+    pr.boxG1 = g('boxG1', 0); pr.boxF1 = g('boxF1', 200); pr.boxQ1 = g('boxQ1', 3);
+    pr.boxG2 = g('boxG2', 0); pr.boxF2 = g('boxF2', 400); pr.boxQ2 = g('boxQ2', 3);
+    pr.width = g('width', 0);
+    pr.airRoom = g('airRoom', 0.5);
+    pr.airF = g('airF', 6000);
+    pr.hissTilt = g('hissTilt', 0);
+    pr.hissMax = g('hissMax', 0);
     pr.autoLevel = g('autoLevel', 1);
     pr.bands[0] = g('band0', 0);
     pr.bands[1] = g('band1', 0);
@@ -803,6 +1173,7 @@ class RemasterProcessor extends AudioWorkletProcessor {
       // 48 kHz — inaudible) so the sample loop stays allocation- and sqrt-free
       const g = autoLevel ? chain.alGain : 1;
       let drySq = 0, wetSq = 0, midDrySq = 0, midWetSq = 0;
+      let dryPk = 0, wetPk = 0;
 
       if (bypassed) {
         for (let i = 0; i < frames; i++) {
@@ -819,17 +1190,34 @@ class RemasterProcessor extends AudioWorkletProcessor {
           // NaN fails both comparisons and becomes 0.
           let x = src ? src[i] : 0;
           if (!(x > -32 && x < 32)) x = x > 32 ? 1 : x < -32 ? -1 : 0;
-          let wet = chain.tick(x) * g;
+          const wet0 = chain.tick(x);
+          // peaks are tracked *before* the level match, so the matcher can be
+          // told to give back any headroom it would otherwise eat (see below)
+          const ax = x < 0 ? -x : x;
+          if (ax > dryPk) dryPk = ax;
+          const aw0 = wet0 < 0 ? -wet0 : wet0;
+          if (aw0 > wetPk) wetPk = aw0;
+          let wet = wet0 * g;
           // Soft-clip guard, last stage in the chain: a tanh knee above −0.55 dBFS
           // that saturates *below* full scale, so a 16-bit export can never pin a
           // sample at the ceiling. Transparent below the knee.
           if (wet > KNEE) wet = KNEE + RANGE * ftanh((wet - KNEE) / RANGE);
           else if (wet < -KNEE) wet = -KNEE + RANGE * ftanh((wet + KNEE) / RANGE);
           drySq += x * x;
-          wetSq += wet * wet;
+          // Every level the matcher compares is measured on the *input* to its
+          // own gain: `wet0`, not `wet`. Measured after the gain, the wet band
+          // energy carries g² while the correction the matcher derives from it
+          // is only linear in g, so the loop settles at the cube root of the
+          // correction it should apply (a 4 dB mismatch came out as 1.3 dB) and
+          // a 1 dB residual was left on every file. Measuring before the gain
+          // makes the fixed point exact: chain level × g = dry level.
+          wetSq += wet0 * wet0;
           // mid-band energy for the loudness match
-          const md = chain.midDry2.process(chain.midDry1.process(x));
-          const mw = chain.midWet2.process(chain.midWet1.process(wet));
+          let md = x, mw = wet0;
+          for (let b = 0; b < 4; b++) {
+            md = chain.midDry[b].process(md);
+            mw = chain.midWet[b].process(mw);
+          }
           midDrySq += md * md;
           midWetSq += mw * mw;
           const mixed = x + pw * (wet - x);
@@ -847,14 +1235,30 @@ class RemasterProcessor extends AudioWorkletProcessor {
         const follow = (prev, e) => (e > prev ? prev + (e - prev) * RISE : prev + (e - prev) * FALL);
         chain.dryMs = follow(chain.dryMs, drySq / n);
         chain.wetMs = follow(chain.wetMs, wetSq / n);
-        chain.midDryMs = follow(chain.midDryMs, midDrySq / n);
-        chain.midWetMs = follow(chain.midWetMs, midWetSq / n);
+        // The mid band is a *loudness* comparison, so it integrates like one
+        // (~0.3 s, symmetric). Peak-holding it (fast attack, slow release) made
+        // the match depend on how much more dynamic one side happened to be and
+        // biased the result by ~0.2 dB on material with a wide envelope; the
+        // peak followers stay where a peak is what matters (headroom, below).
+        const avg = (prev, e) => prev + (e - prev) * 0.008;
+        chain.midDryMs = avg(chain.midDryMs, midDrySq / n);
+        chain.midWetMs = avg(chain.midWetMs, midWetSq / n);
+        // same treatment for the peaks (slower release: peaks are sparse)
+        chain.dryPk = follow(chain.dryPk, dryPk);
+        chain.wetPk = follow(chain.wetPk, wetPk);
 
         const dr = Math.sqrt(chain.dryMs), wr = Math.sqrt(chain.wetMs);
         const md = Math.sqrt(chain.midDryMs), mw = Math.sqrt(chain.midWetMs);
         if (md > 1e-7 && mw > 1e-7) {
-          // match the mid band, which is what the ear calls "as loud"
-          let target = Math.sqrt(md / mw);
+          // Match the mid band, which is what the ear calls "as loud as".
+          //
+          // `md`/`mw` are RMS levels (the square root of the held mean squares),
+          // so equalising them takes the ratio directly. The extra square root
+          // this used to carry only ever applied *half* the correction the
+          // measurement asked for — a systematic 2 dB error for a 4 dB
+          // mismatch, in both directions — which is what left the automatic
+          // mode either leaning loud or leaning quiet depending on the file.
+          let target = md / mw;
           // safety rail: whatever the chain did to the spectrum, the broadband
           // level may not move more than −6 … +4 dB
           if (dr > 1e-7 && wr > 1e-7) {
@@ -862,8 +1266,52 @@ class RemasterProcessor extends AudioWorkletProcessor {
             if (r > 1.5849) target = 1.5849 * (dr / wr);
             else if (r < 0.5012) target = 0.5012 * (dr / wr);
           }
+          // Headroom guard. The level match may lower the restored signal, but
+          // only by as much as the chain's own peak excursion needs — and only
+          // when that excursion would otherwise be caught by the soft-clip guard
+          // that protects the export. Ducking merely because the output peaks
+          // above the input makes a restored file quieter than the original for
+          // no audible reason (the auto level match is a promise: "as loud as
+          // before"), so the reference is the higher of two limits:
+          //   · the clip knee — material that was below the guard must never be
+          //     pushed into it;
+          //   · the source's own peak — a file that already sat at the rail gives
+          //     back at most what the chain took.
+          // Measured on the *wet* chain before this gain: the ratio is then
+          // independent of the gain itself. Judging the finished output instead
+          // (post-gain, post-clip) closes a feedback loop — the gain pulls the
+          // output peak down, the output peak then looks fine, the gain rises
+          // again — and left the guard cycling, so part of the peak escaped it.
+          const safe = chain.dryPk > KNEE ? chain.dryPk : KNEE;
+          if (chain.wetPk > safe) {
+            target = Math.min(target, Math.max(safe / chain.wetPk, 0.5));
+          }
           chain.alGain += (clamp(target, 0.25, 2.5) - chain.alGain) * 0.12;
         }
+      }
+    }
+
+      // ── stereo width restoration ────────────────────────────────────────────
+    // A narrow 1970s mix (or a mono master folded to two identical channels)
+    // cannot be widened by any per-channel stage — it needs both channels at
+    // once. The added signal is the *high-passed* side: everything below
+    // 200 Hz stays bit-identical, so the bass keeps its mono centre and the
+    // low end cannot develop the phase problems wide-stereo bass always has.
+    // A mono file has no side signal, so it stays exactly mono instead of
+    // getting a fake image.
+    if (nCh >= 2 && pr.width > 0.0001 && !bypassed) {
+      const L = output[0], R = output[1];
+      for (let i = 0; i < frames; i++) {
+        const l = L[i], r = R[i];
+        const m = (l + r) * 0.5;
+        const sd = (l - r) * 0.5;
+        const add = this.sideHP.process(sd) * pr.width;
+        let lo = m + sd + add, ro = m - sd - add;
+        // the widening happens after the per-channel soft-clip guard, so the
+        // same knee is applied here — a 16-bit export still cannot pin a sample
+        if (lo > KNEE) lo = KNEE + RANGE * ftanh((lo - KNEE) / RANGE);
+        if (ro > KNEE) ro = KNEE + RANGE * ftanh((ro - KNEE) / RANGE);
+        L[i] = lo; R[i] = ro;
       }
     }
     return true;

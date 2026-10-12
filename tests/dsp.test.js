@@ -124,8 +124,13 @@ H.section('engine · 8–16 kHz air synthesis');
   let dull = H.filter(RSDSP, H.pink(SR, 5, 0.35, 11), SR, 'lp', 5500, 0.707);
   dull = H.filter(RSDSP, dull, SR, 'lp', 7000, 0.707);
   dull = H.normalize(dull, 0.9);
-  const off = H.render(Processor, [dull], Object.assign({}, H.DEFAULT_PARAMS, { power: 1, air: 0, noiseFloor: -70 }))[0];
-  const on = H.render(Processor, [dull], Object.assign({}, H.DEFAULT_PARAMS, { power: 1, air: 0.8, noiseFloor: -70 }))[0];
+  // The stage tests run with the automatic level match switched off
+  // (autoLevel: 0): they measure a single module, and the matcher would take
+  // back the part of that module's change which falls inside its 300 Hz–3.4 kHz
+  // loudness band — hiding the very effect under test. The matcher itself is
+  // covered by the "loudness matching" and "processing power scaling" sections.
+  const off = H.render(Processor, [dull], Object.assign({}, H.DEFAULT_PARAMS, { power: 1, air: 0, noiseFloor: -70, autoLevel: 0 }))[0];
+  const on = H.render(Processor, [dull], Object.assign({}, H.DEFAULT_PARAMS, { power: 1, air: 0.8, noiseFloor: -70, autoLevel: 0 }))[0];
   const hi = band([on], 9000, 13000) - band([off], 9000, 13000);
   H.ok(hi > 8, 'rebuilds 9–13 kHz content on band-limited material', hi.toFixed(1) + ' dB');
   const mid = Math.abs(band([on], 1000, 3000) - band([off], 1000, 3000));
@@ -136,8 +141,8 @@ H.section('engine · 8–16 kHz air synthesis');
 H.section('engine · harmonic exciter');
 {
   let dull = H.normalize(H.filter(RSDSP, H.pink(SR, 5, 0.35, 12), SR, 'lp', 7000, 0.707), 0.9);
-  const off = H.render(Processor, [dull], Object.assign({}, H.DEFAULT_PARAMS, { power: 1, exciter: 0 }))[0];
-  const on = H.render(Processor, [dull], Object.assign({}, H.DEFAULT_PARAMS, { power: 1, exciter: 0.9 }))[0];
+  const off = H.render(Processor, [dull], Object.assign({}, H.DEFAULT_PARAMS, { power: 1, exciter: 0, autoLevel: 0 }))[0];
+  const on = H.render(Processor, [dull], Object.assign({}, H.DEFAULT_PARAMS, { power: 1, exciter: 0.9, autoLevel: 0 }))[0];
   const up = band([on], 2600, 5200) - band([off], 2600, 5200);
   H.ok(up > 3, 'adds upper harmonics to dull material', up.toFixed(1) + ' dB');
 }
@@ -146,20 +151,57 @@ H.section('engine · de-hiss (HF expander)');
 {
   const hissOnly = H.noise(SR, 4, 0.006, 21);
   const off = H.render(Processor, [hissOnly], Object.assign({}, H.DEFAULT_PARAMS,
-    { power: 1, dehiss: 0, noiseFloor: -44, hissFloor: -46 }))[0];
+    { power: 1, dehiss: 0, noiseFloor: -44, hissFloor: -46, autoLevel: 0 }))[0];
   const on = H.render(Processor, [hissOnly], Object.assign({}, H.DEFAULT_PARAMS,
-    { power: 1, dehiss: 1, noiseFloor: -44, hissFloor: -46 }))[0];
+    { power: 1, dehiss: 1, noiseFloor: -44, hissFloor: -46, autoLevel: 0 }))[0];
   const cut = band([off], 6000, 12000) - band([on], 6000, 12000);
   H.ok(cut > 12, 'suppresses steady hiss between the notes', cut.toFixed(1) + ' dB');
 
   // and it must NOT eat the music: loud, continuous programme stays intact
   const music = H.pink(SR, 4, 0.35, 31);
   const mOff = H.render(Processor, [music], Object.assign({}, H.DEFAULT_PARAMS,
-    { power: 1, dehiss: 0, noiseFloor: -70, hissFloor: -90 }))[0];
+    { power: 1, dehiss: 0, noiseFloor: -70, hissFloor: -90, autoLevel: 0 }))[0];
   const mOn = H.render(Processor, [music], Object.assign({}, H.DEFAULT_PARAMS,
-    { power: 1, dehiss: 1, noiseFloor: -70, hissFloor: -90 }))[0];
+    { power: 1, dehiss: 1, noiseFloor: -70, hissFloor: -90, autoLevel: 0 }))[0];
   const loss = band([mOff], 6000, 12000) - band([mOn], 6000, 12000);
   H.ok(loss < 2.5, 'leans out of the way on clean, continuous music', loss.toFixed(1) + ' dB');
+}
+
+H.section('engine · de-hiss, dosed by the measurement');
+{
+  // The whole point of a hiss repair is *where* it acts: the floor between the
+  // notes has to come down, and the music has to stay where it was. A stage that
+  // moves only the average is either doing nothing or damaging everything.
+  const sim = H.garageSim(RSDSP, SR, 14);
+  const metrics = RSDSP.measure([sim], SR);
+  const law = RP.buildParams('auto', metrics, 1);
+  const floor = (x) => {
+    const n = 2048, buf = new Float64Array(n);
+    const f1 = new RSDSP.Biquad(), f2 = new RSDSP.Biquad();
+    f1.setHighpass(SR, 4000, 0.707); f2.setHighpass(SR, 4000, 0.707);
+    let sum = 0, i = 0;
+    const vals = [];
+    for (let k = 0; k < x.length; k++) {
+      const v = f2.process(f1.process(x[k]));
+      const q = v * v;
+      sum += q - buf[i]; buf[i] = q; i++; if (i >= n) i = 0;
+      if (k % 512 === 0) vals.push(Math.sqrt(Math.max(sum, 0) / n));
+    }
+    vals.sort((a, b) => a - b);
+    const q = (p) => 20 * Math.log10(Math.max(vals[Math.floor(vals.length * p)], 1e-12));
+    return { p05: q(0.05), p50: q(0.50) };
+  };
+  H.ok(metrics.hissTiltStepDb > 3 && law.hissMax > 0.5,
+    'the analyser measures how much of the top end is noise',
+    metrics.hissTiltStepDb.toFixed(1) + ' dB step · hiss ' + metrics.hissAmount.toFixed(2)
+    + ' → dehiss ' + law.dehiss.toFixed(2) + ', max ' + law.hissMax.toFixed(1) + ' dB');
+  const dry = floor(sim);
+  const off = floor(H.render(Processor, [sim], Object.assign({}, law, { dehiss: 0 }))[0]);
+  const on = floor(H.render(Processor, [sim], law)[0]);
+  H.ok(on.p05 < off.p05 - 3, 'the room tone between the notes comes down',
+    off.p05.toFixed(1) + ' → ' + on.p05.toFixed(1) + ' dB HF floor (' + (off.p05 - on.p05).toFixed(1) + ' dB)');
+  H.ok(Math.abs(on.p50 - off.p50) < 0.5, '…while the music itself does not move',
+    off.p50.toFixed(1) + ' → ' + on.p50.toFixed(1) + ' dB');
 }
 
 H.section('engine · de-clicker');
@@ -221,8 +263,8 @@ H.section('engine · dynamic de-resonator');
     body[i] = Math.sin(i * 0.02) * 0.06 + H.noise(SR, 0.0001, 0.01, 5)[0] * 0;
   }
   const mixed = H.normalize(H.mix([body, ring]), 0.9);
-  const off = H.render(Processor, [mixed], Object.assign({}, H.DEFAULT_PARAMS, { power: 1, reso: 0 }))[0];
-  const on = H.render(Processor, [mixed], Object.assign({}, H.DEFAULT_PARAMS, { power: 1, reso: 0.9 }))[0];
+  const off = H.render(Processor, [mixed], Object.assign({}, H.DEFAULT_PARAMS, { power: 1, reso: 0, autoLevel: 0 }))[0];
+  const on = H.render(Processor, [mixed], Object.assign({}, H.DEFAULT_PARAMS, { power: 1, reso: 0.9, autoLevel: 0 }))[0];
   // ring energy must be measured in the time domain: a spectral median across
   // the whole file hides a transient that only rings 30 % of the time
   const ringRms = (sig) => {
@@ -261,7 +303,10 @@ H.section('engine · processing power scaling');
   }
   H.ok(monotonic, 'the single intensity slider scales the effect smoothly',
     levels.map((l) => l.toFixed(1)).join(' → '));
-  H.ok(levels[4] - levels[0] > 6, 'slider range is wide enough to matter',
+  // …and what is left of it once the automatic level match has taken back the
+  // part of the change that lands inside its loudness band. The slider has to
+  // deliver a clearly audible top-end span, not a theoretical one.
+  H.ok(levels[4] - levels[0] > 5, 'slider range is wide enough to matter',
     (levels[4] - levels[0]).toFixed(1) + ' dB');
 }
 
@@ -396,7 +441,131 @@ H.section('codecs · JSZip + lamejs availability (vendored fallbacks)');
   }
 }
 
+H.section('measurement · a broken file never becomes NaN parameters');
+{
+  // A WAV of float samples can contain anything, including NaNs. One NaN poisons
+  // every IIR filter for the rest of the file (the state stays NaN), so the chain
+  // must never be handed parameters built from a non-finite measurement — the
+  // user would get a silent, "perfectly remastered" file. The measurement marks
+  // such a file, still reports a finite score, and presets.js refuses to pass
+  // anything non-finite on.
+  const bad = new Float32Array(SR * 2);
+  for (let i = 0; i < bad.length; i++) bad[i] = Math.sin(i * 0.01) * 0.2;
+  bad[137] = NaN;                                   // one corrupt sample
+  const m = RSDSP.measure([bad], SR);
+  H.ok(m.nonFinite === true, 'the measurement notices a file that is not made of numbers',
+    'nonFinite=' + m.nonFinite + ' · peak ' + m.peakDb.toFixed(1) + ' dB');
+  H.ok(isFinite(m.score), 'and still reports a finite score instead of NaN %', m.score + ' / 100');
+
+  const params = RP.buildParams('auto', m, 0.8);
+  const badParams = Object.entries(params).filter(([, v]) => typeof v === 'number' && !isFinite(v));
+  H.ok(badParams.length === 0, 'every parameter built from that measurement is finite',
+    Object.keys(params).length + ' parameters · ' + (badParams.length ? badParams[0][0] : 'clean'));
+
+  // …and the guard does not fire on real recordings
+  const sims = [H.garageSim(RSDSP, SR, 8), H.cassetteSim(RSDSP, SR, 8),
+    H.vinylSim(RSDSP, SR, 8), H.lowBitrateSim(RSDSP, SR, 8)];
+  H.ok(sims.every((sig) => RSDSP.measure([sig], SR).nonFinite === false),
+    'the four problem recordings measure as numeric');
+}
+
+/* ═════════════════════════════════════════ the sliced measurement (progress) ══ */
+
+/* the analyser reads the very same globals the page does */
+global.RSDSP = RSDSP;
+global.RSPresets = RP;
+const Analyzer = require(path.join(H.ROOT, 'assets', 'js', 'analyzer.js'));
+
+/** The async sections below are the only ones that yield; keep them in one place. */
+async function slicedSections() {
+
+H.section('measurement · the sliced form is the same measurement');
+{
+  // The UI runs `measureAsync`/`analyzeAsync` so a phone can paint a progress bar
+  // while a long file is measured. That is only allowed to be a *driving* change:
+  // the numbers have to be identical to the synchronous reference, bit for bit.
+  const SIM2 = {
+    garage: H.garageSim(RSDSP, SR, 6),
+    cassette: H.cassetteSim(RSDSP, SR, 6),
+    vinyl: H.vinylSim(RSDSP, SR, 6),
+    lowbitrate: H.lowBitrateSim(RSDSP, SR, 6),
+  };
+  const FIELDS = ['score', 'peakDb', 'loudness', 'noiseFloorDb', 'hfNoiseFloorDb', 'dynamicRangeDb',
+    'crackleIndex', 'correlation', 'clipRatio', 'hfCutoff', 'tilt', 'topLoss', 'brickwall',
+    'dullIndex', 'deriveGapDb', 'hissAmount', 'hissDeficitDb', 'snrDb', 'hfSnrDb', 'vinylAmount',
+    'tapeAmount', 'noiseSlope', 'noiseFlatness', 'noiseRumble', 'noiseConfidence', 'mudScore',
+    'harshness', 'airiness', 'bassRoll', 'subDeficit', 'cliffDb', 'cliffHz', 'specEndHz',
+    'bandLimited', 'musicLevelDb', 'hfEnergyLoss', 'deriveDb', 'hfDropDb', 'crestDb'];
+  let diff = [];
+  for (const [name, sig] of Object.entries(SIM2)) {
+    const sync = RSDSP.measure([sig], SR);
+    const async_ = await RSDSP.measureAsync([sig], SR);
+    for (const f of FIELDS) if (sync[f] !== async_[f]) diff.push(name + ' ' + f);
+    for (let b = 0; b < sync.bandExcess.length; b++) {
+      if (sync.bandExcess[b] !== async_.bandExcess[b]) diff.push(name + ' bandExcess[' + b + ']');
+    }
+    if (sync.spec.db.length !== async_.spec.db.length) diff.push(name + ' spectrum length');
+    for (let k = 0; k < sync.spec.db.length; k += 97) {
+      if (sync.spec.db[k] !== async_.spec.db[k]) { diff.push(name + ' spectrum bin ' + k); break; }
+    }
+  }
+  H.ok(diff.length === 0, 'every metric of the sliced measurement equals the synchronous one',
+    diff.slice(0, 5).join(', '));
+
+  // …and the whole analysis, including the window, the envelopes and the chips
+  const sim = SIM2.garage;
+  const buffer = {
+    sampleRate: SR, numberOfChannels: 1, duration: sim.length / SR,
+    getChannelData: () => sim,
+  };
+  const syncA = Analyzer.analyze(buffer, { previewSeconds: 40, buckets: 1400 });
+  const asyncA = await Analyzer.analyzeAsync(buffer, { previewSeconds: 40, buckets: 1400 });
+  const deepEqual = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  H.ok(deepEqual(syncA.metrics, asyncA.metrics) && syncA.window.start === asyncA.window.start
+    && deepEqual(syncA.chips, asyncA.chips) && deepEqual(syncA.diag, asyncA.diag),
+    'the sliced analysis returns the same window, metrics, chips and diagnosis');
+  H.ok(deepEqual(Array.from(syncA.envelope.max), Array.from(asyncA.envelope.max))
+    && deepEqual(Array.from(syncA.windowEnvelope.rms), Array.from(asyncA.windowEnvelope.rms)),
+    'both waveform envelopes are identical too');
+}
+
+H.section('measurement · progress is honest and the loop stays alive');
+{
+  const sig = H.vinylSim(RSDSP, SR, 8);
+  const marks = [];
+  let ticks = 0;
+  const timer = setInterval(() => { ticks++; }, 4);      // proves the loop yields
+  const out = await RSDSP.measureAsync([sig], SR, (p, label) => marks.push({ p, label }), {});
+  clearInterval(timer);
+  H.ok(marks.length > 10, 'a several-second file is reported many times, not in one jump',
+    marks.length + ' reports');
+  H.ok(marks[0].p === 0 && marks[marks.length - 1].p === 1, 'progress runs from 0 to 100 %',
+    marks[0].p + ' → ' + marks[marks.length - 1].p);
+  H.ok(marks.every((m, i) => i === 0 || m.p >= marks[i - 1].p - 1e-9), 'progress never goes backwards');
+  H.ok(marks.every((m) => typeof m.label === 'string' && m.label.length > 2), 'every report names a stage',
+    Array.from(new Set(marks.map((m) => m.label))).join(', '));
+  H.ok(ticks > 3, 'the event loop gets control back while measuring', ticks + ' timer ticks');
+  H.ok(out.score === RSDSP.measure([sig], SR).score, 'and the result is still the same measurement');
+
+  // the stage names are what the UI shows before it translates them
+  const stages = [];
+  await Analyzer.analyzeAsync({ sampleRate: SR, numberOfChannels: 1, duration: sig.length / SR, getChannelData: () => sig },
+    { previewSeconds: 30, buckets: 400 }, (p, stage) => stages.push(stage));
+  const known = ['measure', 'diagnose', 'window', 'envelope'];
+  H.ok(stages.every((st) => known.indexOf(st) !== -1) && stages.indexOf('measure') === 0
+    && stages.indexOf('envelope') !== -1, 'the analysis reports its own stages', Array.from(new Set(stages)).join(', '));
+}
+
+}                                    // end of the async sections
+
 /* ------------------------------------------------------------------- done */
 
-const okAll = H.summarize();
-process.exit(okAll ? 0 : 1);
+slicedSections()
+  .then(() => {
+    const okAll = H.summarize();
+    process.exit(okAll ? 0 : 1);
+  })
+  .catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });

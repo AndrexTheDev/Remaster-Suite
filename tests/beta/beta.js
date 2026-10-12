@@ -14,6 +14,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
 const { spawn } = require('child_process');
 const beta = require('./chromium.js');
 const cdp = require('./cdp.js');
@@ -23,10 +24,39 @@ const SHOT_DIR = path.join(ROOT, 'docs', 'beta');
 const DL_DIR = '/tmp/rs-beta-downloads';
 const PORT = 8080;
 const DBG = 9222;
+const FIX_PORT = 8099;                        // loopback server for the WAV fixtures
 
 fs.mkdirSync(SHOT_DIR, { recursive: true });
 fs.mkdirSync(DL_DIR, { recursive: true });
 for (const f of fs.readdirSync(DL_DIR)) fs.rmSync(path.join(DL_DIR, f), { force: true });
+
+/* ------------------------------------------------------------------ fixtures --
+ * The page must be fed the *same* recordings the node suites use — a page-local
+ * fake is only a fake. The signals are synthesised here with tests/harness.js
+ * (pink-noise beds, mains hum, hiss, crackle, a codec cliff), encoded to real
+ * WAV bytes and served on a second loopback port; the page fetches them into
+ * File objects and drops them exactly like a user would. */
+const H = require('./../harness.js');
+const DSP = H.loadDsp();
+const SIM_SR = 44100;
+const fixtures = new Map();
+function fixture(name, channels, seconds) {
+  const bytes = Buffer.from(DSP.encodeWav(channels, SIM_SR, 16));
+  fixtures.set(name, bytes);
+  console.log('  fixture ' + name.padEnd(18) + (bytes.length / 1e6).toFixed(1) + ' MB' +
+    (seconds ? '  (' + seconds + ' s of ' + channels.length + '-channel audio)' : ''));
+  return bytes.length;
+}
+const fixtureServer = http.createServer((req, res) => {
+  const name = path.basename(decodeURIComponent(req.url.split('?')[0]));
+  const buf = fixtures.get(name);
+  if (!buf) { res.writeHead(404); res.end('no fixture ' + name); return; }
+  res.writeHead(200, {
+    'Content-Type': 'audio/wav', 'Access-Control-Allow-Origin': '*', 'Content-Length': buf.length,
+  });
+  res.end(buf);
+});
+fixtureServer.listen(FIX_PORT, '127.0.0.1');
 
 const results = [];
 const shots = [];
@@ -132,9 +162,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     shots.push({ name, file: 'docs/beta/' + name + '.png', size: (fs.statSync(file).size / 1024).toFixed(0) + ' KB' });
     return file;
   };
-  const viewport = (w, h, mobile) => page.send('Emulation.setDeviceMetricsOverride', {
-    width: w, height: h, deviceScaleFactor: 1, mobile: !!mobile,
-  });
+  const viewport = async (w, h, mobile) => {
+    await page.send('Emulation.setDeviceMetricsOverride', {
+      width: w, height: h, deviceScaleFactor: 1, mobile: !!mobile,
+    });
+    // `mobile: true` alone still reports a fine pointer in headless Chromium —
+    // a phone is only a phone with touch emulation switched on
+    await page.send('Emulation.setTouchEmulationEnabled',
+      mobile ? { enabled: true, maxTouchPoints: 5 } : { enabled: false });
+  };
   const clickAt = async (x, y) => {
     await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
     await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
@@ -167,39 +203,32 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   /* the three problem recordings are the very same signals the node suites use —
      built here, encoded to WAV, and handed to the page as base64 */
-  const H = require('../harness.js');
-  const DSP = H.loadDsp();
-  const SIM_SR = 44100;
+  const stereo = (sig) => [sig, Float32Array.from(sig, (v) => v * 0.94)];
   const sims = {
-    garage: H.garageSim(DSP, SIM_SR, 12),
-    cassette: H.cassetteSim(DSP, SIM_SR, 12),
-    vinyl: H.vinylSim(DSP, SIM_SR, 12),
+    garage: (s) => H.garageSim(DSP, SIM_SR, s),
+    cassette: (s) => H.cassetteSim(DSP, SIM_SR, s),
+    vinyl: (s) => H.vinylSim(DSP, SIM_SR, s),
+  };
+  for (const k of Object.keys(sims)) {
+    fixture(k + '-12.wav', stereo(sims[k](12)), 12);     // the three problem recordings
+    fixture(k + '-6.wav', stereo(sims[k](6)), 6);       // the batch
+  }
+  fixture('garage-8.wav', stereo(sims.garage(8)), 8);
+  fixture('vinyl-8.wav', stereo(sims.vinyl(8)), 8);
+  fixture('garage-45.wav', stereo(sims.garage(45)), 45);   // long enough for the bars to be watched
+  // the three-minute take is 34 MB of WAV and takes seconds to synthesise: it is
+  // built when the scale section needs it, not during boot
+  let longBuilt = false;
+  const buildLongFixture = () => {
+    if (longBuilt) return;
+    longBuilt = true;
+    fixture('garage-180.wav', stereo(sims.garage(180)), 180);
   };
   await evalJS(`
-    window.__file = (name, b64) => {
-      const bin = atob(b64);
-      const u8 = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
-      return new File([u8], name, { type: 'audio/wav' });
-    };
-    window.__mk = (kind, sec) => {
-      const SR = 44100, N = SR * (sec || 12);
-      const L = new Float32Array(N), R = new Float32Array(N);
-      let seed = kind === 'garage' ? 11 : kind === 'cassette' ? 22 : 33, lp = 0;
-      const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296) * 2 - 1;
-      for (let i = 0; i < N; i++) {
-        const t = i / SR;
-        const env = Math.min(1, 0.25 + 0.75 * Math.abs(Math.sin(t * 0.4) + 0.5 * Math.sin(t * 0.13)));
-        const n = rnd();
-        let x;
-        if (kind === 'garage') { lp += 0.06 * (n - lp); x = lp * 3 * env + 0.02 * Math.sin(2 * Math.PI * 50 * t); }
-        else if (kind === 'cassette') { lp += 0.25 * (n - lp); x = lp * 1.1 * env + 0.02 * n; }
-        else { lp += 0.5 * (n - lp); x = lp * env + (rnd() > 0.9995 ? rnd() * 1.1 : 0); }
-        L[i] = Math.max(-0.95, Math.min(0.95, x));
-        R[i] = L[i] * 0.94;
-      }
-      const bytes = window.RSDSP.encodeWav([L, R], SR, 16);
-      return new File([bytes], kind + '-take.wav', { type: 'audio/wav' });
+    window.__fixture = async (url, name) => {
+      const r = await fetch('http://127.0.0.1:${FIX_PORT}/' + url);
+      if (!r.ok) throw new Error('fixture ' + url + ' → ' + r.status);
+      return new File([await r.blob()], name || url, { type: 'audio/wav' });
     };
     window.__drop = (files) => {
       const dz = document.querySelector('#dropzone');
@@ -208,14 +237,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       dz.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
     };
     true`);
-  for (const [k, sig] of Object.entries(sims)) {
-    const b64 = Buffer.from(DSP.encodeWav([sig, sig], SIM_SR, 16)).toString('base64');
-    await evalJS(`window.__${k}File = __file('${k}-take.wav', '${b64}')`);
-  }
 
   /* ------------------------------------------------------------ the drop ---- */
   section('beta · real drag-and-drop of three problem recordings');
-  await evalJS(`__drop([__garageFile, __cassetteFile, __vinylFile])`);
+  await evalJS(`(async () => __drop([
+    await __fixture('garage-12.wav', 'Proberaum 1974 (Band).wav'),
+    await __fixture('cassette-12.wav', 'Mixtape 1986.wav'),
+    await __fixture('vinyl-12.wav', 'LP Seite A.wav'),
+  ]))()`);
   const analysed = await (async () => {
     for (let i = 0; i < 60; i++) {
       await sleep(400);
@@ -397,29 +426,69 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   /* ------------------------------------------------------ scale and speed ---- */
   section('beta · scale: a three-minute take and a six-file batch');
+  buildLongFixture();
+  // The app's own phases are wrapped from the test, in the page, so the report
+  // can say *where* the seconds go. The app itself is not touched.
+  await evalJS(`(() => {
+    window.__phase = {};
+    const wrap = (obj, fn) => {
+      const orig = obj[fn];
+      obj[fn] = async function () {
+        const t = performance.now();
+        try { return await orig.apply(this, arguments); }
+        finally { window.__phase[fn] = Math.round((window.__phase[fn] || 0) + (performance.now() - t)); }
+      };
+    };
+    wrap(RSCodecs, 'decodeFile');
+    wrap(RSDSP, 'measureAsync');
+    wrap(RSAnalyzer, 'analyzeAsync');
+    wrap(RSEngine, 'render');
+    wrap(RSAnalyzer, 'analyzeChannels');
+    true;
+  })()`);
   const perf = await evalJS(`(async () => {
-    const big = __mk('garage', 180);           // synthesis is not part of the budget
+    const big = await __fixture('garage-180.wav', 'garage-lp-1974.wav');
     const t0 = performance.now();
     await RSApp.addFiles([big]);
-    const analyseMs = performance.now() - t0;
+    const addMs = performance.now() - t0;
+    const ph = Object.assign({}, window.__phase);   // before the full render below
     const card = RSApp.State.cards[RSApp.State.cards.length - 1];
     const t1 = performance.now();
     await RSApp.renderCard(card, { force: true });
     const renderMs = performance.now() - t1;
     return {
-      analyseMs: Math.round(analyseMs),
+      addMs: Math.round(addMs),
+      decodeMs: ph.decodeFile,
+      measureMs: ph.measureAsync,
+      analyzeMs: ph.analyzeAsync,
+      previewMs: ph.render,
+      previewMeasureMs: ph.analyzeChannels,
       renderMs: Math.round(renderMs),
       preset: card.analysis.preset,
+      duration: Math.round(card.analysis.duration),
       bytes: card.result.bytes.length,
       heapMB: Math.round(performance.memory.usedJSHeapSize / 1048576),
     };
   })()`);
-  check('a 3-minute take is analysed in seconds, not minutes (sandbox CPU)', perf.analyseMs < 6000, perf.analyseMs + ' ms');
+  // The measurement is what the user watches a progress bar for: seconds, not
+  // minutes, even on this sandbox CPU (a phone core is slower — but the work is
+  // sliced, and the bar tells the truth about it).
+  check('a 3-minute recording is measured in seconds, not minutes (sandbox CPU)',
+    perf.duration === 180 && perf.measureMs < 3000,
+    perf.measureMs + ' ms for ' + perf.duration + ' s of stereo · ' + perf.preset);
+  check('upload to ready — decode, measure, preview render, preview measure — stays single-digit',
+    perf.addMs < 9000,
+    perf.addMs + ' ms (decode ' + perf.decodeMs + ' · measure ' + perf.measureMs + ' · preview render ' +
+    perf.previewMs + ' · preview measure ' + perf.previewMeasureMs + ')');
   check('a 3-minute take renders in real time or faster', perf.renderMs < 60000, perf.renderMs + ' ms');
   check('heap stays moderate after the long file', perf.heapMB < 900, perf.heapMB + ' MB');
 
   await evalJS(`RSApp.clearAll()`);
-  await evalJS(`__drop([__mk('garage',6), __mk('cassette',6), __mk('vinyl',6), __mk('garage',6), __mk('cassette',6), __mk('vinyl',6)])`);
+  await evalJS(`(async () => __drop([
+    await __fixture('garage-6.wav', 'Proberaum 1.wav'), await __fixture('cassette-6.wav', 'Mixtape A.wav'),
+    await __fixture('vinyl-6.wav', 'LP Seite 1.wav'), await __fixture('garage-6.wav', 'Proberaum 2.wav'),
+    await __fixture('cassette-6.wav', 'Mixtape B.wav'), await __fixture('vinyl-6.wav', 'LP Seite 2.wav'),
+  ]))()`);
   await (async () => {
     for (let i = 0; i < 60; i++) { await sleep(400); if (await evalJS(`RSApp.State.cards.filter(c=>c.analysis).length === 6`)) return; }
   })();
@@ -433,21 +502,136 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check('six-file batch renders sequentially, all done', batch.done === 6, batch.done + '/6 in ' + (batch.ms / 1000).toFixed(1) + ' s');
   check('batch keeps the heap calm', batch.heapMB < 900, batch.heapMB + ' MB');
 
+  /* ------------------------------------------------------------- progress ---- */
+  section('beta · the progress bars, live');
+  await evalJS(`RSApp.clearAll()`);
+  await sleep(150);
+
+  // a phone-sized take: long enough that the bars are on screen for seconds
+  const moment = await evalJS(`(async () => {
+    window.__addLong = (async () => RSApp.addFiles([await __fixture('garage-45.wav', 'garage-take.wav')]))();
+    await new Promise((r) => setTimeout(r, 350));
+    const card = RSApp.State.cards[0];
+    const job = document.getElementById('globalProgress');
+    return {
+      name: card.el.name.textContent,
+      status: card.status,
+      jobUp: !job.hidden,
+      jobText: document.getElementById('globalProgressText').textContent,
+      workUp: !card.el.work.hidden,
+      stage: card.el.stage.textContent,
+      indeterminate: card.el.work.classList.contains('is-indeterminate'),
+    };
+  })()`);
+  check('the file is named on the list a third of a second after the drop, still unanalysed',
+    moment.name === 'garage-take.wav' && moment.status !== 'ready',
+    moment.name + ' · ' + moment.status);
+  check('the job bar is up and names that file', moment.jobUp && /garage-take/.test(moment.jobText),
+    moment.jobText.slice(0, 60));
+  check('the card itself says which stage it is in, and not "waiting in the queue"',
+    moment.workUp && moment.stage.length > 3 && !/Warteschlange/.test(moment.stage), moment.stage);
+
+  await (async () => {
+    for (let i = 0; i < 80; i++) {
+      await sleep(300);
+      if (await evalJS(`RSApp.State.cards[0] && RSApp.State.cards[0].status === 'ready'`)) return;
+    }
+  })();
+  check('both bars disappear once the analysis is done',
+    await evalJS(`document.getElementById('globalProgress').hidden && RSApp.State.cards[0].el.work.hidden`));
+
+  // the full render — through the same path the "process all" button takes, so
+  // the docked bar exists, and as MP3 so the write stage is long enough to sample
+  await evalJS(`RSApp.State.format = 'mp3'`);
+  await evalJS(`window.__samples = []; window.__renderDone = false; (async () => {
+    const card = RSApp.State.cards[0];
+    const iv = setInterval(() => window.__samples.push({
+      p: card.progress,
+      stage: card.el.stage.textContent,
+      eta: card.el.eta.textContent,
+      jobUp: !document.getElementById('globalProgress').hidden,
+      job: document.getElementById('globalProgressPct').textContent,
+      jobText: document.getElementById('globalProgressText').textContent,
+    }), 50);
+    await RSApp.processAll();
+    clearInterval(iv);
+    window.__renderDone = true;
+  })(); true`);
+  let midShot = false;
+  for (let i = 0; i < 200; i++) {
+    await sleep(200);
+    const p = await evalJS(`(window.__samples.length ? window.__samples[window.__samples.length - 1].p : 0)`);
+    if (!midShot && p > 0.2) { await shot('18-desktop-de-progress'); midShot = true; }
+    if (await evalJS(`window.__renderDone`)) break;
+  }
+  const done = await evalJS(`window.__renderDone`);
+  const samples = await evalJS(`window.__samples`);
+  const ps = samples.map((s) => s.p);
+  const stageGroups = [];
+  samples.forEach((s) => {
+    const last = stageGroups[stageGroups.length - 1];
+    if (last && last.stage === s.stage) last.ps.push(s.p);
+    else stageGroups.push({ stage: s.stage, ps: [s.p] });
+  });
+  const monotone = stageGroups.every((g) => g.ps.every((p, i) => i === 0 || p >= g.ps[i - 1] - 1e-6));
+  const stageWords = Array.from(new Set(samples.map((s) => s.stage)));
+  check('the render finished', done === true, samples.length + ' samples taken');
+  check('the bar advances monotonically through the whole render', monotone && ps[ps.length - 1] > 0.9,
+    ps.length + ' samples, ' + (ps[0] === undefined ? 0 : ps[0].toFixed(2)) + ' → ' + (ps[ps.length - 1] || 0).toFixed(2));
+  check('the card names the render and the encode stage', stageWords.length >= 2
+    && /repariert|Restoring/.test(stageWords.join(' ')) && /geschrieben|Writing/.test(stageWords.join(' ')),
+    stageWords.join(' · '));
+  check('the docked bar carried a percentage during the render',
+    samples.some((s) => /%/.test(s.job) && parseInt(s.job, 10) > 0),
+    (samples.find((s) => /%/.test(s.job) && parseInt(s.job, 10) > 0) || {}).job || 'never');
+  check('the bar was on screen long enough to be photographed', midShot === true);
+  const liveJob = samples.filter((s) => s.jobUp);
+  check('the job bar was up during the render, with the file name on it',
+    liveJob.length > 2 && /garage-take/.test(liveJob[0].jobText || ''),
+    liveJob.length + ' live samples · ' + (liveJob[0] ? liveJob[0].jobText.slice(0, 46) : ''));
+  check('the job bar carried a percentage that grew during the render',
+    liveJob.some((s) => parseInt(s.job, 10) > 0),
+    (liveJob[liveJob.length - 1] || {}).job || 'never');
+  check('the card showed a time left at least once while writing the MP3',
+    samples.some((s) => /noch|left/.test(s.eta || '')),
+    (samples.find((s) => /noch|left/.test(s.eta || '')) || {}).eta || 'never shown');
+  await evalJS(`RSApp.State.format = 'wav'`);
+  await evalJS(`RSApp.clearAll()`);
+
   /* --------------------------------------------------------------- mobile ---- */
   section('beta · mobile viewport');
   await evalJS(`RSApp.clearAll()`);
   await viewport(390, 844, true);
   await sleep(400);
-  check('no horizontal overflow on a phone', await evalJS(
-    `document.documentElement.scrollWidth <= window.innerWidth + 1`),
-    await evalJS(`document.documentElement.scrollWidth + ' vs ' + window.innerWidth`));
+  const widthReport = () => evalJS(`({ c: document.documentElement.clientWidth,
+    s: document.documentElement.scrollWidth, i: window.innerWidth })`);
+  let wr = await widthReport();
+  check('a 390 px phone shows the page without sideways scrolling',
+    wr.s <= wr.c + 1 && wr.i === wr.c,
+    wr.c + ' px viewport · ' + wr.s + ' px content · innerWidth ' + wr.i);
   await shot('13-mobile-de-empty');
-  await evalJS(`__drop([__mk('garage', 8), __mk('vinyl', 8)])`);
+  await evalJS(`(async () => __drop([await __fixture('garage-8.wav', 'Proberaum, Handyaufnahme.wav'),
+    await __fixture('vinyl-8.wav', 'Schallplatte Seite A.wav')]))()`);
   await (async () => {
     for (let i = 0; i < 40; i++) { await sleep(400); if (await evalJS(`RSApp.State.cards.filter(c=>c.analysis).length === 2`)) return; }
   })();
-  check('mobile: no overflow with cards either', await evalJS(
-    `document.documentElement.scrollWidth <= window.innerWidth + 1`));
+  await evalJS(`document.querySelector('#fileList').scrollIntoView({ block: 'start', behavior: 'instant' })`);
+  wr = await widthReport();
+  check('the layout still fits once cards and controls are on the screen',
+    wr.s <= wr.c + 1 && wr.i === wr.c, wr.s + ' vs ' + wr.c);
+  /* and on a small phone: iPhone SE / older Android are 320 px wide */
+  await viewport(320, 640, true);
+  await sleep(450);
+  wr = await widthReport();
+  check('a 320 px phone fits as well — cards, controls and footer',
+    wr.s <= wr.c + 1 && wr.i === wr.c, wr.s + ' vs ' + wr.c + ' (innerWidth ' + wr.i + ')');
+  await evalJS(`document.querySelector('.donate-list').scrollIntoView({ block: 'center', behavior: 'instant' })`);
+  await sleep(250);
+  wr = await widthReport();
+  check('the donation addresses fit on a small phone instead of pushing the page wide',
+    wr.s <= wr.c + 1, wr.s + ' vs ' + wr.c);
+  await viewport(390, 844, true);
+  await sleep(400);
   await evalJS(`document.querySelector('#fileList').scrollIntoView({ block: 'start', behavior: 'instant' })`);
   await sleep(250);
   await shot('14-mobile-de-cards');
@@ -458,6 +642,128 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await evalJS(`document.querySelector('#fileList').scrollIntoView({ block: 'start', behavior: 'instant' })`);
   await sleep(250);
   await shot('15-mobile-de-processed');
+  /* the phone contracts: wording, tap targets, name wrapping, the docked bar */
+  const phone = await evalJS(`(() => {
+    const vis = (el) => !!(el.offsetParent || el.getClientRects().length);
+    const btns = Array.from(document.querySelectorAll('#controls button, #controls select, #fileList button'))
+      .filter(vis)
+      .map((b) => ({ label: (b.getAttribute('aria-label') || b.textContent || '?').trim().slice(0, 16),
+        h: Math.round(b.getBoundingClientRect().height) }));
+    const small = btns.filter((b) => b.h < 40);
+    const fname = document.querySelector('#fileList .fname');
+    const cs = fname ? getComputedStyle(fname) : null;
+    return {
+      touch: RSApp.isTouchDevice(),
+      title: document.getElementById('dzTitle').textContent,
+      hint: document.getElementById('dzHint').textContent,
+      titleTouch: RSi18n.DICT[document.documentElement.lang]['drop.titleTouch'],
+      titleDesktop: RSi18n.DICT[document.documentElement.lang]['drop.title'],
+      checked: btns.length,
+      small: small,
+      fname: fname ? fname.textContent : '',
+      card: RSApp.State.cards[0].name,
+      fnameWrap: cs ? cs.whiteSpace : '',
+      fnameCut: fname ? fname.scrollWidth - fname.clientWidth : 0,
+      fnameClamp: cs ? cs.textOverflow : '',
+      overflow: document.documentElement.scrollWidth - window.innerWidth,
+    };
+  })()`);
+  check('a real phone viewport is recognised as a touch device, without a reload', phone.touch === true);
+  check('the drop zone offers a tap, not a drag', phone.title === phone.titleTouch
+    && phone.title !== phone.titleDesktop && /tippe|tap/i.test(phone.hint),
+    phone.title + ' — ' + phone.hint.slice(0, 40) + '…');
+  check('every visible control is a thumb-sized target (≥ 40 px measured)', phone.small.length === 0,
+    phone.small.map((b) => b.label + ' ' + b.h + 'px').join(', ') || (phone.checked + ' controls checked'));
+  check('the file name is shown in full on a phone, wrapped instead of cut',
+    phone.fname === phone.card && phone.fnameClamp !== 'ellipsis' && phone.fnameWrap === 'normal' && phone.fnameCut <= 1,
+    phone.fname + ' · ' + phone.fnameWrap + ' · ' + phone.fnameCut + 'px over');
+  check('a phone-width page never scrolls sideways', phone.overflow <= 1, phone.overflow + ' px');
+
+  await evalJS(`RSApp.clearAll()`);
+  await evalJS(`(async () => __drop([await __fixture('garage-45.wav', 'Sprachnotiz 14. März 2026 — Proberaum, Handyaufnahme (Mix 3).wav')]))()`);
+  await (async () => {
+    for (let i = 0; i < 80; i++) {
+      await sleep(300);
+      if (await evalJS(`RSApp.State.cards[0] && RSApp.State.cards[0].status === 'ready'`)) return;
+    }
+  })();
+  const longName = await evalJS(`(() => {
+    const fname = document.querySelector('#fileList .fname');
+    return { text: fname.textContent, over: fname.scrollWidth - fname.clientWidth,
+      page: document.documentElement.scrollWidth - window.innerWidth };
+  })()`);
+  check('a long, real-world file name stays readable and inside the screen',
+    longName.over <= 1 && longName.page <= 1 && /Mix 3/.test(longName.text),
+    longName.text.slice(0, 52) + '… · ' + longName.over + 'px over');
+
+  await evalJS(`RSApp.State.format = 'mp3'`);
+  await evalJS(`window.__m = []; window.__mDone = false; (async () => {
+    const card = RSApp.State.cards[0];
+    const iv = setInterval(() => {
+      const job = document.getElementById('globalProgress');
+      const r = job.getBoundingClientRect();
+      const pctEl = document.getElementById('globalProgressPct');
+      const rp = pctEl.getBoundingClientRect();
+      window.__m.push({ p: card.progress, stage: card.el.stage.textContent,
+        hidden: job.hidden, pos: getComputedStyle(job).position,
+        bottom: Math.round(r.bottom), left: Math.round(r.left), width: Math.round(r.width),
+        pctLeft: Math.round(rp.left), pctRight: Math.round(rp.right), pctW: Math.round(rp.width),
+        view: window.innerHeight, viewW: window.innerWidth,
+        text: document.getElementById('globalProgressText').textContent,
+        pct: document.getElementById('globalProgressPct').textContent });
+    }, 60);
+    await RSApp.processAll();
+    clearInterval(iv);
+    window.__mDone = true;
+  })(); true`);
+  let mobileShot = false;
+  for (let i = 0; i < 200; i++) {
+    await sleep(200);
+    const p = await evalJS(`(() => { const m = window.__m; return m.length ? m[m.length - 1].p : 0; })()`);
+    if (!mobileShot && p > 0.2) { await shot('19-mobile-de-progress'); mobileShot = true; }
+    if (await evalJS(`window.__mDone`)) break;
+  }
+  const dock = await evalJS(`(() => {
+    const live = window.__m.filter((m) => !m.hidden && m.p > 0.15);
+    // a new stage starts at zero again — monotonicity is a within-stage promise
+    const groups = [];
+    window.__m.forEach((m) => {
+      const last = groups[groups.length - 1];
+      if (last && last.stage === m.stage) last.ps.push(m.p);
+      else groups.push({ stage: m.stage, ps: [m.p] });
+    });
+    return { running: live.length, sample: live[live.length - 1] || null,
+      stages: groups.map((g) => g.stage),
+      monotone: groups.every((g) => g.ps.every((p, i) => i === 0 || p >= g.ps[i - 1] - 1e-6)),
+      done: window.__mDone };
+  })()`);
+  const s0 = dock.sample || {};
+  check('the job bar docks to the very bottom edge of the phone screen',
+    s0.pos === 'fixed' && Math.abs(s0.bottom - s0.view) <= 1 && s0.left === 0,
+    s0.pos + ' · bottom ' + s0.bottom + ' of ' + s0.view + ' · left ' + s0.left);
+  check('the docked bar spans the full width', Math.abs(s0.width - s0.viewW) <= 1,
+    s0.width + ' of ' + s0.viewW + ' px');
+  check('the docked bar keeps its percentage inside the screen, next to a long name',
+    s0.pctW > 8 && s0.pctLeft >= s0.left && s0.pctRight <= s0.left + s0.width + 1,
+    'percentage at ' + s0.pctLeft + '…' + s0.pctRight + ' inside the bar at ' + s0.left + '…' + (s0.left + s0.width));
+  check('the docked bar keeps naming the file and the stage while it works',
+    /Sprachnotiz/.test(s0.text || '') && /%/.test(s0.pct || '')
+    && /(repariert|geschrieben|Restoring|Writing)/.test(s0.text || ''),
+    (s0.text || '').slice(0, 92));
+  check('mobile progress never runs backwards within a stage, and the render finished',
+    dock.monotone && dock.done === true, dock.running + ' live samples');
+  check('the phone render was photographed mid-flight', mobileShot === true);
+  check('no sideways scroll on the phone while the docked bar is up',
+    await evalJS(`document.documentElement.scrollWidth <= window.innerWidth + 1`));
+  check('the docked bar does not swallow the card it belongs to',
+    await evalJS(`(() => { const card = document.querySelector('#fileList .card');
+      const bar = document.getElementById('globalProgress').getBoundingClientRect();
+      const r = card.getBoundingClientRect();
+      return r.bottom <= bar.top + 1 || r.top >= bar.bottom - 1 || r.bottom < window.innerHeight; })()`));
+  await evalJS(`RSApp.State.format = 'wav'`);
+  await evalJS(`RSApp.clearAll()`);
+  await sleep(200);
+
   await clickSelector('#langSwitch button[data-lang="en"]');
   await sleep(300);
   await evalJS(`window.scrollTo(0,0)`);
@@ -479,6 +785,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const realNoise = consoleNoise.filter((l) => !/Autoplay|deprecat/i.test(l));
   check('no console errors or page exceptions during the whole session', realNoise.length === 0,
     realNoise.slice(0, 4).join(' | ') || 'silent');
+
+  fixtureServer.close();
 
   /* ------------------------------------------------------------- report ---- */
   const now = new Date();
@@ -503,7 +811,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   md += `| error toast | \`10-desktop-de-toast.png\` | — |\n`;
   md += `| footer & tips | \`11-desktop-de-footer.png\` | — |\n`;
   md += `| keyboard focus | \`12-desktop-de-focus.png\` | — |\n`;
-  md += `| full page | \`17-desktop-de-fullpage.png\` | — |\n\n`;
+  md += `| full page | \`17-desktop-de-fullpage.png\` | — |\n`;
+  md += `| progress bar, mid-render | \`18-desktop-de-progress.png\` | \`19-mobile-de-progress.png\` |\n\n`;
   md += `All screenshots live in \`docs/beta/\`. Captured sizes: ` + shots.map((s) => s.name + ' ' + s.size).join(' · ') + '.\n';
   md += '\n## Harness notes\n\n' +
     '- The suite drives a packaged headless Chromium (`@sparticuz/chromium`, an optional\n' +
@@ -513,7 +822,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     '  clicks pass). The suite therefore uses fire-and-forget + polling for that one\n' +
     '  call, which is equally strict: the promise must settle and the page must keep\n' +
     '  answering.\n' +
-    '- Analysis/render timings are sandbox-CPU numbers; real hardware is faster.\n';
+    '- The recordings are the same synthesised fixtures the node suites use (garage session,\n' +
+    '  cassette, vinyl rip, low-bitrate) — built with `tests/harness.js`, served to the page on a\n' +
+    '  loopback port and dropped as real files. A page-local fake would only test the fake.\n' +
+    '- Analysis/render timings are sandbox-CPU numbers; real hardware is faster.\n' +
+    '- The upload path is timed phase by phase (decode · measurement · preview render · preview\n' +
+    '  measurement) by wrapping the app from the test, so a slowdown can be attributed.\n';
   fs.writeFileSync(path.join(ROOT, 'docs', 'BETA-REPORT.md'), md);
 
   console.log('\n' + '-'.repeat(60));

@@ -232,6 +232,134 @@ section('audit · stylesheet');
   }
 }
 
+/* ══════════════════════════════════════════ 3b · progress & phone audit ══ */
+
+section('audit · progress bars');
+{
+  // one bar for the running job, above the file list: it has to be a real
+  // progressbar for assistive tech, and it must not be a decorative div
+  const job = html.match(/<div class="job" id="globalProgress"[\s\S]*?<\/div>\s*<\/div>/);
+  ok(!!job, 'the job bar exists as its own block');
+  const jobHtml = job ? job[0] : '';
+  ok(/class="job-text" id="globalProgressText"[^>]*aria-live="polite"/.test(jobHtml),
+    'the job bar announces its status politely');
+  ok(/id="globalProgressPct"/.test(jobHtml), 'the job bar carries a percentage readout');
+  ok(/id="globalProgressTrack"[^>]*role="progressbar"[^>]*aria-valuemin="0"[\s\S]*?aria-valuemax="100"[\s\S]*?aria-valuenow="0"/.test(jobHtml),
+    'the track is a labelled progressbar with min/max/now');
+  ok(/data-i18n-aria="work.aria"/.test(jobHtml), 'the progressbar has a translated accessible name');
+  ok(/class="job-fill" id="globalProgressFill"/.test(jobHtml), 'the fill element the code drives exists');
+
+  // each card has its own bar inside the card, in a fixed slot order
+  const tpl = html.match(/<template id="cardTpl">([\s\S]*?)<\/template>/);
+  const card = tpl ? tpl[1] : '';
+  const work = card.match(/<div class="work" data-slot="work" hidden>[\s\S]*?<\/div>\s*<\/div>/);
+  ok(!!work, 'the card has its own work block');
+  const workHtml = work ? work[0] : '';
+  for (const slot of ['stage', 'eta', 'pct', 'track', 'bar']) {
+    ok(new RegExp('data-slot="' + slot + '"').test(workHtml), 'the card work block has a ' + slot + ' slot');
+  }
+  ok(/data-slot="track" role="progressbar"[\s\S]*?aria-valuenow="0"/.test(workHtml),
+    'the card bar is exposed as a progressbar too');
+  ok(workHtml.indexOf('data-slot="work"') < card.indexOf('data-slot="diagnosis"'),
+    'the bar sits above the diagnosis, where the eye lands first');
+
+  // the old two bars are really gone, in markup and in code
+  const legacy = /\.progress-bar|\.card-bar|id="globalProgressBar"|class="card-bar"/;
+  ok(!legacy.test(html) && !legacy.test(css) && !legacy.test(appSrc),
+    'no leftover markup, style or code from the old bars');
+  const queried = [...appSrc.matchAll(/\$\('#(globalProgress[A-Za-z]*)/g)].map((m) => m[1]);
+  const ids = new Set([...html.matchAll(/id="([^"]+)"/g)].map((m) => m[1]));
+  const stray = queried.filter((id) => !ids.has(id));
+  ok(stray.length === 0 && queried.length >= 4, 'the code drives exactly the ids that exist', queried.join(', '));
+
+  // the wording that the bars show has to exist in both languages
+  const stageKeys = ['wait', 'decode', 'measure', 'analyze', 'diagnose', 'window', 'envelope', 'preview', 'render', 'encode', 'zip'];
+  const noWording = stageKeys.filter((k) => !i18n.DICT.de['work.' + k] && k !== 'measure');
+  ok(noWording.length === 0, 'every stage the bars can show has wording', noWording.join(', '));
+  const analyzerStages = [...read('assets/js/analyzer.js').matchAll(/onProgress\(\s*[^,]+,\s*'([a-z]+)'/g)].map((m) => m[1]);
+  const stageTable = appSrc.match(/const STAGE_TEXT = \{([\s\S]*?)\n  \};/);
+  const known = stageTable ? stageTable[1] : '';
+  const unmapped = Array.from(new Set(analyzerStages)).filter((st) => !new RegExp('^\\s*' + st + ':', 'm').test(known));
+  ok(unmapped.length === 0, 'every stage the analyser reports has a word in the app',
+    Array.from(new Set(analyzerStages)).join(', ') + ' → missing: ' + (unmapped.join(', ') || 'none'));
+  for (const k of ['work.eta', 'work.etaMin']) {
+    ok(/\{s\}|\{m\}/.test(i18n.DICT.de[k]) && /\{s\}|\{m\}/.test(i18n.DICT.en[k]),
+      'the time left is a translated template: ' + k);
+  }
+}
+
+section('audit · the phone');
+{
+  // the viewport has to allow the notch and the on-screen keyboard, but must
+  // never forbid zooming (pinch-to-zoom is an accessibility feature)
+  const vp = (html.match(/<meta name="viewport" content="([^"]+)"/) || [])[1] || '';
+  ok(/width=device-width/.test(vp) && /initial-scale=1/.test(vp), 'the viewport scales to the device');
+  ok(/viewport-fit=cover/.test(vp), 'the layout may use the area around the notch');
+  ok(!/user-scalable=no|maximum-scale=1(\.0)?\b/.test(vp), 'zoom is not disabled', vp);
+  ok(/name="mobile-web-app-capable" content="yes"/.test(html)
+    && /name="apple-mobile-web-app-capable" content="yes"/.test(html)
+    && /apple-mobile-web-app-status-bar-style/.test(html),
+    'the app can be installed to the home screen');
+  ok(/name="theme-color" content="#0d0f12"/.test(html), 'the status bar picks up the brand background');
+  ok(/name="apple-mobile-web-app-title"/.test(html), 'the home-screen icon has a name');
+  ok(/property="og:image:alt"/.test(html), 'the social preview image is described');
+
+  // three sizes that make a phone usable: 44 px targets, 16 px fields, no
+  // hover-only affordances, and a bottom bar that respects the home indicator
+  const mobile = css.slice(css.indexOf('@media (max-width: 720px)'), css.indexOf('@media (max-width: 480px)'));
+  ok(/\.btn \{ min-height: 44px/.test(mobile), 'buttons are at least 44 px tall on a phone');
+  ok(/\.icon-btn \{ width: 44px; height: 44px/.test(mobile), 'icon buttons get the full 44 px square');
+  ok(/\.seg button, \.seg-sm button \{ padding: 10px 14px; font-size: \.86rem; min-height: 44px/.test(mobile),
+    'both sizes of segmented control grow to a 44 px thumb target');
+  ok(/\.seek \{ height: 44px/.test(mobile), 'the seek strip is 44 px tall');
+  ok(/input\[type="range"\] \{ width: 100%; height: 32px/.test(mobile), 'sliders are tall enough to grab');
+  ok(/\.select, \.select-sm \{ font-size: 1rem/.test(mobile), 'fields use 16 px so iOS does not zoom in');
+  ok(/\.btn-lg \{ width: 100%/.test(mobile) && /\.ctl-actions \{ display: grid/.test(mobile),
+    'the primary action takes the full width on a phone');
+  ok(/overflow-wrap: anywhere/.test(mobile) && !/max-width: 40vw/.test(css),
+    'a long file name wraps instead of being cut off');
+  ok(/\.job \{[\s\S]*?position: fixed; left: 0; right: 0; bottom: 0/.test(mobile),
+    'the job bar docks to the bottom edge on a phone');
+  ok(/env\(safe-area-inset-bottom\)/.test(mobile) && /env\(safe-area-inset-left\)/.test(mobile),
+    'the docked bar and the page keep clear of the home indicator');
+  const insets = (css.match(/env\(safe-area-inset-[a-z]+\)/g) || []).length;
+  ok(insets >= 5, 'safe-area insets are used throughout, not patched in once', insets + ' uses');
+  ok(/@media \(hover: none\)/.test(css) && /transform: none/.test(css.slice(css.indexOf('@media (hover: none)'))),
+    'hover styles cannot stick after a tap');
+  ok(/-webkit-tap-highlight-color: transparent/.test(css), 'no grey tap flash on the brand buttons');
+  ok(/touch-action: manipulation/.test(css), 'the 300 ms double-tap delay is removed from controls');
+  ok(/\.controls-wrap \{ backdrop-filter: none/.test(mobile),
+    'the sticky blur is dropped where it would cost frames (and would trap the docked bar)');
+
+  // an indeterminate bar animates; a measured bar must never pretend to move
+  ok(/\.work\.is-indeterminate \.work-fill/.test(css) && /@keyframes workSlide/.test(css),
+    'the indeterminate state has its own sweep animation');
+  ok(!/(^|\n)\.work-fill \{[^}]*animation:/.test(css), 'a measured bar is not animated');
+  ok(/\.job\.is-indeterminate \.job-fill \{ animation: workSlide/.test(css),
+    'the docked job bar sweeps too while an uncountable step runs');
+  // an auto-sized grid track grows to max-content: without this guard a long
+  // file name pushes the percentage off the right edge of both bars
+  ok(/\.job \{[^}]*grid-template-columns: minmax\(0, 1fr\)/.test(css)
+    && /\.work \{[^}]*grid-template-columns: minmax\(0, 1fr\)/.test(css),
+    'both progress blocks clamp their column, so the percentage cannot be pushed out');
+  ok(/prefers-reduced-motion/.test(css) && /animation-duration: \.001ms/.test(css),
+    'the sweep is switched off for reduced motion');
+
+  // the phone gets its own wording, and it is not desktop wording with a suffix
+  const touchKeys = { 'drop.titleTouch': /tap|tippe|wähle|choose|pick/i, 'drop.hintTouch': /tap|tippe/i };
+  for (const [key, re] of Object.entries(touchKeys)) {
+    for (const lang of ['de', 'en']) {
+      const v = i18n.DICT[lang][key];
+      ok(!!v && re.test(v) && !/drag|drop|ziehen|ablegen/i.test(v),
+        lang + ' · ' + key + ' speaks about tapping, not dragging', v);
+    }
+  }
+  ok(i18n.DICT.de['drop.titleTouch'] !== i18n.DICT.de['drop.title'], 'the touch title is a different sentence');
+  // and the app must pick it without a reload-free hack: the key is rewritten
+  ok(/el\.setAttribute\('data-i18n', key\)/.test(appSrc),
+    'the drop zone writes the effective key back, so a repaint keeps the variant');
+}
+
 /* ═════════════════════════════════════════════════ 4 · bilingual coverage ══ */
 
 section('audit · bilingual coverage');
@@ -262,13 +390,35 @@ section('audit · bilingual coverage');
   for (const attr of ['data-i18n', 'data-i18n-html', 'data-i18n-title', 'data-i18n-aria']) {
     for (const m of html.matchAll(new RegExp(attr + '="([^"]+)"', 'g'))) usedKeys.add(m[1]);
   }
-  // static keys only: dynamic ones are composed ("kind." + id) and checked below
-  for (const m of appSrc.matchAll(/\bt\(\s*'([a-z0-9]+\.[A-Za-z0-9.]+)'/g)) usedKeys.add(m[1]);
-  for (const m of appSrc.matchAll(/t\((\w+) \? '([a-z0-9]+\.[A-Za-z0-9.]+)' : '([a-z0-9]+\.[A-Za-z0-9.]+)'/g)) { usedKeys.add(m[2]); usedKeys.add(m[3]); }
+  // The dictionary file itself is *not* part of the code that may reference a
+  // key — otherwise every key would count as used and this check could never
+  // fail. (It could not, before this was split.)
+  const codeOnly = APP_JS.filter((f) => f.indexOf('i18n.js') === -1).map(read).join('\n');
+
+  // static keys
+  for (const m of codeOnly.matchAll(/\bt\(\s*'([a-z0-9]+\.[A-Za-z0-9.]+)'/g)) usedKeys.add(m[1]);
+  for (const m of codeOnly.matchAll(/t\((\w+) \? '([a-z0-9]+\.[A-Za-z0-9.]+)' : '([a-z0-9]+\.[A-Za-z0-9.]+)'/g)) { usedKeys.add(m[2]); usedKeys.add(m[3]); }
+  // dynamic families: composed at runtime from a prefix that appears in the code
+  // ("kind." + id, "issue." + key, "status." + state)
+  const families = new Set([...codeOnly.matchAll(/'([a-z]+)\.'\s*\+/g)].map((m) => m[1] + '.'));
+  for (const k of de) {
+    for (const f of families) if (k.indexOf(f) === 0) usedKeys.add(k);
+  }
+
   const missing = [...usedKeys].filter((k) => !i18n.DICT.de[k] || !i18n.DICT.en[k]);
   ok(missing.length === 0, 'every referenced key exists in both languages', missing.join(', '));
-  const unused = de.filter((k) => !usedKeys.has(k) && !new RegExp("'" + k.replace(/\./g, '\\.') + "'").test(appSrc + html));
+  const unused = de.filter((k) => !usedKeys.has(k)
+    && !new RegExp("'" + k.replace(/\./g, '\\.') + "'").test(codeOnly + html));
   ok(unused.length === 0, 'no dead translation keys', unused.join(', '));
+  ok(families.has('kind.') && families.has('issue.') && families.has('status.'),
+    'the dynamic key families are still discovered', [...families].join(', '));
+
+  // …and every state the app can be switched into has wording to show (the
+  // reverse direction — a key nothing shows — is what `unused` above checks)
+  const statusWords = new Set([...codeOnly.matchAll(/setStatus\(\s*[^,]+,\s*'([a-z]+)'/g)].map((m) => m[1]));
+  statusWords.add('rendering');            // the pill's live percentage word
+  const missingStatus = [...statusWords].filter((w) => !i18n.DICT.de['status.' + w] || !i18n.DICT.en['status.' + w]);
+  ok(missingStatus.length === 0, 'every state the cards can be in has wording', missingStatus.join(', '));
 
   // HTML strings must be balanced and free of stray markup
   const voidTags = ['br', 'hr', 'img', 'input', 'meta', 'link'];
@@ -337,12 +487,31 @@ section('audit · presets and parameters');
   ok(problems.length === 0, 'all six profiles are complete and sane', problems.join(', '));
   ok(Presets.PRESET_ORDER.length === 6 && Presets.PRESET_ORDER[0] === 'auto', 'the menu is anchored on "auto"');
 
-  // the worklet is the contract: every parameter it declares must be reachable?
-  const declared = [...workletSrc.matchAll(/k\('(\w+)'/g)].map((m) => m[1]);
-  ok(declared.length === 21, 'the processor declares 21 parameters', String(declared.length));
-  const ranges = { power: [0, 1], bypass: [0, 1], sub: [0, 1], subRatio: [0.34, 0.66], exciter: [0, 1], air: [0, 1], dehiss: [0, 1], declick: [0, 1], reso: [0, 1], glue: [0, 1], warmth: [0, 1], tilt: [-1, 1], noiseFloor: [-100, -20], hissFloor: [-110, -20], autoLevel: [0, 1] };
-  const sims = { garage: H.garageSim(DSP, 48000, 6), cassette: H.cassetteSim(DSP, 48000, 6), vinyl: H.vinylSim(DSP, 48000, 6), lowbitrate: H.lowBitrateSim(DSP, 48000, 6), clean: DSP.smoothSpec ? H.cassetteSim(DSP, 48000, 6) : null };
+  // the worklet is the contract. The descriptors are read *from the worklet* —
+  // name, default and the range it declares — so this cannot drift out of date
+  // the way a hand-written table does: a parameter added to the law without a
+  // descriptor (or set outside the range the worklet promises to accept) fails.
+  const declared = [];
+  const ranges = {};
+  for (const m of workletSrc.matchAll(/k\('(\w+)',\s*(-?[\d.]+)(?:,\s*(-?[\d.]+),\s*(-?[\d.]+))?\)/g)) {
+    declared.push(m[1]);
+    const dflt = Number(m[2]);
+    ranges[m[1]] = m[3] === undefined ? [Math.min(0, dflt), Math.max(1, dflt)] : [Number(m[3]), Number(m[4])];
+  }
+  ok(declared.length === 36, 'the processor declares 36 parameters', String(declared.length));
+  // A mains line that is not a pure sine. Real hum arrives with its harmonics,
+  // and a recording with a 100 Hz buzz has to be notched there *because that was
+  // measured* — this is the fixture that proves the harmonic notches are wired to
+  // the law instead of riding along with the fundamental.
+  const humRich = (() => {
+    const out = Float32Array.from(H.garageSim(DSP, 48000, 6));
+    const second = H.tone(100, 48000, 6, 0.020), third = H.tone(150, 48000, 6, 0.016);
+    for (let i = 0; i < out.length; i++) out[i] += second[i] + third[i];
+    return out;
+  })();
+  const sims = { garage: H.garageSim(DSP, 48000, 6), humrich: humRich, cassette: H.cassetteSim(DSP, 48000, 6), vinyl: H.vinylSim(DSP, 48000, 6), lowbitrate: H.lowBitrateSim(DSP, 48000, 6), clean: DSP.smoothSpec ? H.cassetteSim(DSP, 48000, 6) : null };
   const outOfRange = [];
+  const seen = new Map();                       // which parameters the law actually moves
   for (const key of Object.keys(sims)) {
     const s = sims[key];
     if (!s) continue;
@@ -350,27 +519,61 @@ section('audit · presets and parameters');
     for (const p of [0, 0.25, 0.5, 0.75, 1]) {
       const params = Presets.buildParams('auto', m, p);
       const keys = Object.keys(params);
-      if (keys.length !== 21) outOfRange.push(key + ' @' + p + ': ' + keys.length + ' params');
+      if (keys.length !== declared.length) outOfRange.push(key + ' @' + p + ': ' + keys.length + ' params');
       for (const k of keys) {
         if (!isFinite(params[k])) { outOfRange.push(key + '@' + p + '.' + k + ' not finite'); continue; }
         if (!declared.includes(k)) { outOfRange.push('unknown param ' + k); continue; }
         const r = ranges[k];
-        if (!r) continue;                       // band0..5 checked below
         if (params[k] < r[0] - 1e-6 || params[k] > r[1] + 1e-6) outOfRange.push(key + '@' + p + '.' + k + '=' + params[k].toFixed(3) + ' outside [' + r[0] + ',' + r[1] + ']');
       }
-      for (let b = 0; b < 6; b++) {
-        const v = params['band' + b];
-        if (!isFinite(v) || Math.abs(v) > 15.000001) outOfRange.push(key + '@' + p + '.band' + b + '=' + v);
-      }
       if (params.power < 0 || params.power > 1) outOfRange.push(key + '@' + p + '.power');
+      for (const k of keys) seen.set(k, seen.get(k) || Math.abs(params[k] - ranges[k][0]) > 1e-9);
     }
   }
   ok(outOfRange.length === 0, 'every parameter stays inside its declared range', outOfRange.slice(0, 4).join(' | '));
 
+  // …and the other direction: a descriptor nobody ever sets is dead weight, and
+  // a *repair* parameter that the law never moves is a feature that cannot fire.
+  // A narrow *stereo* pair, which the mono sims cannot provide: a collapsed
+  // image is the one defect that needs both channels at once. (Identical
+  // channels are mono, and mono deliberately stays mono.)
+  const narrowPair = (() => {
+    const first = H.garageSim(DSP, 48000, 6);
+    const second = Float32Array.from(first);
+    const room = H.noise(48000, 6, 0.05, 77);
+    for (let i = 0; i < second.length; i++) second[i] += room[i];
+    return [first, second];
+  })();
+  const stereoM = DSP.measure(narrowPair, 48000);
+  ok(Presets.buildParams('auto', stereoM, 0.8).width > 0.05,
+    'a narrow stereo image asks for width', Presets.buildParams('auto', stereoM, 0.8).width.toFixed(2));
+  ok(Presets.buildParams('auto', DSP.measure([sims.garage, sims.garage], 48000), 0.8).width === 0,
+    '…and a mono master is left alone');
+
+  const probes = Object.keys(sims).map((key) => () => DSP.measure([sims[key]], 48000)).concat([() => stereoM]);
+  const untouched = declared.filter((k) => {
+    if (k === 'bypass') return false;            // the A/B switch, not a law parameter
+    let moved = false;
+    for (const probe of probes) {
+      for (const p of [0.25, 0.75, 1]) {
+        const q = Presets.buildParams('auto', probe(), p);
+        if (Math.abs(q[k] - ranges[k][0]) > 1e-9) moved = true;
+      }
+    }
+    return !moved;
+  });
+  ok(untouched.length === 0, 'every declared parameter is driven by the law',
+    untouched.join(', ') || 'all ' + (declared.length - 1) + ' reachable');
+
   // 0 % must produce a completely inactive chain
   const zero = Presets.buildParams('auto', DSP.measure([sims.garage], 48000), 0);
+  // Amounts must be zero; the *rate* parameters (frequencies, sharpnesses, the
+  // level references the chain is told to expect) are not amounts — they sit at
+  // whatever was measured and are multiplied by a zero amount inside the worklet.
+  const RATES = ['noiseFloor', 'hissFloor', 'autoLevel', 'subRatio',
+    'humHz', 'boxF1', 'boxQ1', 'boxF2', 'boxQ2', 'airF', 'airRoom', 'hissTilt', 'hissMax'];
   const stillActive = Object.keys(zero).filter((k) => ['bypass'].indexOf(k) === -1 && Math.abs(zero[k]) > 1e-9
-    && ['noiseFloor', 'hissFloor', 'autoLevel', 'subRatio'].indexOf(k) === -1);
+    && RATES.indexOf(k) === -1);
   ok(stillActive.length === 0, 'at 0 % every module amount is exactly zero', stillActive.join(', '));
   ok(zero.power === 0, 'at 0 % the dry/wet crossfade is fully dry', String(zero.power));
 
@@ -425,10 +628,17 @@ section('audit · presets and parameters');
   for (const k of ['air', 'exciter', 'dehiss', 'declick', 'sub', 'reso', 'glue', 'warmth', 'power']) {
     for (let i = 1; i < series.length; i++) if (series[i][k] < series[i - 1][k] - 1e-9) nonMonotone.push(k + '@' + (i * 0.1 + 0.1).toFixed(1));
   }
+  // A band is an amount like any other: as the slider rises it has to move
+  // further in *its own* direction. The reference sign therefore comes from the
+  // same material that is being swept (a band the chain cuts must become a
+  // deeper cut, not a shallower one), not from the garage card above — that one
+  // lifts the 7 kHz shelf, which used to make a legitimate cut look like a
+  // violation of the contract.
+  const seriesFull = Presets.buildParams('auto', m2, 1);
   for (let b = 0; b < 6; b++) {
-    const anchor = full['band' + b];
-    if (anchor >= 0) {
-      for (let i = 1; i < series.length; i++) if (series[i]['band' + b] < series[i - 1]['band' + b] - 1e-9) nonMonotone.push('band' + b);
+    const dir = seriesFull['band' + b] >= 0 ? 1 : -1;
+    for (let i = 1; i < series.length; i++) {
+      if ((series[i]['band' + b] - series[i - 1]['band' + b]) * dir < -1e-9) nonMonotone.push('band' + b);
     }
   }
   ok(nonMonotone.length === 0, 'the whole chain reacts monotonically to the slider', nonMonotone.join(', '));
@@ -537,6 +747,65 @@ section('audit · DSP robustness');
 }
 
 /* ══════════════════════════════════════════════════════════ 7 · codec audit ══ */
+
+section('audit · the mains notch');
+{
+  const SR = 48000, SEC = 6;
+  const num = (v) => (Math.round(Number(v) * 10) / 10).toFixed(1);
+  const P = H.loadProcessor(SR);
+  // A programme with real low end and a mains line on top of it: 50 Hz and its
+  // two harmonics. Then the same programme with a *pure* 50 Hz line, which must
+  // leave 100 and 150 Hz exactly where they were.
+  const bed = (() => {
+    const out = Float32Array.from(H.cassetteSim(DSP, SR, SEC));
+    const bass = H.tone(40, SR, SEC, 0.08);
+    for (let i = 0; i < out.length; i++) out[i] = out[i] * 0.4 + bass[i];
+    return out;
+  })();
+  const add = (sig, f, a) => {
+    const t = H.tone(f, SR, SEC, a), o = Float32Array.from(sig);
+    for (let i = 0; i < o.length; i++) o[i] += t[i];
+    return o;
+  };
+  const plain = add(bed, 50, 0.030);
+  const rich = add(add(plain, 100, 0.022), 150, 0.016);
+  // Only the notch is active: everything else at zero, and the level matcher off,
+  // so the numbers are the notch's and nothing else's.
+  const bare = { power: 1, bypass: 0, sub: 0, subRatio: 0.5, exciter: 0, air: 0, dehiss: 0, declick: 0, reso: 0,
+    glue: 0, warmth: 0, tilt: 0, band0: 0, band1: 0, band2: 0, band3: 0, band4: 0, band5: 0,
+    boxG1: 0, boxF1: 200, boxQ1: 3, boxG2: 0, boxF2: 400, boxQ2: 3, width: 0, airRoom: 0.5, airF: 6000,
+    noiseFloor: -70, hissFloor: -80, hissTilt: 0, hissMax: 0, autoLevel: 0, hum: 0, hum2: 0, hum3: 0, humHz: 50 };
+  const spec = (ch) => DSP.spectrum([ch], SR, { fftSize: 16384 });
+  const line = (ch, f) => DSP.bandLevel(spec(ch), f - 1.5, f + 1.5);
+  const octave = (ch) => DSP.bandLevel(spec(ch), 32, 45);
+
+  const off = H.render(P, [rich], bare)[0];
+  const on = H.render(P, [rich], Object.assign({}, bare, { hum: 0.40, hum2: 0.30, hum3: 0.20 }))[0];
+  ok(line(on, 50) < line(off, 50) - 12, 'a dosed notch takes the mains fundamental out',
+    num(line(off, 50)) + ' → ' + num(line(on, 50)) + ' dB');
+  ok(line(on, 100) < line(off, 100) - 8 && line(on, 150) < line(off, 150) - 5,
+    '…and each harmonic it was dosed for',
+    '100 Hz ' + num(line(off, 100)) + ' → ' + num(line(on, 100))
+    + ' · 150 Hz ' + num(line(off, 150)) + ' → ' + num(line(on, 150)) + ' dB');
+  // A five-hertz notch cannot reach the octave below: the worst it takes out of
+  // 32–45 Hz is the top bin's skirt, just over a decibel, while the line itself
+  // loses more than twelve.
+  ok(octave(off) - octave(on) < 2,
+    'the octave below the mains is left alone (that is where the bass lives)',
+    num(octave(off)) + ' → ' + num(octave(on)) + ' dB');
+
+  const pureOff = H.render(P, [plain], bare)[0];
+  const pureOn = H.render(P, [plain], Object.assign({}, bare, { hum: 0.40 }))[0];
+  ok(line(pureOn, 100) > line(pureOff, 100) - 1.0 && line(pureOn, 150) > line(pureOff, 150) - 1.0,
+    'a pure 50 Hz line does not notch 100 or 150 Hz with it',
+    '100 Hz ' + num(line(pureOff, 100)) + ' → ' + num(line(pureOn, 100))
+    + ' · 150 Hz ' + num(line(pureOff, 150)) + ' → ' + num(line(pureOn, 150)) + ' dB');
+
+  const undosed = H.render(P, [rich], bare)[0];
+  ok(line(undosed, 50) > line(off, 50) - 0.6 && line(undosed, 100) > line(off, 100) - 0.6,
+    'and at zero dose the notch is out of the signal path entirely',
+    num(line(off, 50)) + ' → ' + num(line(undosed, 50)) + ' dB');
+}
 
 section('audit · codecs');
 {
