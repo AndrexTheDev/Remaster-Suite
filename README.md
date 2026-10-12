@@ -279,15 +279,19 @@ assets/
     og-image.jpg                 512×512 social preview
     favicon.svg                  the waveform alone — the record ring is unreadable at 16 px
 tests/
-  harness.js                     Node harness + signal simulators
+  harness.js                     Node harness + signal simulators (garage session,
+                                 cassette, vinyl rip, low bitrate, clean, and the
+                                 combination fixture: a vinyl transfer that went
+                                 through a 128 kbit/s encoder)
   dsp.test.js                    DSP/engine suite: transparency, sub, air, exciter, de-hiss,
                                  de-click, measured hum/hiss repair, and the contract that a
                                  broken file never becomes NaN parameters (73 checks)
   tuning.test.js                 the tuning contract: what the automatic mode may do to a file (17 checks)
-  web.test.js                    static, DOM and app suite (130 checks)
+  web.test.js                    static, DOM and app suite (137 checks)
   audit.test.js                  repository hygiene, markup, contrast, i18n, parameter,
                                  codec and robustness audit — including the mains-notch law,
-                                 a rich-hum fixture and the effect budgets (224 checks)
+                                 a rich-hum fixture, the effect budgets, and the
+                                 several-problems-at-once chain (246 checks)
   e2e.test.js                    realistic journeys: five problem recordings, slider sweep,
                                  profile overrides, 10-file batch → ZIP, mono/32 k/96 k,
                                  hostile input (108 checks)
@@ -309,7 +313,8 @@ node tests/dsp.test.js     # engine: transparency, sub, air, exciter, de-hiss, d
 node tests/web.test.js     # static integrity, bilingual coverage, boot, drop → analyse → render
                            # → save → ZIP, error handling, resampling
 node tests/audit.test.js   # repository hygiene, markup, stylesheet, contrast, bilingual
-                           # coverage, parameter ranges, DSP edge cases, codec round-trips, budgets
+                           # coverage, parameter ranges, the several-problems-at-once
+                           # chain, DSP edge cases, codec round-trips, budgets
 node tests/e2e.test.js     # realistic journeys: five problem recordings, slider sweep, profile
                            # overrides, 10-file batch → ZIP, mono/32 k/96 k, hostile input
 node tests/tuning.test.js  # the tuning contract: octave bands, loudness, the level match, the
@@ -327,9 +332,11 @@ It needs the optional dev dependency `@sparticuz/chromium` (a packaged headless
 Chromium, used because CI machines rarely ship a browser); `npm test` runs the
 five dependency-free suites and stays green everywhere.
 
-Signals are simulated (garage session, cassette, vinyl rip, low-bitrate, clean) and the whole
-application is exercised in a DOM with a miniature Web Audio implementation that runs the real
-processor in 128-frame quanta — so the tests measure the actual engine, not a mock.
+Signals are simulated (garage session, cassette, vinyl rip, low-bitrate, clean — plus a vinyl
+transfer that was later pushed through a 128 kbit/s encoder, the file that needs more than one
+treatment at once) and the whole application is exercised in a DOM with a miniature Web Audio
+implementation that runs the real processor in 128-frame quanta — so the tests measure the actual
+engine, not a mock.
 
 ---
 
