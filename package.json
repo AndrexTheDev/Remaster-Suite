@@ -1,6 +1,6 @@
 {
   "name": "remaster-suite",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "private": true,
   "description": "Harmonic Restoration · Remaster Suite — 100 % client-side audio restoration in vanilla HTML/CSS/JS",
   "scripts": {

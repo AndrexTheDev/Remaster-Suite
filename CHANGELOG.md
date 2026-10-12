@@ -4,6 +4,68 @@ All notable changes to the Remaster Suite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are the ones shown in
 *About & credits*.
 
+## [1.5.0] — 2026-10-12
+
+**The per-song release.** Until now the suite chose one of six profiles from the measurements and
+the profile's *ceilings* decided how far each stage could go. That is still true — a profile is
+never a curve to apply — but seven parameters are no longer amounts at all: they are measurements
+of the file itself (where its noise starts, which split its de-hisser should use, where its mains
+line sits, how percussive it is, how its bass arrives in the two channels), and four stages are new
+and exist only when a file asks for them. Two files of the same kind no longer get the same
+treatment: they get the treatment each of them measured.
+
+### Added
+
+* **A sub-sonic guard, dosed from measured rumble.** The quiet passages are compared below the
+  music (20–45 Hz against 120–270 Hz, equal relative width, summed) and the guard is a 12 dB/octave
+  high-pass at **18–30 Hz** — under the bass, where a turntable's rumble lives and no instrument
+  does — and only when the confidence in that measurement is there *and* no mains line could be its
+  cause (a 50/60 Hz line leaks into the band below it at any sane FFT resolution, and a hum is a
+  notch, not a reason to take the bottom off the record). Measured: a rumbly fixture gets 22 Hz, a
+  clean pink programme 0 Hz, the garage fixture 0 Hz.
+* **A per-song corrective EQ — twelve bands, 50 Hz … 8 kHz, Q 1.4.** This is the part that is
+  different for every song: the file's own departures from its own spectral trend, minus what the
+  profile's six bands already shape, with a ±1.5 dB dead zone, a ±6 dB cap, boosts held back within
+  18 dB of the measured noise floor, and no correction at all in a band the file does not fill
+  (more than 22 dB under its own median). Measured on a dull 6 kHz-limited recording: the curve
+  comes out `0 0 0 0 0 0 0 0 −0.1 −0.2 +0.35 +1.64 dB`, and pushing the slider from 0 % to 100 %
+  moves the 9–13 kHz band by 6.1 dB.
+* **A de-esser that fires on sibilance and only on sibilance.** A dynamic dip over 5.2–9.5 kHz,
+  keyed on the fast/slow ratio of that band — a quiet "s" and a loud one are the same problem — and
+  dosed from the measured excess of the band over the trend the rest of the spectrum predicts. It
+  sits before the synthesisers, so the exciter and the air stage cannot rebuild what it just took
+  out. Measured: a sibilant probe asks for 0.46, a recording without sibilance measures 0.00.
+* **A bass mono-maker for a bass that arrives out of phase.** If one channel's low end is inverted,
+  the two channels cancel below 200 Hz when the file is folded to mono — a mis-wired cartridge or a
+  polarity-flipped bass microphone does exactly this. Measured: an inverted bass asks for 1.00, a
+  centred bass for 0.00.
+* **Measured rates instead of guessed ones.** The glue compressor's attack/release now follow the
+  file's **percussive character** (crest factor), and the de-hisser's split point is the measured
+  **start of the noise** (2.2–4 kHz), so a tape whose hiss begins at 2.5 kHz is repaired from
+  2.5 kHz up instead of from a fixed 3.2 kHz.
+* **Every one of them is named in the analysis**, in the same plain sentence as the rest, and the
+  worklet's parameter set grew from 36 to **53** (all of them exercised by `tests/audit.test.js`,
+  which now also proves that a sibilant, an inverted bass and a rumbly recording each move exactly
+  one stage).
+
+### Fixed
+
+* **MP3 export wrote silence.** lamejs copies whatever it is handed straight into 16-bit buffers,
+  so the −1…1 float mix from the renderer was written out as samples rounding to zero: a file with
+  valid frames, a plausible size, and no sound. Independently decoded (mpg123): the file the old
+  path produced measures **−∞ dBFS** — digital silence, 120 960 bytes of it — while the same signal
+  through the fixed path measures **−17.8 dBFS RMS, −3.4 dBFS peak**. Both encoder paths (the worker and the main-thread
+  fallback) now scale to 16-bit PCM with clipping and dither, and the stream is checked for a frame
+  header and a sensible length before the download is offered — an encoder failure is reported as an
+  error instead of being saved as a file that "worked". `tests/web.test.js` now listens at the
+  encoder's input and fails if the samples stop being 16-bit PCM (the check was verified against the
+  old behaviour: peak 2 instead of ≈23 000), and `tests/audit.test.js` checks the conversion itself
+  and that *both* paths perform it.
+* The de-clicker's amount no longer takes a 30 % cut on material whose crest factor is high
+  *because* of its crackle — a crackly record is the one case where full de-clicking is what the
+  file needs, and the vinyl profile's ceiling for it rises from 0.75 to 0.85. Measured: the vinyl
+  fixture's spike crest comes down 1.9 dB at the recommended strength.
+
 ## [1.4.0] — 2026-10-12
 
 **The measurement release.** Three repairs that were dosed from a number nobody had ever checked

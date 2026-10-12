@@ -77,11 +77,21 @@ function staticChecks(doc) {
 
   const code = jsSources(ROOT).map((f) => fs.readFileSync(f, 'utf8')).join('\n');
   const keysInCode = new Set();
+  const prefixesInCode = new Set();
   const re = /\bt\(\s*'([a-z0-9]+\.[A-Za-z0-9.]+)'/g;
   let m;
-  while ((m = re.exec(code))) keysInCode.add(m[1]);
+  while ((m = re.exec(code))) {
+    // a literal that ends in a dot is a *prefix* — the key is completed at
+    // runtime ("find.act." + kind). Those cannot be checked one by one here;
+    // they are covered by the per-song section of the audit suite, which builds
+    // the keys from the analysis itself and checks every one of them.
+    if (/\.$/.test(m[1])) prefixesInCode.add(m[1]);
+    else keysInCode.add(m[1]);
+  }
   const missingCode = [...keysInCode].filter((k) => !i18n.DICT.de[k] || !i18n.DICT.en[k]);
   ok(missingCode.length === 0, 'every key used in JavaScript exists in both languages', missingCode.join(', '));
+  const uncovered = [...prefixesInCode].filter((p) => !de.some((k) => k.indexOf(p) === 0));
+  ok(uncovered.length === 0, 'every dynamic key prefix has translations', uncovered.join(', '));
 
   section('static · privacy promises');
   const allCode = code + readIndexHtml();
@@ -315,8 +325,36 @@ async function run() {
   win.RSApp.State.wavDepth = 16;
 
   section('flow · MP3 export through lamejs');
+  // The defect this guards against: lamejs copies the samples it is handed
+  // straight into 16-bit buffers, so a mix in −1…1 floats is written out as
+  // *silence* — a file with a plausible size, valid frames and no sound. That
+  // cannot be caught in the bytes (a stream with frames and no signal is still
+  // a valid MP3), so this listens at the encoder's input instead: what leaves
+  // the mixer has to be 16-bit PCM, and it has to use the 16-bit range.
+  const handed = [];
+  const RealEncoder = win.lamejs.Mp3Encoder;
+  win.lamejs.Mp3Encoder = function (nCh, sr, kbps) {
+    const enc = new RealEncoder(nCh, sr, kbps);
+    const write = enc.encodeBuffer.bind(enc);
+    enc.encodeBuffer = (left, right) => {
+      handed.push(left);
+      if (right) handed.push(right);
+      return write(left, right);
+    };
+    return enc;
+  };
   win.RSApp.State.format = 'mp3';
   const resMp3 = await win.RSApp.renderCard(card, { force: true });
+  win.lamejs.Mp3Encoder = RealEncoder;
+  ok(handed.length > 0, 'the mixer really went through the MP3 encoder', handed.length + ' chunks');
+  {
+    // realm-safe type check: the arrays are created inside the window
+    const typed = handed.every((a) => Object.prototype.toString.call(a) === '[object Int16Array]');
+    let peak = 0, integers = true;
+    for (const a of handed) for (const v of a) { const m = Math.abs(v); if (m > peak) peak = m; if (v !== Math.trunc(v)) integers = false; }
+    ok(typed && integers, 'the encoder is handed 16-bit integer PCM');
+    ok(peak > 8000, '…that uses the 16-bit range (a −1…1 float mix would be silence here)', 'peak ' + peak);
+  }
   ok(/\.mp3$/.test(resMp3.name), 'MP3 file name', resMp3.name);
   const mb = resMp3.bytes;
   ok(mb.length > 2000, 'MP3 stream has real bytes', (mb.length / 1024).toFixed(0) + ' KB');

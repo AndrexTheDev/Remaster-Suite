@@ -164,6 +164,18 @@
    * @param {number[]} [excludeHz] frequencies to ignore (mains hum & harmonics)
    */
   const HUM_HZ = [50, 60, 100, 120, 150, 180, 200, 300];
+
+  /**
+   * The centre frequencies of the per-song corrective EQ — twelve log-spaced
+   * bands from 50 Hz to 8 kHz (≈0.68 octave apart, so neighbouring bands
+   * overlap and their sum is a smooth curve rather than twelve bumps).
+   *
+   * These are shared between the analyser (which measures the level and the
+   * noise in each one) and presets.js (which decides what to do about it), and
+   * between presets.js and the worklet, so a correction can never be computed
+   * on different frequencies than it is applied to.
+   */
+  const EQ_CENTERS = [50, 80, 125, 200, 320, 500, 800, 1250, 2000, 3200, 5000, 8000];
   function bandMedian(spec, f1, f2, excludeHz) {
     const ex = excludeHz || HUM_HZ;
     const vals = [];
@@ -446,7 +458,10 @@
     const sa1 = -1.69065929318241, sa2 = 0.73248077421585;   // BS.1770 high-shelf @ ~1.5 kHz
     const invCh = 1 / nCh;
     const win = Math.max(256, Math.round(sr * 0.05));
-    const st = { hz1: 0, hz2: 0, sz1: 0, sz2: 0, ms: 0, peak: 0, clipped: 0, total: 0, winMs: 0 };
+    const mid = Math.floor(len / 2);
+    const st = { hz1: 0, hz2: 0, sz1: 0, sz2: 0, ms: 0, peak: 0, clipped: 0, total: 0, winMs: 0,
+      dcSum: new Float64Array(nCh), dcCount: 0,
+      dcA: new Float64Array(nCh), dcB: new Float64Array(nCh), dcBc: new Float64Array(nCh) };
     const dr = [];
     const step = stepRange('core', len, len * 25, (from, to) => {
       for (let i = from; i < to; i++) {
@@ -458,8 +473,17 @@
           const a = v < 0 ? -v : v;
           if (a > st.peak) st.peak = a;
           if (v > 0.994 || v < -0.994) st.clipped++;
+          // DC offset. The mean of the whole file is the number that matters
+          // (the chain's blockers remove it), but a mean can hide the shape of
+          // the problem: a recording that is clean for a minute and then offset
+          // by a bad edit averages close to zero. The mean of each half is kept
+          // as well, so the diagnosis can say which of the two it is.
+          st.dcSum[c] += v;
+          if (i < mid) st.dcA[c] += v;
+          else { st.dcB[c] += v; st.dcBc[c]++; }
           st.total++;
         }
+        st.dcCount++;
         x *= invCh;
         const hy = Math.fround(hb0 * x + st.hz1);
         st.hz1 = hb1 * x - ha1 * hy + st.hz2;
@@ -482,6 +506,26 @@
       nonFinite: () => !isFinite(st.ms),
       clipRatio: () => (st.total ? st.clipped / st.total : 0),
       loudness: () => -0.691 + 10 * Math.log10(st.ms / len),
+      /**
+       * DC offset in dBFS (how far the mean sits below full scale; −120 = none),
+       * plus how much the two halves of the file differ — a large difference
+       * means the offset came in with an edit rather than with the medium.
+       */
+      dcOffset: () => {
+        if (!st.dcCount || !len) return { db: -120, driftDb: 0, static: true };
+        let worst = 0, drift = 0;
+        for (let c = 0; c < nCh; c++) {
+          const whole = Math.abs(st.dcSum[c] / (len || 1));
+          if (whole > worst) worst = whole;
+          if (st.dcBc[c] > 0) {
+            const a = Math.abs(st.dcA[c] / Math.max(1, mid));
+            const b = Math.abs(st.dcB[c] / st.dcBc[c]);
+            const d = db(b + 1e-12) - db(a + 1e-12);
+            if (d > drift) drift = d;
+          }
+        }
+        return { db: db(worst), driftDb: clamp(drift, 0, 60), static: drift < 12 };
+      },
       dynamicRange: () => {
         if (dr.length < 4) return 20;
         const c = dr.slice().sort((a, b) => a - b);
@@ -809,12 +853,60 @@
         const hfQuietRmsDb = (stats.useAll || hfQuiet.length < 4) ? db(stats.hfP02 + 1e-12) : db(med(hfQuiet));
         const hissTiltStepDb = (loudT.length >= 3 && quietT.length >= 3)
           ? clamp(hissTiltDb - musicTiltDb, 0, 24) : 0;
+        /**
+         * The noise floor per EQ band, from the same quiet frames the floor
+         * itself is measured in. Two things need it: the diagnosis (which can
+         * then say "the noise sits at 6.3 kHz and above" instead of "there is
+         * hiss") and the per-song EQ (a band whose music is only 8 dB above the
+         * noise floor must not be boosted — that would boost the noise).
+         */
+        const bandLevelArr = (v, f1, f2) => {
+          let sum = 0, cnt = 0;
+          for (let k = 0; k <= half; k++) {
+            const hz = k * sr / fftSize;
+            if (hz >= f1 && hz <= f2) { sum += v[k]; cnt++; }
+          }
+          return 10 * Math.log10(Math.max(cnt ? sum / cnt : 1e-20, 1e-20));
+        };
+        const noiseBandDb = EQ_CENTERS.map((f) => bandLevelArr(spec, f / 1.26, f * 1.26));
+        /**
+         * Rumble, measured where only rumble can be: in the quiet frames. Real
+         * sub-bass leaves with the music; turntable rumble (and a desk fan, and
+         * a building) is still there when the band stops playing.
+         */
+        // The two bands have to be *relatively* the same width and both have to
+        // be summed, not averaged: the noise floor is pink, so its power per
+        // hertz falls with frequency and an average over a narrow low band is
+        // always "above" an average over a wide high one. Equal relative width
+        // plus a sum is what makes the number read ≈0 dB for a clean recording
+        // and turn positive only when something really sits below 45 Hz. The
+        // mains region is left out on purpose — a 50 Hz hum is a notch, not a
+        // reason to take the bottom off the record.
+        const bandSumArr = (v, f1, f2) => {
+          let sum = 0;
+          for (let k = 1; k <= half; k++) {
+            const hz = k * sr / fftSize;
+            if (hz >= f1 && hz <= f2) sum += v[k];
+          }
+          return 10 * Math.log10(Math.max(sum, 1e-20));
+        };
+        const infraExcessDb = bandSumArr(spec, 20, 45) - bandSumArr(spec, 120, 270);
+        // how much the *noise* floor itself moves between quiet passages: a
+        // hiss that pumps is a different repair (slower release) from one that
+        // sits still, and a recording whose floor moves a lot cannot be trusted
+        // as much (the confidence above already carries part of that)
+        const quietHf = [];
+        for (let fr = 0; fr < total; fr++) if (frameRms[fr] <= stats.quietLimit) quietHf.push(hfFrame[fr]);
+        const quietHfSorted = quietHf.slice().sort((p, q) => p - q);
+        const qp = (p) => (quietHfSorted.length ? quietHfSorted[Math.min(quietHfSorted.length - 1, Math.floor(quietHfSorted.length * p))] : 0);
+        const hfQuietSpreadDb = quietHfSorted.length >= 8 ? clamp(db(qp(0.90) + 1e-12) - db(qp(0.10) + 1e-12), 0, 40) : 0;
         // how much the recording actually breathes: a file with no quiet passages
         // gets confidence 0 — we then never claim noise that we cannot prove
         const frameRange = db(stats.p98) - db(stats.p05);
         return { spec, floorDb, hfFloorDb, midFloorDb, lowFloorDb, noiseSlope, flatness, rumble,
           bbDynDb, hfDynDb, hissDeficitDb, hfFollowDb, hfQuietRmsDb,
           musicTiltDb, hissTiltDb, hissTiltStepDb,
+          noiseBandDb, infraExcessDb, hfQuietSpreadDb,
           crackleIndex: 0, crestP98Db: 0, crestGlobalDb: 0, musicDb: db(stats.p98),
           quietLevelDb: db(stats.quietLimit), quietCount: stats.quietCount, total,
           confidence: clamp((frameRange - 5) / 12, 0, 1) * clamp(stats.quietCount / 4, 0, 1),
@@ -1199,6 +1291,132 @@
     return c.value();
   }
 
+  /* --- stereo detail, band by band ----------------------------------------- */
+
+  /**
+   * Where a stereo image is narrow, and where it is broken.
+   *
+   * One broadband correlation number cannot tell the two failure modes apart: a
+   * 1960s mix folded almost to mono is correlated *everywhere*, while a
+   * recording with an out-of-phase bottom (a polarity-inverted bass mic, a
+   * mis-wired cartridge) is correlated in the middle and inverted down below.
+   * Both want a different repair, so the correlation is measured in three bands
+   * — below 200 Hz, 200 Hz–2 kHz, above 2 kHz — alongside the channel balance.
+   *
+   * Band splits are one-pole crossovers run at full rate (a low band cannot be
+   * measured from decimated samples), while the moment products are accumulated
+   * every fourth sample: the bands live far enough below Nyquist that the
+   * subset is the same measurement, and it keeps the pass cheap.
+   */
+  function stereoBandsStep(channels, sr) {
+    const flat = () => ({ step: stepRange('stereo-bands', 0, 0, () => {}), value: () => ({ low: 1, mid: 1, high: 1, balanceDb: 0 }) });
+    if (channels.length < 2) return flat();
+    const a = channels[0], b = channels[1];
+    const n = Math.min(a.length, b.length);
+    if (!n) return flat();
+    const cLow = 1 - Math.exp(-TWO_PI * 200 / sr);
+    const cMid = 1 - Math.exp(-TWO_PI * 2000 / sr);
+    const st = {
+      la: 0, ha: 0, lb: 0, hb: 0,                // one-pole states (low 200, low 2k)
+      low: [0, 0, 0], mid: [0, 0, 0], high: [0, 0, 0],   // [saa, sbb, sab]
+      ea: 0, eb: 0, cnt: 0,
+    };
+    const step = stepRange('stereo-bands', n, n * 7, (from, to) => {
+      for (let i = from; i < to; i++) {
+        const x = a[i], y = b[i];
+        st.la += (x - st.la) * cLow;
+        st.lb += (y - st.lb) * cLow;
+        st.ha += (x - st.ha) * cMid;
+        st.hb += (y - st.hb) * cMid;
+        if ((i & 3) !== 0) continue;
+        const xl = st.la, yl = st.lb;
+        const xm = st.ha - st.la, ym = st.hb - st.lb;
+        const xh = x - st.ha, yh = y - st.hb;
+        st.low[0] += xl * xl; st.low[1] += yl * yl; st.low[2] += xl * yl;
+        st.mid[0] += xm * xm; st.mid[1] += ym * ym; st.mid[2] += xm * ym;
+        st.high[0] += xh * xh; st.high[1] += yh * yh; st.high[2] += xh * yh;
+        st.ea += x * x; st.eb += y * y; st.cnt++;
+      }
+    });
+    const rho = (v) => {
+      const den = Math.sqrt(v[0] * v[1]);
+      if (den <= 1e-18) return 1;
+      return clamp(v[2] / den, -1, 1);
+    };
+    return {
+      step,
+      value: () => ({
+        low: rho(st.low), mid: rho(st.mid), high: rho(st.high),
+        balanceDb: st.cnt && st.ea > 1e-12 && st.eb > 1e-12 ? 10 * Math.log10(st.ea / st.eb) : 0,
+      }),
+    };
+  }
+
+  /* --- transient character -------------------------------------------------- */
+
+  /**
+   * How percussive a recording is.
+   *
+   * The chain has to know this about the *song*, not about music in general:
+   * de-clicking must not mistake a snare for a click (its detector is gated by
+   * how much the fast envelope stands above the slow one, and on percussion
+   * that ratio is high everywhere), and a glue compressor that is meant to
+   * *smooth* a sustained recording pumps on a drum-driven one.
+   *
+   * Measured on the mono sum with two envelope followers (≈1 ms attack / 30 ms
+   * release and 120 ms): an attack is a moment where the fast envelope stands
+   * 4 dB or more above the slow one and the level is above the noise; the
+   * count per second is the density, the median excess is the punch.
+   */
+  /* --- inter-sample peak estimate ------------------------------------------ */
+
+  /**
+   * True-peak (inter-sample peak) estimate, in dBFS.
+   *
+   * A master can sit at −0.1 dBFS on every sample and still produce a
+   * reconstructed waveform 1–2 dB above full scale, which is what a lossy
+   * encoder or a 16-bit export will then clip. The estimate interpolates the
+   * band-limited waveform between the samples that are already close to the
+   * peak — a 7-tap windowed-sinc evaluated at three offsets — and reports the
+   * highest value found. It is an estimate (that is what it is called in the
+   * UI), accurate to a few tenths of a dB, not a conformance-grade meter.
+   */
+  function ispStep(channels) {
+    const flat = { step: stepRange('isp', 0, 0, () => {}), value: () => -70 };
+    if (!channels.length || !channels[0].length) return flat;
+    const st = { isp: 0 };
+    const starts = [];
+    let total = 0;
+    for (const ch of channels) { starts.push(total); total += ch.length; }
+    const tap = (t) => {
+      if (t === 0) return 1;
+      const p = Math.PI * t;
+      const s = Math.sin(p) / p;
+      const w = Math.abs(t) < 3 ? Math.sin(p / 3) / (p / 3) : 0;
+      return s * w;
+    };
+    const step = stepRange('isp', total, total * 2, (from, to) => {
+      for (let c = 0; c < channels.length; c++) {
+        const ch = channels[c];
+        const len = ch.length;
+        const a = Math.max(3, Math.max(from, starts[c]) - starts[c]);
+        const b = Math.min(len - 3, Math.min(to, starts[c] + len) - starts[c]);
+        for (let i = a; i < b; i++) {
+          const cand = ch[i];
+          if (cand < 0.5 && cand > -0.5) continue;
+          for (let d = 1; d <= 3; d++) {
+            const f = d / 4;
+            let v = 0;
+            for (let k = -3; k <= 3; k++) v += ch[i + k] * tap(k - f);
+            const av = v < 0 ? -v : v;
+            if (av > st.isp) st.isp = av;
+          }
+        }
+      }
+    });
+    return { step, value: () => db(st.isp) };
+  }
+
   /* --- the full measurement ------------------------------------------------- */
 
   /**
@@ -1213,6 +1431,11 @@
     const crk = crackleStep(channels, sr);
     const nt = noiseStep(channels, sr);
     const humExact = humStep(channels, sr);
+    // Per-song detail: how the stereo image is built band by band, how
+    // percussive the recording is, and how far the reconstructed waveform is
+    // likely to leave full scale between the samples.
+    const sb = stereoBandsStep(channels, sr);
+    const isp = ispStep(channels);
     // the crest reference is a strided walk over the same file: it rides in the
     // final step instead of costing a pass of its own
     let crestMs = 0, crestN = 0;
@@ -1224,9 +1447,9 @@
       }
     });
     const steps = [
-      core.step, sp.step, cor.step, crk.step,
+      core.step, sp.step, cor.step, crk.step, sb.step,
       core.steps[0], core.steps[1], core.steps[2], core.steps[3],
-      nt.steps[0], nt.steps[1], nt.steps[2], nt.steps[3], humExact, fin,
+      nt.steps[0], nt.steps[1], nt.steps[2], nt.steps[3], humExact, isp.step, fin,
     ];
 
     function result() {
@@ -1283,6 +1506,14 @@
         hfRagged: raggedHi,
         hfCutoff: cut,
         correlation: cor.value(),
+        // ── per-song detail (everything below is measured on *this* file) ──
+        ispDb: isp.value(),                       // estimated true peak
+        stereo: sb.value(),                       // correlation per band + balance
+        dc: core.dcOffset(),                      // offset and whether it drifts
+        noiseBandDb: na.noiseBandDb || [],        // noise floor per EQ band
+        infraExcessDb: na.infraExcessDb || 0,     // quiet-frame 20–38 Hz vs 90–170 Hz
+        noiseSpreadDb: na.hfQuietSpreadDb || 0,   // does the hiss floor pump?
+        eqCenters: EQ_CENTERS.slice(),
         // tonal descriptors (dB relative ratios)
         bassRoll: 0, mudScore: 0, harshness: 0, airiness: 0, tilt: 0,
         spec,
@@ -1358,6 +1589,39 @@
         const wide = bandMedian(spec, f / 2.2, f * 2.2);
         return narrow - wide;
       });
+
+      /* ── the twelve-band picture the per-song EQ is built from ──────────
+       * The six-band bank above is a profile's tone control: one shelf and five
+       * peaks, dosed by six "how bad is it" numbers. This is the opposite kind
+       * of measurement — the actual shape of *this* recording, band by band,
+       * with the song's own 1 kHz region as the pivot. Everything the per-song
+       * correction does is derived from it, and it is also what the diagnosis
+       * shows the user: "at 200 Hz this file is 4.1 dB above its own trend". */
+      const bandDb = EQ_CENTERS.map((f) => bandMedian(spec, f / 1.26, f * 1.26));
+      m.bandDb = bandDb;
+      m.bandSnrDb = bandDb.map((v, i) => v - (na.noiseBandDb && isFinite(na.noiseBandDb[i]) ? na.noiseBandDb[i] : -120));
+      /**
+       * Sibilance: the 5–9 kHz band against the trend its own 2.4–4 kHz region
+       * predicts (−3 dB/oct). A recording whose "s" and cymbals sit 6 dB above
+       * that trend has a de-esser problem; one whose top end is merely bright
+       * does not (that is a tilt, and the tilt term handles it).
+       */
+      m.sibExcessDb = bandMedian(spec, 5000, 9200) - (bandMedian(spec, 2400, 4000) - 3 * Math.log2(7100 / 3200));
+      /**
+       * Where the hiss begins: the lowest band in which the *music* is less
+       * than 14 dB above the measured noise floor. The de-hisser's crossover
+       * follows it, so a cassette whose hiss starts at 2.5 kHz is split at
+       * 2.5 kHz and a bright digital file with a 7 kHz floor is not split at
+       * 3.2 kHz by default and then asked to subtract a problem it cannot see.
+       */
+      let hissFrom = 0;
+      for (let i = 0; i < EQ_CENTERS.length; i++) {
+        if (EQ_CENTERS[i] < 1800) continue;
+        if (isFinite(m.bandSnrDb[i]) && m.bandSnrDb[i] < 14) { hissFrom = EQ_CENTERS[i]; break; }
+      }
+      m.hissStartHz = clamp(hissFrom || 3200, 2200, 8000);
+      m.noiseSpreadDb = m.noiseSpreadDb || 0;
+      m.dcOffsetDb = m.dc && isFinite(m.dc.db) ? m.dc.db : -120;
 
       // vinyl-style surface noise: crackle bursts + hum + analogue noise floor
       m.vinylAmount = clamp(0.55 * m.crackleIndex + 0.25 * clamp(m.humScore, 0, 1)
@@ -1708,6 +1972,7 @@
     stepRange, scanStep, runSteps, runStepsAsync,
     dynamicRange, clipRatio, humStep, resonanceScan, hfRaggedness, stereoCorrelation, measure, measureAsync,
     noiseAnalysis, crackleDetect,
+    stereoBandsStep, ispStep, EQ_CENTERS,
     detectSampleRate, encodeWav, decodeWav, peaks, rmsEnvelope, Biquad,
     applyBiquad, biquadHP, qualityScore,
   };

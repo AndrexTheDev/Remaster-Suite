@@ -36,6 +36,14 @@
 
 const TWO_PI = 2 * Math.PI;
 
+/* The twelve centres of the per-song corrective EQ, in hertz. They are the same
+ * numbers assets/js/dsp-utils.js measures the bands at (EQ_CENTERS) — the curve
+ * is computed on exactly the frequencies it is applied to — and they are
+ * log-spaced ≈0.68 octave apart at Q 1.4, so neighbouring bands overlap into a
+ * smooth curve instead of twelve separate bumps. */
+const CEQ_F = [50, 80, 125, 200, 320, 500, 800, 1250, 2000, 3200, 5000, 8000];
+const CEQ_Q = 1.4;
+
 /* Output ceiling: the final safety stage saturates at 0.9975 (−0.02 dBFS), so a
  * 16-bit export can never pin a sample at the rail, whatever the input does. */
 const KNEE = 0.94;
@@ -525,6 +533,64 @@ class SubSynth {
 }
 
 /* -------------------------------------------------------------------------- */
+/* De-esser: dynamic sibilance control (see the class below)                    */
+/* -------------------------------------------------------------------------- */
+
+const DEESS_DECIM = 4;
+
+/**
+ * Sibilance is not a level, it is a *ratio*: the 5–9.5 kHz band sitting well
+ * above the level that band has been holding. That is why this stage is keyed
+ * on the fast/slow ratio of its own band and not on an absolute threshold — a
+ * quiet "s" and a loud "s" are the same problem, and the stage treats them
+ * alike, whatever the recording's level is.
+ *
+ * The repair is subtractive: the band is measured, a gain is computed for it,
+ * and that much of the band is taken out of the signal. Nothing outside
+ * 5–9.5 kHz is touched, so a de-essed vocal keeps its body and only loses the
+ * spit. The amount comes from the measurement (how sibilant this song actually
+ * is); the gate comes from the ratio, so a song with no sibilance pays nothing.
+ */
+class DeEsser {
+  constructor(sr) {
+    this.hp1 = new Biquad(); this.hp1.setHighpass(sr, 5200, 0.707);
+    this.hp2 = new Biquad(); this.hp2.setHighpass(sr, 5200, 0.707);
+    this.lp1 = new Biquad(); this.lp1.setLowpass(sr, 9500, 0.707);
+    this.lp2 = new Biquad(); this.lp2.setLowpass(sr, 9500, 0.707);
+    this.fast = new EnvFollower(sr, 0.002, 0.030, DEESS_DECIM);
+    this.slow = new EnvFollower(sr, 0.060, 0.250, DEESS_DECIM);
+    this.ramp = new Ramp(DEESS_DECIM, 1);
+    this.sense = 1.35;              // how far above its own average a burst counts
+  }
+  reset() {
+    this.hp1.reset(); this.hp2.reset(); this.lp1.reset(); this.lp2.reset();
+    this.fast.v = 0; this.slow.v = 0;
+    this.ramp.reset(1);
+  }
+  tick(x, amount) {
+    if (amount <= 0.0001) {
+      if (this.ramp.t !== 1) this.ramp.reset(1);
+      return x;
+    }
+    const hf = this.lp2.process(this.lp1.process(this.hp2.process(this.hp1.process(x))));
+    const a = hf < 0 ? -hf : hf;
+    const e = this.fast.tick(a);
+    const s = this.slow.tick(a);
+    let g = 1;
+    if (s > 1e-7 && e > s * this.sense) {
+      // up to 12 dB of excess maps to the full correction; the amount decides
+      // how much of it is actually taken
+      const over = e / (s * this.sense);
+      const cut = clamp(Math.log(over) / Math.log(4), 0, 1);
+      g = 1 - amount * cut * 0.62;
+    }
+    this.ramp.set(g);
+    const gg = this.ramp.tick();
+    return x - hf * (1 - gg);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
 /* HF de-hiss: linkwitz-riley 4th order split + downward expander              */
 /* -------------------------------------------------------------------------- */
 
@@ -537,6 +603,8 @@ const HISS_DECIM = 8;
  */
 const HISS_MID_HZ = 1450;
 const HISS_MID_Q = 0.63;
+/** Lower edge of the band the analyser measures as "the top end" (4–16 kHz). */
+const HISS_KEY_HZ = 4000;
 /** Width of each mains notch, in hertz (see HumNotch.prepare). */
 const HUM_BW_HZ = 3;
 /** dB of notch at 100 % dose — the unit a measured mains excess is expressed in. */
@@ -544,6 +612,8 @@ const HUM_DB_PER_DOSE = 42;
 
 class DeHiss {
   constructor(sr, xover) {
+    this.sr = sr;
+    this.xover = xover || 3200;
     // Linkwitz-Riley split: the low band is what is left of the signal, the
     // high band is both the gate key and what the gate attenuates. The split is
     // not free — LR4 low + high is flat in magnitude but not in phase, so
@@ -555,6 +625,14 @@ class DeHiss {
     this.lp2 = new Biquad(); this.lp2.setLowpass(sr, xover, 0.7071);
     this.hp1 = new Biquad(); this.hp1.setHighpass(sr, xover, 0.7071);
     this.hp2 = new Biquad(); this.hp2.setHighpass(sr, xover, 0.7071);
+    // The *key* is a separate, fixed band: the analyser measures the hiss tilt
+    // as 4–16 kHz against a 1.45 kHz band reference, and the key here has to see
+    // exactly those two bands for the measured number to mean anything. The
+    // repair branch above is where the gate acts, and that one moves with the
+    // measurement (setXover) — where to subtract is a per-file decision, what
+    // "the top end is 7 dB above the music" means is not.
+    this.k1 = new Biquad(); this.k1.setHighpass(sr, HISS_KEY_HZ, 0.707);
+    this.k2 = new Biquad(); this.k2.setHighpass(sr, HISS_KEY_HZ, 0.707);
     // The gate is keyed on the *tilt* of the top end, not on its level: the
     // 700 Hz–3 kHz band rides with the programme, the 4–16 kHz band rides with it
     // too as long as it holds music — and stops riding when what is up there is
@@ -574,9 +652,29 @@ class DeHiss {
   }
   reset() {
     this.lp1.reset(); this.lp2.reset(); this.hp1.reset(); this.hp2.reset();
+    this.k1.reset(); this.k2.reset();
     this.mid.reset();
     this.rmsHf.reset(); this.rmsMid.reset();
     this.gate.reset(1);
+  }
+  /**
+   * Move the split. The crossover is a *measurement*: a cassette's hiss starts
+   * around 2.5 kHz (and so does the band that has to be sacrificed to remove
+   * it), while a bright digital file with a 6 kHz floor needs the split above
+   * that floor. Filter coefficients are only recomputed when it moves.
+   */
+  setXover(f) {
+    // The measured hiss start may be anywhere up to 8 kHz, but the *repair* may
+    // only extend down from the band the analyser measures the tilt in (4 kHz+,
+    // see HISS_KEY_HZ): the gate is keyed on that band and the measured amount
+    // belongs to it, so a split above it would subtract a number that was never
+    // measured. A split below it is a genuine per-file win — tape hiss that
+    // starts at 2.2 kHz is repaired from 2.2 kHz up instead of from 3.2 kHz.
+    const x = clamp(f || 3200, 2000, HISS_KEY_HZ);
+    if (Math.abs(x - this.xover) < 1) return;
+    this.xover = x;
+    this.lp1.setLowpass(this.sr, x, 0.7071); this.lp2.setLowpass(this.sr, x, 0.7071);
+    this.hp1.setHighpass(this.sr, x, 0.7071); this.hp2.setHighpass(this.sr, x, 0.7071);
   }
   setNoise(hfNoiseLin) {
     // The absolute reference: where the HF band sits, as an RMS of the same band
@@ -600,7 +698,7 @@ class DeHiss {
     if (strength <= 0.0001) { this.gate.set(1); this.gate.tick(); return x; }
     const low = this.lp2.process(this.lp1.process(x));
     const high = this.hp2.process(this.hp1.process(x));
-    const e = this.rmsHf.tick(high);
+    const e = this.rmsHf.tick(this.k2.process(this.k1.process(x)));
     const em2 = this.rmsMid.tick(this.mid.process(x));
     this.tickCount++;
     if (this.tickCount % HISS_DECIM === 0) {
@@ -693,11 +791,29 @@ const GLUE_DECIM = 4;
 
 class GlueComp {
   constructor(sr) {
-    this.env = new EnvFollower(sr, 0.012, 0.180, GLUE_DECIM);
+    this.sr = sr;
+    this.atk = 0.012;
+    this.rel = 0.180;
+    this.env = new EnvFollower(sr, this.atk, this.rel, GLUE_DECIM);
     this.gain = new Ramp(GLUE_DECIM, 1);
     this.thr = 0.079;          // ≈ −22 dBFS
   }
   reset() { this.env.v = 0; this.gain.reset(1); }
+  /**
+   * Per-song timing. A drum-driven recording needs the compressor to let the
+   * hit through (a slower attack) and to be back at unity before the next one
+   * (a shorter release); a sustained recording wants the opposite: grab a
+   * little and let go slowly. That is one number from the measurement —
+   * `glueTime` — telling the same compressor what this song is.
+   */
+  setTime(t) {
+    const atk = 0.005 + 0.030 * t;
+    const rel = 0.130 + 0.300 * t;
+    if (Math.abs(atk - this.atk) < 1e-4 && Math.abs(rel - this.rel) < 1e-3) return;
+    this.atk = atk;
+    this.rel = rel;
+    this.env.set(this.sr, atk, rel);
+  }
   /** soft 2:1 glue with automatic makeup — linear domain, one sqrt */
   tick(x, amount) {
     if (amount <= 0.0001) return x;
@@ -779,6 +895,14 @@ class ChannelChain {
     // peak by 1.4 dB, at 8 Hz by 1.2 dB, at 2 Hz by 0.05 dB.
     this.dc = new DCBlocker(sr, 2);
 
+    // Sub-sonic guard: a turntable rumble, a desk, a building — measured per
+    // song (18–35 Hz above the bass band in the quiet passages) and filtered
+    // only when it was measured. 12 dB/octave at the corner the measurement
+    // asked for, bypassed completely at 0.
+    this.infra = new Biquad();
+    this.infraHz = 0;
+    this.infraTouched = false;
+
     // Mains hum and the measurement-driven resonance notches. Both are repairs:
     // they exist because something was *measured*, and both are bypassed
     // completely (branch, no filtering) when their amount is zero, so a clean
@@ -798,6 +922,13 @@ class ChannelChain {
     ];
     this.eq = eqDefs.map((d) => ({ type: d[0], f: d[1], q: d[2], last: 1e9, bq: new Biquad() }));
 
+    // The per-song corrective EQ: twelve peaking bands on the measured
+    // centres, each with its own gain from the analysis. It sits *after* the
+    // profile's six bands and its curve is computed net of what those bands
+    // already do (see presets.js), so the two never correct the same problem
+    // twice — what is left is what this particular song is missing.
+    this.ceq = CEQ_F.map((f, i) => ({ f, i, last: 1e9, bq: new Biquad() }));
+
     // dynamic de-resonator probing bands (room honk / boxiness / harshness)
     // overlapping bands (≈0.8 octave apart) so no room resonance sneaks
     // between two probes; the low mids get slightly tighter filters
@@ -816,6 +947,7 @@ class ChannelChain {
     this.air = new AirSynth(sr);
     this.sub = new SubSynth(sr);
     this.hiss = new DeHiss(sr, 3200);
+    this.deess = new DeEsser(sr);
     this.click = new DeClicker(sr);
     this.glue = new GlueComp(sr);
 
@@ -867,9 +999,12 @@ class ChannelChain {
 
   reset() {
     this.dc.reset();
+    this.infra.reset();
     this.humNotch.reset();
     this.box[0].reset(); this.box[1].reset();
     for (const e of this.eq) { e.bq.reset(); e.last = 1e9; }
+    for (const e of this.ceq) { e.bq.reset(); e.last = 1e9; }
+    this.deess.reset();
     for (const r of this.reso) r.reset();
     for (const e of this.exc) e.reset();
     this.air.reset(); this.sub.reset(); this.hiss.reset();
@@ -897,6 +1032,30 @@ class ChannelChain {
         else bq.setPeak(this.sr, band.f, band.q, g);
       }
     }
+    // the per-song corrective EQ
+    for (let i = 0; i < this.ceq.length; i++) {
+      const band = this.ceq[i];
+      const g = p.ceq[i];
+      if (g !== band.last) {
+        band.last = g;
+        // coefficients only where there is something to do: a band at 0 dB is
+        // skipped entirely in tick() and costs one comparison
+        if (g < -0.01 || g > 0.01) band.bq.setPeak(this.sr, band.f, CEQ_Q, g);
+      }
+    }
+    // sub-sonic corner (0 = no filter)
+    const ih = clamp(p.infraHP, 0, 80);
+    if (ih > 4) {
+      if (!this.infraTouched || Math.abs(ih - this.infraHz) > 0.5) {
+        this.infraHz = ih;
+        this.infraTouched = true;
+        this.infra.setHighpass(this.sr, ih, 0.707);
+      }
+    } else {
+      this.infraTouched = false;
+      this.infraHz = 0;
+    }
+
     // mains hum: notch depth from the measurement, frequency from the measurement
     if (p.hum !== this.humDepth || p.hum2 !== this.humDepth2 || p.hum3 !== this.humDepth3
       || p.humHz !== this.humHz) {
@@ -928,6 +1087,9 @@ class ChannelChain {
     this.sub.setNoise(p.noiseLin);
     this.hiss.setNoise(p.hfNoiseLin);
     this.hiss.setTilt(p.hissTilt, p.hissMax);
+    // the de-hisser splits where *this* file's noise starts
+    this.hiss.setXover(p.hissF);
+    this.glue.setTime(p.glueTime);
     this.lowShelf.setLowShelf(this.sr, 700, 0.60, -p.tilt * 5.0);
     this.highShelf.setHighShelf(this.sr, 3200, 0.60, p.tilt * 5.0);
     this.warm = p.warmth;
@@ -937,6 +1099,7 @@ class ChannelChain {
   tick(x) {
     const p = this.p;
     let y = this.dc.process(x);
+    if (this.infraTouched) y = this.infra.process(y);
 
     // 0 ── presence follower (drives every synthesis stage)
     const ax = x < 0 ? -x : x;
@@ -952,6 +1115,14 @@ class ChannelChain {
     // 1 ── static tone shaping
     const eq = this.eq;
     for (let i = 0; i < eq.length; i++) y = eq[i].bq.process(y);
+
+    // 1a ── the per-song corrective EQ (measured bands, net of the profile)
+    const ceq = this.ceq;
+    for (let i = 0; i < ceq.length; i++) {
+      const band = ceq[i];
+      const g = band.last;
+      if (g < -0.01 || g > 0.01) y = band.bq.process(y);
+    }
 
     // 1b ── measured resonance notches (boxiness / honk), before the synthesizers
     if (p.boxG1 < -0.05) y = this.box[0].process(y);
@@ -970,6 +1141,12 @@ class ChannelChain {
     // 3 ── noise repair comes FIRST: never synthesize harmonics out of hiss
     y = this.hiss.tick(y, p.dehiss);
     y = this.click.tick(y, p.declick);
+
+    // 3b ── sibilance control. It sits after the noise repair and before the
+    // synthesisers for the same reason the de-hisser does: the exciter and the
+    // air synthesiser build their output *out of* this band, so a band that is
+    // about to be regenerated must not be re-synthesised from sibilant noise.
+    y = this.deess.tick(y, p.deess);
 
     // 4 ── harmonic exciter (level-proportional, noise- and presence-gated)
     // The saturation drive is deliberately independent of the amount: the
@@ -1067,6 +1244,29 @@ class RemasterProcessor extends AudioWorkletProcessor {
       k('hissTilt', 0, -40, 40),        // measured HF − MID tilt of the programme (dB)
       k('hissMax', 0, 0, 24),           // measured tilt step = the top end that is noise
       k('autoLevel', 1),
+      // ── per-song stages ──────────────────────────────────────────────────
+      // Everything below is set from *this file's* measurements, not from a
+      // profile: the corrective EQ is the shape this song is missing, the
+      // sub-sonic corner is the rumble it actually has, the de-esser is the
+      // sibilance it actually has, and the de-hisser's crossover is where its
+      // noise actually starts.
+      k('infraHP', 0, 0, 80),           // sub-sonic high-pass corner in Hz (0 = off)
+      k('deess', 0),                    // dynamic 5–9.5 kHz sibilance control
+      k('bassMono', 0),                 // mono-maker below 120 Hz (out-of-phase bass)
+      k('glueTime', 0.5, 0, 1),         // 0 = fast/percussive-safe · 1 = slow/smooth
+      k('hissF', 3200, 2000, 8000),     // de-hisser crossover, measured per file
+      k('eq0', 0, -9, 9),               // per-song corrective EQ · 50 Hz
+      k('eq1', 0, -9, 9),               // · 80 Hz
+      k('eq2', 0, -9, 9),               // · 125 Hz
+      k('eq3', 0, -9, 9),               // · 200 Hz
+      k('eq4', 0, -9, 9),               // · 320 Hz
+      k('eq5', 0, -9, 9),               // · 500 Hz
+      k('eq6', 0, -9, 9),               // · 800 Hz
+      k('eq7', 0, -9, 9),               // · 1250 Hz
+      k('eq8', 0, -9, 9),               // · 2000 Hz
+      k('eq9', 0, -9, 9),               // · 3200 Hz
+      k('eq10', 0, -9, 9),              // · 5000 Hz
+      k('eq11', 0, -9, 9),              // · 8000 Hz
     ];
   }
 
@@ -1081,11 +1281,18 @@ class RemasterProcessor extends AudioWorkletProcessor {
       hum: 0, hum2: 0, hum3: 0, humHz: 50, boxF1: 200, boxQ1: 3, boxG1: 0, boxF2: 400, boxQ2: 3, boxG2: 0,
       width: 0, airRoom: 0.5, airF: 6000, hissTilt: 0, hissMax: 0,
       bands: [0, 0, 0, 0, 0, 0], noiseLin: 1e-4, hfNoiseLin: 1e-5, autoLevel: 1,
+      infraHP: 0, deess: 0, bassMono: 0, glueTime: 0.5, hissF: 3200,
+      ceq: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     };
     // stereo width restoration: M/S above 200 Hz, so the bass stays exactly
     // where it was (and a mono file has nothing to widen in the first place)
     this.sideHP = new Biquad();
     this.sideHP.setHighpass(this.sr, 200, 0.707);
+    // the mono-maker's low-pass: the side signal below 120 Hz is what an
+    // out-of-phase bottom lives in, and folding it into the centre is the
+    // repair (a mono bass cannot cancel itself in a mono playback)
+    this.sideLP = new Biquad();
+    this.sideLP.setLowpass(this.sr, 120, 0.707);
     this.powerSm = 0;
     this.forceBypass = !!opts.bypass;
     this._ensureChannels(opts.channels || 2);
@@ -1094,6 +1301,7 @@ class RemasterProcessor extends AudioWorkletProcessor {
       if (d.type === 'reset') {
         for (const c of this.chains) c.reset();
         this.sideHP.reset();
+        this.sideLP.reset();
         this.powerSm = 0;
       }
     };
@@ -1137,6 +1345,12 @@ class RemasterProcessor extends AudioWorkletProcessor {
     pr.bands[3] = g('band3', 0);
     pr.bands[4] = g('band4', 0);
     pr.bands[5] = g('band5', 0);
+    pr.infraHP = g('infraHP', 0);
+    pr.deess = g('deess', 0);
+    pr.bassMono = g('bassMono', 0);
+    pr.glueTime = g('glueTime', 0.5);
+    pr.hissF = g('hissF', 3200);
+    for (let b = 0; b < 12; b++) pr.ceq[b] = g('eq' + b, 0);
     pr.noiseLin = Math.pow(10, g('noiseFloor', -70) / 20);
     pr.hfNoiseLin = Math.pow(10, g('hissFloor', -80) / 20);
   }
@@ -1299,13 +1513,22 @@ class RemasterProcessor extends AudioWorkletProcessor {
     // low end cannot develop the phase problems wide-stereo bass always has.
     // A mono file has no side signal, so it stays exactly mono instead of
     // getting a fake image.
-    if (nCh >= 2 && pr.width > 0.0001 && !bypassed) {
+    const widen = pr.width > 0.0001;
+    const monoBass = pr.bassMono > 0.0001;
+    if (nCh >= 2 && !bypassed && (widen || monoBass)) {
       const L = output[0], R = output[1];
       for (let i = 0; i < frames; i++) {
         const l = L[i], r = R[i];
         const m = (l + r) * 0.5;
-        const sd = (l - r) * 0.5;
-        const add = this.sideHP.process(sd) * pr.width;
+        let sd = (l - r) * 0.5;
+        // ── out-of-phase bass: an inverted bass channel (a mis-wired cartridge,
+        // a polarity-flipped bass mic) is *correlated* everywhere except at the
+        // bottom, where it cancels — which is why the measurement looks at the
+        // low band separately. Folding the low side signal into the centre is
+        // the repair; nothing above 120 Hz is touched, and a recording whose
+        // bass is already centred pays nothing.
+        if (monoBass) sd -= this.sideLP.process(sd) * clamp(pr.bassMono, 0, 1);
+        const add = widen ? this.sideHP.process(sd) * pr.width : 0;
         let lo = m + sd + add, ro = m - sd - add;
         // the widening happens after the per-channel soft-clip guard, so the
         // same knee is applied here — a 16-bit export still cannot pin a sample

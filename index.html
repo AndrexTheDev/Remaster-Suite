@@ -270,6 +270,16 @@
 
     <ul class="chips" data-slot="chips"></ul>
 
+    <details class="analysis" data-slot="analysis" hidden>
+      <summary class="analysis-head">
+        <span class="analysis-title" data-i18n="card.analysis">Detaillierte Analyse</span>
+        <span class="analysis-count" data-slot="analysisCount"></span>
+      </summary>
+      <p class="analysis-lead" data-slot="analysisLead"></p>
+      <ul class="findings" data-slot="findings"></ul>
+      <p class="analysis-foot" data-i18n="card.analysisFoot">Jeder Wert ist an dieser Datei gemessen; die Behandlung folgt dem Messwert, nicht einem Profil. Bei 0 % bleibt die Kette bit-transparent.</p>
+    </details>
+
     <div class="wave-shell">
       <canvas class="wave" data-slot="wave" width="1200" height="240" role="img" data-i18n-aria="card.waveAria" aria-label="Wellenform-Vergleich"></canvas>
       <div class="wave-legend">

@@ -53,6 +53,12 @@ const DEFAULT_PARAMS = {
   declick: 0, reso: 0, glue: 0, warmth: 0, tilt: 0,
   band0: 0, band1: 0, band2: 0, band3: 0, band4: 0, band5: 0,
   noiseFloor: -70, autoLevel: 1,
+  // the per-song stages (see remaster-processor.js): a high-pass corner, the
+  // sibilance control, the mono-maker, the glue timing, the de-hisser split and
+  // the twelve bands of the corrective EQ
+  infraHP: 0, deess: 0, bassMono: 0, glueTime: 0.5, hissF: 3200,
+  eq0: 0, eq1: 0, eq2: 0, eq3: 0, eq4: 0, eq5: 0,
+  eq6: 0, eq7: 0, eq8: 0, eq9: 0, eq10: 0, eq11: 0,
 };
 
 /**

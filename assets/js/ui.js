@@ -114,6 +114,59 @@
     });
   }
 
+  /* ------------------------------------------------- detailed analysis list */
+
+  /**
+   * A measured number, written the way a person reads it: locale decimal
+   * separator, a sensible number of digits for the unit, and the sign that
+   * belongs to a level in dB.
+   */
+  function formatValue(value, lang) {
+    if (!value || !isFinite(value.n)) return '—';
+    const de = lang === 'de';
+    const num = (x, digits) => {
+      const v = Math.abs(x) < 0.005 && x !== 0 ? 0 : x;
+      const t2 = v.toFixed(digits === undefined ? 1 : digits);
+      return de ? t2.replace('.', ',') : t2;
+    };
+    switch (value.unit) {
+      case 'db': return (value.n > 0 ? '+' : '−') + num(Math.abs(value.n), 1) + ' dB';
+      case 'hz':
+        return value.n >= 1000
+          ? num(value.n / 1000, value.n >= 10000 ? 1 : 1) + ' kHz'
+          : num(value.n, 0) + ' Hz';
+      case 'pct': return num(value.n * 100, value.n * 100 < 10 ? 1 : 0) + (de ? ' %' : ' %');
+      case 'ms': return num(value.n, 0) + ' ms';
+      case 's': return num(value.n, value.n < 10 ? 1 : 0) + ' s';
+      case 'ratio': return num(value.n, 2);
+      default: return num(value.n, 2);
+    }
+  }
+
+  /**
+   * The findings list of one file card. Built as DOM nodes — never as HTML
+   * strings — so a measurement can never become markup, whatever a decoder
+   * hands us.
+   */
+  function findingsList(recipe, lang) {
+    const frag = doc.createDocumentFragment();
+    for (const f of recipe.findings) {
+      const cls = f.sev >= 0.5 ? 'is-severe' : f.sev >= 0.2 ? 'is-mild' : 'is-clear';
+      const li = el('li', { class: 'finding ' + cls });
+      li.appendChild(el('span', { class: 'finding-dot', 'aria-hidden': 'true' }));
+      li.appendChild(el('span', { class: 'finding-label', text: t('find.' + f.key) }));
+      if (f.value) li.appendChild(el('span', { class: 'finding-value', text: formatValue(f.value, lang) }));
+      if (f.act) {
+        const text = f.act.value
+          ? t('find.act.' + f.act.key, { v: formatValue(f.act.value, lang) })
+          : t('find.act.' + f.act.key);
+        li.appendChild(el('span', { class: 'finding-act', text }));
+      }
+      frag.appendChild(li);
+    }
+    return frag;
+  }
+
   /* ---------------------------------------------------------------- waveform */
 
   /**
@@ -352,6 +405,7 @@
   }
 
   const API = {
+    formatValue, findingsList,
     $, $$, el, paintRange, scoreColor, copyText, toast, openDialog, closeDialog, bindDialogs,
     Waveform, formatTime, chipsFrom, diagnosisText,
   };
