@@ -480,6 +480,82 @@ section('audit · bilingual coverage');
 
 /* ══════════════════════════════════════════ 5 · preset & parameter integrity ══ */
 
+/* ═══════════════════════════════════════════ 5b · mehr als ein Problem ══ */
+
+section('audit · several problems at once');
+{
+  const SR = 48000;
+  const P = H.loadProcessor(SR);
+  const crest = (ch) => DSP.crackleDetect(ch, SR).crestP98Db;
+
+  /* The record that is most of a private archive: an old vinyl transfer that
+   * was pushed through a 128 kbit/s encoder on its way to a hard drive. Three
+   * problems in one file — crackle, transfer noise, a codec cliff — so a
+   * diagnosis that names one of them can only serve a third of the file. */
+  const combo = H.comboSim(DSP, SR, 12);
+  const m = DSP.measure([combo], SR);
+  const d = Presets.classify(m);
+  const ids = d.chain.map((c) => c.id);
+  ok(ids.length >= 2 && ids.includes('vinyl') && ids.includes('lowbitrate'),
+    'a vinyl rip that went through a 128 kbit/s encoder is both problems, not one', ids.join(' + '));
+  ok(d.scores.lowbitrate > 0.55,
+    'a *measured* codec cliff counts in full however noisy the transfer around it is',
+    d.scores.lowbitrate.toFixed(2));
+  // …and the tone is the mix of the two curves, not the winner's
+  const mix = Presets.mixAnchors(d.id, d);
+  const win = Presets.PRESETS[d.id].anchors;
+  const second = Presets.PRESETS[ids.filter((k) => k !== d.id)[0] || 'vinyl'].anchors;
+  const lo = Math.min(win.bands[5], second.bands[5]), hi = Math.max(win.bands[5], second.bands[5]);
+  ok(mix.bands[5] > lo + 0.1 && mix.bands[5] < hi - 0.1,
+    'the 7 kHz ceiling is pulled towards the second problem, not the winner of the vote',
+    mix.bands[5].toFixed(2) + ' dB between ' + lo.toFixed(2) + ' and ' + hi.toFixed(2));
+
+  /* A permission is not a dose. Cassette tape with a little dirt on it: the vote
+   * goes to cassette (its hiss is the bigger defect), but the clicks are still
+   * there, and the cassette profile's de-click ceiling is 0.2 — a fifth of what
+   * the crackle needs. The chain hands the file the budget its evidence earned. */
+  const clicks = H.addCrackle(H.cassetteSim(DSP, SR, 12), 1, 0.75, 91);
+  const mc = DSP.measure([clicks], SR);
+  const dc = Presets.classify(mc);
+  const pc = Presets.buildParams('auto', mc, 0.7);
+  ok(dc.id === 'cassette' && dc.chain.some((c) => c.id === 'vinyl'),
+    'a hissy cassette with light crackle is diagnosed as both', dc.chain.map((c) => c.id).join(' + '));
+  ok(pc.declick > Presets.PRESETS.cassette.anchors.declick * 2,
+    '…and its de-click budget is no longer the cassette ceiling',
+    pc.declick.toFixed(2) + ' vs ' + Presets.PRESETS.cassette.anchors.declick);
+  const base = Object.assign({}, H.DEFAULT_PARAMS, pc);
+  const c0 = crest([clicks]);
+  const chainRun = crest(H.render(P, [clicks], base));
+  const capRun = crest(H.render(P, [clicks], Object.assign({}, base, { declick: Presets.PRESETS.cassette.anchors.declick })));
+  const noneRun = crest(H.render(P, [clicks], Object.assign({}, base, { declick: 0 })));
+  ok(chainRun < capRun - 2.5,
+    'the chain tames the clicks where the cassette ceiling cannot (even applied in full)',
+    'crest ' + c0.toFixed(1) + ' → ' + chainRun.toFixed(1) + ' dB with the chain, '
+    + capRun.toFixed(1) + ' dB with the single profile, ' + noneRun.toFixed(1) + ' dB with none');
+
+  /* The other direction, and the more important one: a file with one problem
+   * must stay a file with one problem. The hints every recording carries are
+   * blended into the tone only as far as they are worth. */
+  const solo = H.cassetteSim(DSP, SR, 12);
+  const ms = DSP.measure([solo], SR);
+  const ds = Presets.classify(ms);
+  ok(ds.chain.length === 1, 'a hissy cassette with nothing else in it stays a one-line diagnosis',
+    ds.chain.map((c) => c.id).join(' + '));
+  const soloOnly = Presets.adapt(Presets.PRESETS[ds.id].anchors, ms, ds, { manual: false });
+  const soloMix = Presets.adapt(Presets.mixAnchors(ds.id, ds), ms, ds, { manual: false });
+  const drift = Math.max(...soloOnly.bands.map((v, i) => Math.abs(v - soloMix.bands[i])));
+  ok(drift < 0.25, '…and the profiles it only hints at do not move its tone', drift.toFixed(2) + ' dB of drift');
+  ok(Math.abs(soloOnly.dehiss - soloMix.dehiss) < 0.02 && Math.abs(soloOnly.declick - soloMix.declick) < 0.02,
+    '…nor its repair budgets', soloMix.dehiss.toFixed(3) + ' / ' + soloMix.declick.toFixed(3));
+
+  // a hand-picked profile is a decision: it is used as it is, never blended
+  const manual = Presets.buildParams('vinyl', m, 0.7);
+  const manualWant = Presets.adapt(Presets.PRESETS.vinyl.anchors, m, d, { manual: true });
+  ok(Math.abs(manual.band4 - manualWant.bands[4] * Math.pow(0.7, 0.85)) < 0.05,
+    'a hand-picked profile is used exactly as it is (no blending)',
+    manual.band4.toFixed(2) + ' dB');
+}
+
 section('audit · presets and parameters');
 {
   const anchorKeys = ['bands', 'reso', 'sub', 'subRatio', 'exciter', 'air', 'dehiss', 'declick', 'glue', 'warmth', 'tilt'];

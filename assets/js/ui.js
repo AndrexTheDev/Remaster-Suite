@@ -397,7 +397,14 @@
       .filter((k) => k !== 'healthy')
       .map((k) => t('issue.' + k))
       .join(', ');
-    let s = t('diag.lead', { kind: kind });
+    // Several problems at once is the normal case, not the exception — a 1970s
+    // record that was ripped from vinyl and then compressed to 128 kbit/s is
+    // three problems, and the sentence says so instead of naming whichever one
+    // won the vote.
+    const chain = (diag.chain || []).filter((k) => k !== 'general');
+    let s = chain.length > 1
+      ? t('diag.leadMix', { kinds: chain.slice(0, 2).map((k) => t('kind.short.' + k)).join(' + ') })
+      : t('diag.lead', { kind: kind });
     if (issues) s += t('diag.issues', { issues: issues });
     else s += t('diag.clean');
     if (diag.confidence) s += t('diag.confident', { p: Math.round(Math.min(1, diag.confidence) * 100) });

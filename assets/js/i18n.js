@@ -128,6 +128,12 @@
       'kind.general': 'Aufnahme, die eine sanfte Politur braucht',
       'kind.healthy': 'gut klingende Aufnahme',
       'diag.lead': 'Klingt nach: <strong>{kind}</strong>.',
+      'diag.leadMix': 'Klingt nach <strong>mehreren Problemen zugleich</strong>: {kinds}. Jedes wird einzeln dosiert.',
+      'kind.short.vinyl': 'Vinyl-Rip',
+      'kind.short.cassette': 'Kassetten-Aufnahme',
+      'kind.short.lowbitrate': 'stark komprimierte Datei',
+      'kind.short.garage': 'Alt-Aufnahme (60er/70er)',
+      'kind.short.narrowband': 'bandbegrenzte Aufnahme',
       'diag.issues': ' Auffällig: {issues}.',
       'diag.confident': ' (Erkennung: {p} % sicher)',
       'diag.clean': ' Hier ist nichts zu retten — nur Feinschliff.',
@@ -310,7 +316,7 @@
 <p>Spenden sind freiwillig und kein Kauf — die Adressen stehen im Fußbereich. Danke für jede Rückmeldung.</p>`,
 
       'about.body': `
-<p><strong>Version 1.5</strong> — eine komplette Audio-Restaurations-Kette im Browser. Alles rechnet auf deinem Gerät.</p>
+<p><strong>Version 1.6</strong> — eine komplette Audio-Restaurations-Kette im Browser. Alles rechnet auf deinem Gerät.</p>
 <h3>Die Kette in Reihenfolge</h3>
 <ul>
   <li><strong>Entzerren (EQ):</strong> sechs Bänder, automatisch anhand der Messung dosiert.</li>
@@ -485,6 +491,12 @@
       'kind.general': 'a recording that needs a gentle polish',
       'kind.healthy': 'an already good-sounding recording',
       'diag.lead': 'Sounds like: <strong>{kind}</strong>.',
+      'diag.leadMix': 'Sounds like <strong>several problems at once</strong>: {kinds}. Each one is dosed on its own.',
+      'kind.short.vinyl': 'vinyl rip',
+      'kind.short.cassette': 'cassette tape',
+      'kind.short.lowbitrate': 'heavily compressed file',
+      'kind.short.garage': '60s/70s recording',
+      'kind.short.narrowband': 'band-limited recording',
       'diag.issues': ' Standing out: {issues}.',
       'diag.confident': ' (detection {p} % confident)',
       'diag.clean': ' Nothing to rescue here — just fine-tuning.',
@@ -667,7 +679,7 @@
 <p>Tips are voluntary and not a purchase — the addresses are in the footer. Thanks for any feedback.</p>`,
 
       'about.body': `
-<p><strong>Version 1.5</strong> — a complete audio restoration chain in the browser. Everything computes on your device.</p>
+<p><strong>Version 1.6</strong> — a complete audio restoration chain in the browser. Everything computes on your device.</p>
 <h3>The chain, in order</h3>
 <ul>
   <li><strong>Corrective EQ:</strong> six bands, dosed automatically from the measurement.</li>

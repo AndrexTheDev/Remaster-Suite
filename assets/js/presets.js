@@ -157,6 +157,125 @@
    * @param {object} m metrics from RSDSP.measure()
    * @returns {{id:string, scores:object}} best matching preset + raw scores
    */
+  /**
+   * The score at which a profile is *named* in the diagnosis. Below it the
+   * evidence is real but faint (every vinyl rip is a little boxy, every
+   * cassette a little dull) and naming it would turn the sentence into a
+   * shopping list. It still counts towards the tone — see TONE_MIN.
+   */
+  const CHAIN_MIN = 0.30;
+
+  /**
+   * The score at which a profile starts to colour the *tone* and the taste
+   * amounts. Lower than CHAIN_MIN on purpose: a hint of garage in a vinyl rip is
+   * still a hint, and below this line the number is noise.
+   */
+  const TONE_MIN = 0.12;
+
+  /** The evidence each profile carries, in score order. */
+  function evidence(diag) {
+    const scores = (diag && diag.scores) || {};
+    const list = [];
+    for (const k of Object.keys(scores)) {
+      // a band-limited source (telephone, dictaphone, a 32 kHz master) has no
+      // profile of its own: what it needs is the top end rebuilt, which is the
+      // low-bitrate profile's job — the same equation the label uses.
+      const id = k === 'narrowband' ? 'lowbitrate' : k;
+      const p = PRESETS[id];
+      if (!p || !p.anchors) continue;
+      const found = list.find((e) => e.id === id);
+      if (found) found.w = Math.max(found.w, scores[k]);
+      else list.push({ id, w: scores[k] });
+    }
+    return list.sort((a, b) => b.w - a.w);
+  }
+
+  /**
+   * What this file is, in problems rather than in one label.
+   *
+   * Real files are rarely one thing: the most common record in a private
+   * archive is a 1970s album, ripped from vinyl, then compressed to 128 kbit/s
+   * by whoever put it online — crackle, a dull top end, surface noise and a
+   * codec cliff, all at once. Picking the one profile with the highest score
+   * and throwing the rest away is what makes such a file come out half
+   * restored. The chain is the list of profiles that carry evidence, weighted
+   * by how much evidence each one carries; a file with a single problem gets a
+   * chain of one and behaves exactly as it always did.
+   */
+  function chainOf(scores, winner, confidence) {
+    const list = [];
+    for (const k of Object.keys(scores || {})) {
+      // `narrowband` has no profile of its own — it is the *reason* a
+      // band-limited file wants the low-bitrate profile's top-end rebuild — but
+      // it is what the file is, so the chain (and the sentence) keeps the name.
+      const id = k;
+      if (scores[k] < CHAIN_MIN) continue;
+      const found = list.find((c) => c.id === id);
+      if (found) found.w = Math.max(found.w, scores[k]);
+      else list.push({ id, w: scores[k] });
+    }
+    if (!list.some((c) => c.id === winner || (winner === 'lowbitrate' && c.id === 'narrowband'))) {
+      list.push({ id: winner, w: Math.max(confidence, CHAIN_MIN) });
+    }
+    const sum = list.reduce((n, c) => n + c.w, 0) || 1;
+    for (const c of list) c.w = c.w / sum;
+    list.sort((a, b) => b.w - a.w);
+    return list;
+  }
+
+  /** Stage budgets a profile is allowed to *unlock*: permission, not dose. */
+  const CHAIN_PERMISSION = ['reso', 'sub', 'exciter', 'air', 'dehiss', 'declick'];
+  /** Stages that are taste rather than repair: those are mixed, not unioned. */
+  const CHAIN_TASTE = ['glue', 'warmth', 'tilt'];
+
+  /**
+   * The profile a file actually gets: one profile's anchors when it has one
+   * problem, a *synthesis* of the profiles it has evidence for when it has
+   * several.
+   *
+   * The rule is the one sentence that makes this safe: **a profile is a set of
+   * permissions and one tone curve.** So
+   *   · the tone bands are the weighted mix of the detected profiles' curves
+   *     (a file that is 70 % vinyl and 30 % codec gets 70/30 of the two
+   *     curves, not one of them);
+   *   · a stage's *permission* is the union — the most any detected profile
+   *     allows — because the amount that stage actually applies is still dosed
+   *     from the measurement (`demand`), so a wider permission can only ever
+   *     be used by evidence that is already there. This is what stops a codec
+   *     cliff from being capped by the vinyl ceiling, or a hissy cassette from
+   *     being capped by the vinyl one;
+   *   · taste amounts (glue, warmth, tilt) are mixed like the tone, because
+   *     nobody needs the *sum* of two personalities.
+   */
+  function mixAnchors(id, diag) {
+    const base = PRESETS[id] || PRESETS.auto;
+    if (!base.anchors) return base.anchors;
+    const parts = evidence(diag)
+      .filter((e) => e.w >= TONE_MIN)
+      .map((e) => ({ id: e.id, w: e.w, a: (PRESETS[e.id] || base).anchors }));
+    if (parts.length < 2) return base.anchors;
+    const sum = parts.reduce((n, p) => n + p.w, 0) || 1;
+    const out = {};
+    // the tone is the mix of the curves, weighted by the evidence
+    out.bands = [];
+    for (let i = 0; i < 6; i++) out.bands[i] = parts.reduce((n, p) => n + p.w * (p.a.bands[i] || 0), 0) / sum;
+    // a *permission* is not a dose: the profile that was detected keeps its own
+    // (it is the diagnosis), and every other profile adds its permission in
+    // proportion to how much evidence it carries — no cliff at a threshold, and
+    // no faint reading unlocking a stage the file has not earned.
+    for (const k of CHAIN_PERMISSION) {
+      let v = base.anchors[k] || 0;
+      for (const p of parts) {
+        if (p.id === id) continue;
+        v = Math.max(v, (p.a[k] || 0) * smoothstep(TONE_MIN, 0.40, p.w));
+      }
+      out[k] = v;
+    }
+    for (const k of CHAIN_TASTE) out[k] = parts.reduce((n, p) => n + p.w * (p.a[k] || 0), 0) / sum;
+    out.subRatio = parts.reduce((n, p) => n + p.w * (p.a.subRatio || 0.5), 0) / sum;
+    return out;
+  }
+
   function classify(m) {
     const cut = m.hfCutoff || 0;
     const crackle = clamp(m.crackleIndex, 0, 1);
@@ -189,9 +308,15 @@
       * (crackle > 0.06 ? 1 : 0.42), 0, 1);
     // cassette: steady hiss, flat noise floor, rolled-off top, no crackle
     s.cassette = clamp(0.75 * hiss + 0.25 * flat * (1 - crackle) + 0.20 * dull * (1 - brick), 0, 1);
-    // low bitrate / MP3: hard spectral cliff on otherwise clean material
-    s.lowbitrate = clamp((0.62 * brick + 0.30 * clean * (1 - hiss) + 0.16 * dull * (1 - flat))
-      * (1 - 0.5 * hiss) * (1 - 0.5 * crackle), 0, 1);
+    // low bitrate / MP3: a hard spectral cliff. The cliff itself is *measured*,
+    // so it counts in full; the two circumstantial terms (clean material, a
+    // dull top end) are what the hiss/crackle discounts are for — a noisy file
+    // can look dull for other reasons, but it cannot fake a brick wall. Without
+    // this split, the most common record in a private archive — an old vinyl
+    // rip that was later pushed through a 128 kbit/s encoder — lost its codec
+    // treatment exactly because it was also hissy and crackly.
+    s.lowbitrate = clamp(0.62 * brick
+      + (0.30 * clean * (1 - hiss) + 0.16 * dull * (1 - flat)) * (1 - 0.5 * hiss) * (1 - 0.5 * crackle), 0, 1);
     // 60s/70s garage or one-mic room session: thin, boxy, dull, noisy, analogue —
     // and, because it was cut in a room with whatever wiring was there, often
     // hummy as well
@@ -203,8 +328,10 @@
     let best = 'general', top = 0;
     for (const k of Object.keys(s)) if (s[k] > top) { top = s[k]; best = k; }
     if (best === 'narrowband') best = 'lowbitrate';
+    const id = top < 0.40 ? 'general' : best;
     return {
-      id: top < 0.40 ? 'general' : best,
+      id,
+      chain: chainOf(s, id === 'general' ? 'general' : id, top),
       scores: s, confidence: top,
       crackle, hum, rumble, hiss, clean, dull, brick, thin, mud, harsh,
       analogNoise: hiss, flat,
@@ -817,7 +944,10 @@
     const id = (presetId === 'auto' || !PRESETS[presetId]) ? diag.id : presetId;
     const base = PRESETS[id] || PRESETS.auto;
     const manual = !!(presetId && presetId !== 'auto' && PRESETS[presetId]);
-    const a = adapt(base.anchors, metrics, diag, { manual });
+    // A hand-picked profile is a decision, not a diagnosis: it is used as it
+    // is. The automatic mode synthesises the profile from every problem the
+    // file was found to have (see mixAnchors).
+    const a = adapt(manual ? base.anchors : mixAnchors(id, diag), metrics, diag, { manual });
     const p = clamp(power, 0, 1);
     // Amounts follow a slightly concave curve, so the low range of the slider is
     // useful. `on` is the "switched on at all" factor: it is *exactly* 0 at 0 %,
@@ -1088,7 +1218,12 @@
     if (m.dcOffsetDb !== undefined && m.dcOffsetDb > -46) push('dc', 0.5);
     if (!issues.length) push('healthy', 1);
     issues.sort((a, b) => b.weight - a.weight);
-    return { id: d.id, issues: issues.slice(0, 3).map((i) => i.key), confidence: d.confidence, scores: d.scores };
+    return {
+      id: d.id,
+      chain: (d.chain || [{ id: d.id, w: 1 }]).map((c) => c.id),
+      issues: issues.slice(0, 3).map((i) => i.key),
+      confidence: d.confidence, scores: d.scores,
+    };
   }
 
   /** Resolve "auto" to the profile that was actually detected. */
@@ -1097,7 +1232,7 @@
     return classify(metrics).id;
   }
 
-  const API = { PRESETS, PRESET_ORDER, CEILING, MANUAL, PROFILE_EQ, classify, demand, adapt, resolve, buildParams, diagnose, recipe, eqCurve, curveDb, biquadDb, profileDb };
+  const API = { PRESETS, PRESET_ORDER, CEILING, MANUAL, PROFILE_EQ, CHAIN_MIN, TONE_MIN, classify, chainOf, evidence, mixAnchors, demand, adapt, resolve, buildParams, diagnose, recipe, eqCurve, curveDb, biquadDb, profileDb };
   global.RSPresets = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

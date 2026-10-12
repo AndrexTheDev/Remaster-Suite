@@ -953,7 +953,8 @@
       lines.push('  out      : ' + ((c.result && c.result.name) || '—'));
       lines.push('  profile  : ' + presets + '  (power ' + Math.round(P.power(c) * 100) + ' %)');
       lines.push('  format   : ' + (c.result ? c.result.format.toUpperCase() + ' · ' + c.result.rate + ' Hz' : '—'));
-      lines.push('  detected : ' + (a ? a.diag.id : '?') + (a ? ' [' + a.diag.issues.join(', ') + ']' : ''));
+      lines.push('  detected : ' + (a ? (a.diag.chain && a.diag.chain.length ? a.diag.chain.join('+') : a.diag.id) : '?')
+        + (a ? ' [' + a.diag.issues.join(', ') + ']' : ''));
       lines.push('  quality  : ' + (a ? a.score : '?') + ' / 100 before');
       lines.push('');
     }

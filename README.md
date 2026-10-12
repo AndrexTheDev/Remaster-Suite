@@ -109,7 +109,9 @@ split its de-hisser should use, how percussive it is — and four stages exist o
 for them: the **sub-sonic guard**, the **per-song corrective EQ**, the **de-esser** and the **bass
 mono-maker**. They are computed from that file's own spectrum, and on a recording that measures
 clean they do nothing (on a 93/100 file: sub-sonic guard and de-esser exactly 0, mono-maker 0, no
-corrective band above **0.2 dB**). Each one is visible in the analysis, in one plain sentence.
+corrective band above **0.2 dB**). Each one is visible in the analysis, in one plain sentence — and
+when a file has several problems at once, automatic mode treats all of them (see
+[More than one problem](#more-than-one-problem)).
 
 Nothing in the chain is a fixed curve. The six profile bands above are anchors — ceilings — and
 the **corrective EQ** is the part that is different for every song: twelve bands, log-spaced from
@@ -133,12 +135,41 @@ fake top end:
 
 | Profile | For |
 | --- | --- |
-| **Automatic** | picks the right profile from the measurements |
+| **Automatic** | reads the file and combines whatever it finds (see below) |
 | **Garage / one-mic (60s/70s)** | thin bottom, boxy mids, rolled-off top, room noise |
 | **Vinyl rip** | crackle, surface roar, rumble (hum is repaired whenever it is measured, whichever profile runs) |
 | **Cassette de-hiss** | steady tape hiss, soft high-frequency loss |
 | **Low bitrate brightener** | hard codec edge around 11–16 kHz (the biggest job for the exciter) |
 | **General polish** | nothing dramatic, just better |
+
+### More than one problem
+
+Most real files are not one thing. The classic record in a private archive is a 1970s album, ripped
+from vinyl, then compressed to 128 kbit/s by whoever put it online: crackle, surface noise, a dull
+top end, a codec cliff — four problems, one file. A profile vote that keeps the winner and throws
+the rest away is what leaves such a file half restored.
+
+Automatic mode therefore works on a **chain**, not on a label:
+
+* **The diagnosis names every problem it found**, not just the loudest one — *"Sounds like several
+  problems at once: vinyl rip + heavily compressed file. Standing out: crackle, dull highs, …"* —
+  and the ZIP report carries the whole chain (`detected : lowbitrate+vinyl+cassette`).
+* **The tone is the mix** of the detected profiles' curves, weighted by how much evidence each one
+  carries — 70/30 vinyl/codec gets 70/30 of the two curves.
+* **A repair's permission is the union, the dose is the measurement.** Each profile allows so much
+  de-hissing, de-clicking, sub-bass, air; a file that is both hissy and crackly gets the wider of
+  the two budgets for each stage, and then the *measured* requirement decides how much of it is
+  used. This is what stops a codec cliff from being capped by the vinyl ceiling, or a dirty cassette
+  from being capped by the cassette's (deliberately cautious) de-click budget.
+* **A permission is not a dose, and a hint is not a problem.** A faint reading joins the tone mix as
+  far as it is worth, but only real evidence unlocks a budget — and a file with one problem is still
+  a file with one problem (measured drift on a solo cassette: 0.03 dB of tone and 0.00 of budget).
+
+Measured on the case that started this: cassette tape with a little dirt on it, diagnosed as
+cassette (its hiss is the bigger defect) with clicks on top. The single-profile answer took 0.6 dB
+off the spike crest; the chain takes **3.6 dB** off it, because the file earned a de-click budget of
+0.60 instead of the cassette profile's 0.20 — and on a real 128 kbit/s re-encode of a vinyl rip the
+codec joins the chain at 0.46, which lifts the 7 kHz band correction from 0.0 to 1.5 dB.
 
 ### Batch
 

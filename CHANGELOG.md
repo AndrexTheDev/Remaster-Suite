@@ -4,6 +4,50 @@ All notable changes to the Remaster Suite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are the ones shown in
 *About & credits*.
 
+## [1.6.0] — 2026-10-12
+
+**The combination release.** The suite always dosed every stage from a measurement, but it still
+picked *one* of the six profiles by a vote and threw the other readings away. Most real files are
+not one thing: the classic record in a private archive is a 1970s album, ripped from vinyl, then
+compressed to 128 kbit/s by whoever put it online — crackle, surface noise, transfer hiss and a
+codec cliff in one file, so whichever profile won the vote, the treatments the other problems needed
+were capped by it. Automatic mode now works on a chain instead of a label.
+
+### Added
+
+* **A diagnosis that names every problem, not the loudest one.** `classify` returns a chain of the
+  profiles that carry evidence (from 30 % score upwards), the card's sentence becomes *"Sounds like
+  several problems at once: vinyl rip + heavily compressed file"*, and the ZIP report carries the
+  whole chain (`detected : lowbitrate+vinyl+cassette`). A band-limited source keeps its own name
+  (*band-limited recording*) instead of being called a low-bitrate file, while still borrowing that
+  profile's top-end rebuild.
+* **A tone curve that is the mix of the detected problems.** The six band ceilings are the
+  evidence-weighted mean of the detected profiles' curves (70 % vinyl / 30 % codec gets 70/30 of the
+  two curves) — not the winner's curve. Measured on a vinyl+128 kbit/s fixture: the 7 kHz ceiling
+  lands at **2.38 dB** between the vinyl 1.80 and the codec 2.60 instead of taking either.
+* **Repair permissions are the union, doses stay measured.** Each profile's budget for de-hissing,
+  de-clicking, sub-bass, air and the rest is a *permission*; a file with two problems gets the wider
+  permission per stage, scaled by how much evidence it carries, and the measurement still decides
+  the dose. Measured: **cassette tape with a little dirt on it** is diagnosed as cassette (0.60) +
+  vinyl (0.40) and takes its spikes down **3.6 dB** at the recommended strength — where the
+  single-profile answer managed 0.6 dB, because the cassette ceiling (0.20) was the limit, not the
+  detector.
+* **A measured codec cliff counts in full.** The low-bitrate score used to be discounted by hiss and
+  crackle all the way through, which meant the most common combined file — an old vinyl rip at
+  128 kbit/s — lost the codec treatment *because* it was noisy. The cliff is a direct measurement,
+  so it now stands on its own (measured brickwall 1.00 → codec score 0.62 on the combined fixture,
+  0.28 before), while the circumstantial terms (clean material, a dull top) keep their discounts.
+
+### Notes
+
+* A file with a single problem is still a file with a single problem: on a solo cassette the new
+  mixing moves the tone by **0.03 dB** and the repair budgets by **0.00**, and the clean reference
+  file is bit-for-bit the same decision as before (no parameter moves at all).
+* A hand-picked profile is a decision, not a diagnosis: it is still used exactly as chosen, with no
+  blending.
+* Nothing about the single slider changed: the amounts still follow the same power curve, and 0 %
+  is still a bit-transparent copy of the original.
+
 ## [1.5.0] — 2026-10-12
 
 **The per-song release.** Until now the suite chose one of six profiles from the measurements and

@@ -232,6 +232,19 @@ async function run() {
   ok(card.analysis.score > 20 && card.analysis.score < 95, 'quality score is plausible', String(card.analysis.score));
   const diagText = card.el.diagnosis.textContent;
   ok(diagText.length > 30 && !/[A-Z]{2,}[_ ]/.test(diagText), 'diagnosis is a readable sentence', diagText.slice(0, 60) + '…');
+  // This take is hissy *and* crackly *and* boxy — more than one problem, which
+  // is the normal case. The sentence says so instead of naming whichever
+  // profile won the vote, and the card carries the whole chain for the report.
+  {
+    const chain = card.analysis.diag.chain || [];
+    const names = ['vinyl', 'cassette', 'lowbitrate', 'garage', 'narrowband']
+      .map((k) => win.RSi18n.t('kind.short.' + k))
+      .filter((n) => diagText.indexOf(n) !== -1);
+    ok(chain.length > 1, 'the take is diagnosed as more than one problem', chain.join(' + '));
+    ok(names.length >= 2, '…and the sentence names them', names.join(' / '));
+    ok(win.RSi18n.t('diag.leadMix', { kinds: 'x' }).indexOf('x') !== -1,
+      'the combination sentence is translated in this language');
+  }
   ok(card.after && card.after.chips, 'a restored preview was rendered');
   ok(card.afterScore >= card.analysis.score - 4, 'restored preview scores no worse', card.analysis.score + ' → ' + card.afterScore);
   ok(!!card.previewBuffer && card.previewBuffer.length > 0, 'live monitor buffer exists',
