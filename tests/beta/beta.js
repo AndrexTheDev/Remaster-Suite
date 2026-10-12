@@ -14,6 +14,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
 const { spawn } = require('child_process');
 const beta = require('./chromium.js');
 const cdp = require('./cdp.js');
@@ -23,10 +24,39 @@ const SHOT_DIR = path.join(ROOT, 'docs', 'beta');
 const DL_DIR = '/tmp/rs-beta-downloads';
 const PORT = 8080;
 const DBG = 9222;
+const FIX_PORT = 8099;                        // loopback server for the WAV fixtures
 
 fs.mkdirSync(SHOT_DIR, { recursive: true });
 fs.mkdirSync(DL_DIR, { recursive: true });
 for (const f of fs.readdirSync(DL_DIR)) fs.rmSync(path.join(DL_DIR, f), { force: true });
+
+/* ------------------------------------------------------------------ fixtures --
+ * The page must be fed the *same* recordings the node suites use — a page-local
+ * fake is only a fake. The signals are synthesised here with tests/harness.js
+ * (pink-noise beds, mains hum, hiss, crackle, a codec cliff), encoded to real
+ * WAV bytes and served on a second loopback port; the page fetches them into
+ * File objects and drops them exactly like a user would. */
+const H = require('./../harness.js');
+const DSP = H.loadDsp();
+const SIM_SR = 44100;
+const fixtures = new Map();
+function fixture(name, channels, seconds) {
+  const bytes = Buffer.from(DSP.encodeWav(channels, SIM_SR, 16));
+  fixtures.set(name, bytes);
+  console.log('  fixture ' + name.padEnd(18) + (bytes.length / 1e6).toFixed(1) + ' MB' +
+    (seconds ? '  (' + seconds + ' s of ' + channels.length + '-channel audio)' : ''));
+  return bytes.length;
+}
+const fixtureServer = http.createServer((req, res) => {
+  const name = path.basename(decodeURIComponent(req.url.split('?')[0]));
+  const buf = fixtures.get(name);
+  if (!buf) { res.writeHead(404); res.end('no fixture ' + name); return; }
+  res.writeHead(200, {
+    'Content-Type': 'audio/wav', 'Access-Control-Allow-Origin': '*', 'Content-Length': buf.length,
+  });
+  res.end(buf);
+});
+fixtureServer.listen(FIX_PORT, '127.0.0.1');
 
 const results = [];
 const shots = [];
@@ -173,39 +203,32 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   /* the three problem recordings are the very same signals the node suites use —
      built here, encoded to WAV, and handed to the page as base64 */
-  const H = require('../harness.js');
-  const DSP = H.loadDsp();
-  const SIM_SR = 44100;
+  const stereo = (sig) => [sig, Float32Array.from(sig, (v) => v * 0.94)];
   const sims = {
-    garage: H.garageSim(DSP, SIM_SR, 12),
-    cassette: H.cassetteSim(DSP, SIM_SR, 12),
-    vinyl: H.vinylSim(DSP, SIM_SR, 12),
+    garage: (s) => H.garageSim(DSP, SIM_SR, s),
+    cassette: (s) => H.cassetteSim(DSP, SIM_SR, s),
+    vinyl: (s) => H.vinylSim(DSP, SIM_SR, s),
+  };
+  for (const k of Object.keys(sims)) {
+    fixture(k + '-12.wav', stereo(sims[k](12)), 12);     // the three problem recordings
+    fixture(k + '-6.wav', stereo(sims[k](6)), 6);       // the batch
+  }
+  fixture('garage-8.wav', stereo(sims.garage(8)), 8);
+  fixture('vinyl-8.wav', stereo(sims.vinyl(8)), 8);
+  fixture('garage-45.wav', stereo(sims.garage(45)), 45);   // long enough for the bars to be watched
+  // the three-minute take is 34 MB of WAV and takes seconds to synthesise: it is
+  // built when the scale section needs it, not during boot
+  let longBuilt = false;
+  const buildLongFixture = () => {
+    if (longBuilt) return;
+    longBuilt = true;
+    fixture('garage-180.wav', stereo(sims.garage(180)), 180);
   };
   await evalJS(`
-    window.__file = (name, b64) => {
-      const bin = atob(b64);
-      const u8 = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
-      return new File([u8], name, { type: 'audio/wav' });
-    };
-    window.__mk = (kind, sec) => {
-      const SR = 44100, N = SR * (sec || 12);
-      const L = new Float32Array(N), R = new Float32Array(N);
-      let seed = kind === 'garage' ? 11 : kind === 'cassette' ? 22 : 33, lp = 0;
-      const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296) * 2 - 1;
-      for (let i = 0; i < N; i++) {
-        const t = i / SR;
-        const env = Math.min(1, 0.25 + 0.75 * Math.abs(Math.sin(t * 0.4) + 0.5 * Math.sin(t * 0.13)));
-        const n = rnd();
-        let x;
-        if (kind === 'garage') { lp += 0.06 * (n - lp); x = lp * 3 * env + 0.02 * Math.sin(2 * Math.PI * 50 * t); }
-        else if (kind === 'cassette') { lp += 0.25 * (n - lp); x = lp * 1.1 * env + 0.02 * n; }
-        else { lp += 0.5 * (n - lp); x = lp * env + (rnd() > 0.9995 ? rnd() * 1.1 : 0); }
-        L[i] = Math.max(-0.95, Math.min(0.95, x));
-        R[i] = L[i] * 0.94;
-      }
-      const bytes = window.RSDSP.encodeWav([L, R], SR, 16);
-      return new File([bytes], kind + '-take.wav', { type: 'audio/wav' });
+    window.__fixture = async (url, name) => {
+      const r = await fetch('http://127.0.0.1:${FIX_PORT}/' + url);
+      if (!r.ok) throw new Error('fixture ' + url + ' → ' + r.status);
+      return new File([await r.blob()], name || url, { type: 'audio/wav' });
     };
     window.__drop = (files) => {
       const dz = document.querySelector('#dropzone');
@@ -214,14 +237,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       dz.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
     };
     true`);
-  for (const [k, sig] of Object.entries(sims)) {
-    const b64 = Buffer.from(DSP.encodeWav([sig, sig], SIM_SR, 16)).toString('base64');
-    await evalJS(`window.__${k}File = __file('${k}-take.wav', '${b64}')`);
-  }
 
   /* ------------------------------------------------------------ the drop ---- */
   section('beta · real drag-and-drop of three problem recordings');
-  await evalJS(`__drop([__garageFile, __cassetteFile, __vinylFile])`);
+  await evalJS(`(async () => __drop([
+    await __fixture('garage-12.wav', 'Proberaum 1974 (Band).wav'),
+    await __fixture('cassette-12.wav', 'Mixtape 1986.wav'),
+    await __fixture('vinyl-12.wav', 'LP Seite A.wav'),
+  ]))()`);
   const analysed = await (async () => {
     for (let i = 0; i < 60; i++) {
       await sleep(400);
@@ -403,29 +426,69 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   /* ------------------------------------------------------ scale and speed ---- */
   section('beta · scale: a three-minute take and a six-file batch');
+  buildLongFixture();
+  // The app's own phases are wrapped from the test, in the page, so the report
+  // can say *where* the seconds go. The app itself is not touched.
+  await evalJS(`(() => {
+    window.__phase = {};
+    const wrap = (obj, fn) => {
+      const orig = obj[fn];
+      obj[fn] = async function () {
+        const t = performance.now();
+        try { return await orig.apply(this, arguments); }
+        finally { window.__phase[fn] = Math.round((window.__phase[fn] || 0) + (performance.now() - t)); }
+      };
+    };
+    wrap(RSCodecs, 'decodeFile');
+    wrap(RSDSP, 'measureAsync');
+    wrap(RSAnalyzer, 'analyzeAsync');
+    wrap(RSEngine, 'render');
+    wrap(RSAnalyzer, 'analyzeChannels');
+    true;
+  })()`);
   const perf = await evalJS(`(async () => {
-    const big = __mk('garage', 180);           // synthesis is not part of the budget
+    const big = await __fixture('garage-180.wav', 'garage-lp-1974.wav');
     const t0 = performance.now();
     await RSApp.addFiles([big]);
-    const analyseMs = performance.now() - t0;
+    const addMs = performance.now() - t0;
+    const ph = Object.assign({}, window.__phase);   // before the full render below
     const card = RSApp.State.cards[RSApp.State.cards.length - 1];
     const t1 = performance.now();
     await RSApp.renderCard(card, { force: true });
     const renderMs = performance.now() - t1;
     return {
-      analyseMs: Math.round(analyseMs),
+      addMs: Math.round(addMs),
+      decodeMs: ph.decodeFile,
+      measureMs: ph.measureAsync,
+      analyzeMs: ph.analyzeAsync,
+      previewMs: ph.render,
+      previewMeasureMs: ph.analyzeChannels,
       renderMs: Math.round(renderMs),
       preset: card.analysis.preset,
+      duration: Math.round(card.analysis.duration),
       bytes: card.result.bytes.length,
       heapMB: Math.round(performance.memory.usedJSHeapSize / 1048576),
     };
   })()`);
-  check('a 3-minute take is analysed in seconds, not minutes (sandbox CPU)', perf.analyseMs < 6000, perf.analyseMs + ' ms');
+  // The measurement is what the user watches a progress bar for: seconds, not
+  // minutes, even on this sandbox CPU (a phone core is slower — but the work is
+  // sliced, and the bar tells the truth about it).
+  check('a 3-minute recording is measured in seconds, not minutes (sandbox CPU)',
+    perf.duration === 180 && perf.measureMs < 3000,
+    perf.measureMs + ' ms for ' + perf.duration + ' s of stereo · ' + perf.preset);
+  check('upload to ready — decode, measure, preview render, preview measure — stays single-digit',
+    perf.addMs < 9000,
+    perf.addMs + ' ms (decode ' + perf.decodeMs + ' · measure ' + perf.measureMs + ' · preview render ' +
+    perf.previewMs + ' · preview measure ' + perf.previewMeasureMs + ')');
   check('a 3-minute take renders in real time or faster', perf.renderMs < 60000, perf.renderMs + ' ms');
   check('heap stays moderate after the long file', perf.heapMB < 900, perf.heapMB + ' MB');
 
   await evalJS(`RSApp.clearAll()`);
-  await evalJS(`__drop([__mk('garage',6), __mk('cassette',6), __mk('vinyl',6), __mk('garage',6), __mk('cassette',6), __mk('vinyl',6)])`);
+  await evalJS(`(async () => __drop([
+    await __fixture('garage-6.wav', 'Proberaum 1.wav'), await __fixture('cassette-6.wav', 'Mixtape A.wav'),
+    await __fixture('vinyl-6.wav', 'LP Seite 1.wav'), await __fixture('garage-6.wav', 'Proberaum 2.wav'),
+    await __fixture('cassette-6.wav', 'Mixtape B.wav'), await __fixture('vinyl-6.wav', 'LP Seite 2.wav'),
+  ]))()`);
   await (async () => {
     for (let i = 0; i < 60; i++) { await sleep(400); if (await evalJS(`RSApp.State.cards.filter(c=>c.analysis).length === 6`)) return; }
   })();
@@ -446,7 +509,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // a phone-sized take: long enough that the bars are on screen for seconds
   const moment = await evalJS(`(async () => {
-    window.__addLong = RSApp.addFiles([__mk('garage', 45)]);
+    window.__addLong = (async () => RSApp.addFiles([await __fixture('garage-45.wav', 'garage-take.wav')]))();
     await new Promise((r) => setTimeout(r, 350));
     const card = RSApp.State.cards[0];
     const job = document.getElementById('globalProgress');
@@ -547,7 +610,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     wr.s <= wr.c + 1 && wr.i === wr.c,
     wr.c + ' px viewport · ' + wr.s + ' px content · innerWidth ' + wr.i);
   await shot('13-mobile-de-empty');
-  await evalJS(`__drop([__mk('garage', 8), __mk('vinyl', 8)])`);
+  await evalJS(`(async () => __drop([await __fixture('garage-8.wav', 'Proberaum, Handyaufnahme.wav'),
+    await __fixture('vinyl-8.wav', 'Schallplatte Seite A.wav')]))()`);
   await (async () => {
     for (let i = 0; i < 40; i++) { await sleep(400); if (await evalJS(`RSApp.State.cards.filter(c=>c.analysis).length === 2`)) return; }
   })();
@@ -616,7 +680,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check('a phone-width page never scrolls sideways', phone.overflow <= 1, phone.overflow + ' px');
 
   await evalJS(`RSApp.clearAll()`);
-  await evalJS(`__drop([new File([__mk('garage', 45)], 'Sprachnotiz 14. März 2026 — Proberaum, Handyaufnahme (Mix 3).wav', { type: 'audio/wav' })])`);
+  await evalJS(`(async () => __drop([await __fixture('garage-45.wav', 'Sprachnotiz 14. März 2026 — Proberaum, Handyaufnahme (Mix 3).wav')]))()`);
   await (async () => {
     for (let i = 0; i < 80; i++) {
       await sleep(300);
@@ -722,6 +786,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check('no console errors or page exceptions during the whole session', realNoise.length === 0,
     realNoise.slice(0, 4).join(' | ') || 'silent');
 
+  fixtureServer.close();
+
   /* ------------------------------------------------------------- report ---- */
   const now = new Date();
   const browserLine = version + ' (headless, Debian ' + fs.readFileSync('/etc/debian_version', 'utf8').trim() + ')';
@@ -756,7 +822,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     '  clicks pass). The suite therefore uses fire-and-forget + polling for that one\n' +
     '  call, which is equally strict: the promise must settle and the page must keep\n' +
     '  answering.\n' +
-    '- Analysis/render timings are sandbox-CPU numbers; real hardware is faster.\n';
+    '- The recordings are the same synthesised fixtures the node suites use (garage session,\n' +
+    '  cassette, vinyl rip, low-bitrate) — built with `tests/harness.js`, served to the page on a\n' +
+    '  loopback port and dropped as real files. A page-local fake would only test the fake.\n' +
+    '- Analysis/render timings are sandbox-CPU numbers; real hardware is faster.\n' +
+    '- The upload path is timed phase by phase (decode · measurement · preview render · preview\n' +
+    '  measurement) by wrapping the app from the test, so a slowdown can be attributed.\n';
   fs.writeFileSync(path.join(ROOT, 'docs', 'BETA-REPORT.md'), md);
 
   console.log('\n' + '-'.repeat(60));

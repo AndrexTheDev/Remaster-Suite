@@ -426,6 +426,74 @@
     return { step, value: () => -0.691 + 10 * Math.log10(st.ms / len) };
   }
 
+  /**
+   * The four per-sample measurements (peak, clipped samples, loudness and
+   * dynamic range) in a *single* pass over the file.
+   *
+   * They used to be four separate passes reading every sample again — on a
+   * three-minute stereo file that is 4 × 17 M reads of the same memory, and it
+   * cost more than the arithmetic in all four put together. The numbers are the
+   * same ones the individual steps produce (same filters, same windows, same
+   * order of summation); only the memory traffic changed.
+   */
+  function coreSteps(channels, sr) {
+    const nCh = channels.length;
+    const len = nCh && channels[0] ? channels[0].length : 0;
+    const idle = () => ({ step: stepRange('core', 0, 0, () => {}), peakDb: () => -70, clipRatio: () => 0, loudness: () => -70, dynamicRange: () => 20 });
+    if (!nCh || !len) return idle();
+    const [hb0, hb1, hb2, ha1, ha2] = biquadHP(sr, 60, 0.5);
+    const sb0 = 1.53512485958697, sb1 = -2.69169618940638, sb2 = 1.19839281085285;
+    const sa1 = -1.69065929318241, sa2 = 0.73248077421585;   // BS.1770 high-shelf @ ~1.5 kHz
+    const invCh = 1 / nCh;
+    const win = Math.max(256, Math.round(sr * 0.05));
+    const st = { hz1: 0, hz2: 0, sz1: 0, sz2: 0, ms: 0, peak: 0, clipped: 0, total: 0, winMs: 0 };
+    const dr = [];
+    const step = stepRange('core', len, len * 25, (from, to) => {
+      for (let i = from; i < to; i++) {
+        let x = 0, sq = 0;
+        for (let c = 0; c < nCh; c++) {
+          const v = channels[c][i];
+          x += v;
+          sq += v * v;
+          const a = v < 0 ? -v : v;
+          if (a > st.peak) st.peak = a;
+          if (v > 0.994 || v < -0.994) st.clipped++;
+          st.total++;
+        }
+        x *= invCh;
+        const hy = Math.fround(hb0 * x + st.hz1);
+        st.hz1 = hb1 * x - ha1 * hy + st.hz2;
+        st.hz2 = hb2 * x - ha2 * hy;
+        const sy = Math.fround(sb0 * hy + st.sz1);
+        st.sz1 = sb1 * hy - sa1 * sy + st.sz2;
+        st.sz2 = sb2 * hy - sa2 * sy;
+        st.ms += sy * sy;
+        st.winMs += sq;
+        if ((i + 1) % win === 0) { dr.push(Math.sqrt(st.winMs / (win * nCh))); st.winMs = 0; }
+      }
+    });
+    const idleStep = { units: 0, estCost: 0, label: 'core', slice: () => {} };
+    return {
+      step,
+      peakDb: () => db(st.peak),
+      // a recording that is not made of numbers: the loudness accumulator goes
+      // non-finite the moment one sample does, and every IIR filter after this
+      // point would carry that NaN to the end of the file
+      nonFinite: () => !isFinite(st.ms),
+      clipRatio: () => (st.total ? st.clipped / st.total : 0),
+      loudness: () => -0.691 + 10 * Math.log10(st.ms / len),
+      dynamicRange: () => {
+        if (dr.length < 4) return 20;
+        const c = dr.slice().sort((a, b) => a - b);
+        return db(c[Math.floor(c.length * 0.95)]) - db(c[Math.floor(c.length * 0.10)]);
+      },
+      // the four measurements are reported as their own steps so the plan (and
+      // the progress bar) keeps its shape, but they cost nothing: the work is in
+      // `step` above
+      steps: [idleStep, idleStep, idleStep, idleStep],
+    };
+  }
+
   /** Integrated-style loudness (ITU-R BS.1770 flavour, approx ±1.5 LU). */
   function loudness(channels, sr) {
     const l = loudnessStep(channels, sr);
@@ -535,6 +603,10 @@
    *
    * @returns {{steps:object[], value:function():object, index:object}}
    */
+  /** The band the top end is compared with for the hiss tilt: 700 Hz … 3 kHz. */
+  const HISS_MID_HZ = 1450;
+  const HISS_MID_Q = 0.63;
+
   function noiseStep(channels, sr) {
     const fftSize = 2048, hop = 1024, half = fftSize / 2;
     const win = hann(fftSize);
@@ -549,40 +621,66 @@
     // Alongside it, a 4–16 kHz follower built from the same frames: whether the
     // top end moves with the music or sits still is what separates a stationary
     // hiss floor from ordinary bright material (see hissDeficitDb below).
-    const hfCh = [];
     const filters = [];
+    const frames = [];                 // per channel, the window sums, filled as we filter
+    const rings = [];                  // per channel, a sliding sum over the frame window
     for (let c = 0; c < nCh; c++) {
       const a = new Biquad(), b = new Biquad();
       a.setHighpass(sr, 4000, 0.707); b.setHighpass(sr, 4000, 0.707);
-      filters.push({ a, b });
-      hfCh.push(new Float32Array(len));
+      // …and the band the top end is compared with: hiss is recognised by the
+      // *tilt* of the top end, not by its level. The worklet uses the same two
+      // bands, so what is measured here is what can be subtracted there.
+      const ma = new Biquad(), mb = new Biquad();
+      ma.setBandpass(sr, HISS_MID_HZ, HISS_MID_Q); mb.setBandpass(sr, HISS_MID_HZ, HISS_MID_Q);
+      filters.push({ a, b, ma, mb });
+      frames.push({ raw: new Float64Array(total), hf: new Float64Array(total), mid: new Float64Array(total) });
+      rings.push({ raw: new Float32Array(fftSize), hf: new Float32Array(fftSize), mid: new Float32Array(fftSize),
+        i: 0, sr: 0, sh: 0, sm: 0 });
     }
     const frameRms = new Float32Array(total);
     const hfFrame = new Float32Array(total);
+    const midFrame = new Float32Array(total);
 
-    const stepHf = scanStep('noise-hf', channels, 14, () => ({}),
-      (st, c, ch, i) => { const f = filters[c]; hfCh[c][i] = f.b.process(f.a.process(ch[i])); });
-
-    const stepFrames = stepRange('noise-frames', total, total * 30, (from, to) => {
-      for (let fr = from; fr < to; fr++) {
-        const off = fr * hop;
-        let ms = 0, hs = 0;
-        for (let c = 0; c < nCh; c++) {
-          const ch = channels[c], hch = hfCh[c];
-          for (let i = 0; i < fftSize; i++) {
-            const v = ch[off + i];
-            ms += v * v;
-            const w = hch[off + i];
-            hs += w * w;
+    // The filtering pass *is* the frame measurement. It used to keep the whole
+    // filtered signal in memory only to read it back three samples at a time —
+    // 280 MB on a three-minute stereo file, and a second full pass over it. A
+    // sliding sum over the same 2048-sample window the frames are cut with gives
+    // the identical number with no storage at all.
+    const stepHf = scanStep('noise-hf', channels, 22, () => ({}),
+      (st, c, ch, i) => {
+        const f = filters[c], r = rings[c];
+        const v = ch[i];
+        const hf = f.b.process(f.a.process(v));
+        const md = f.mb.process(f.ma.process(v));
+        const qr = v * v, qh = hf * hf, qm = md * md;
+        r.sr += qr - r.raw[r.i]; r.raw[r.i] = qr;
+        r.sh += qh - r.hf[r.i]; r.hf[r.i] = qh;
+        r.sm += qm - r.mid[r.i]; r.mid[r.i] = qm;
+        r.i++;
+        if (r.i >= fftSize) r.i = 0;
+        const end = i + 1 - fftSize;
+        if (end >= 0 && end % hop === 0) {
+          const fr = end / hop;
+          if (fr < total) {
+            frames[c].raw[fr] = r.sr; frames[c].hf[fr] = r.sh; frames[c].mid[fr] = r.sm;
           }
+        }
+      });
+
+    const stepFrames = stepRange('noise-frames', 1, 60000, () => {
+      for (let fr = 0; fr < total; fr++) {
+        let ms = 0, hs = 0, bs = 0;
+        for (let c = 0; c < nCh; c++) {
+          ms += frames[c].raw[fr]; hs += frames[c].hf[fr]; bs += frames[c].mid[fr];
         }
         frameRms[fr] = Math.sqrt(ms / (fftSize * nCh));
         hfFrame[fr] = Math.sqrt(hs / (fftSize * nCh));
+        midFrame[fr] = Math.sqrt(bs / (fftSize * nCh));
       }
     });
 
     // the distribution is read between the two loops, exactly as before
-    const stats = { p02: 0, p05: 0, p20: 0, p50: 0, p90: 0, p98: 0, hfP02: 0, hfP98: 0,
+    const stats = { p02: 0, p05: 0, p20: 0, p50: 0, p70: 0, p90: 0, p98: 0, hfP02: 0, hfP98: 0,
       quietLimit: 0, quietCount: 0, useAll: true, visit: null };
     const stepStats = stepRange('noise-stats', 1, 60000, () => {});
     stepStats.before = () => {
@@ -593,6 +691,7 @@
       stats.p02 = pct(0.02); stats.p05 = pct(0.05); stats.p20 = pct(0.20); stats.p50 = pct(0.50);
       stats.p90 = pct(0.90); stats.p98 = pct(0.98);
       stats.hfP02 = pctHf(0.02); stats.hfP98 = pctHf(0.98);
+      stats.p70 = pct(0.70);
       stats.quietLimit = Math.max(pct(0.08), 1e-8);
       let quietCount = 0;
       for (let fr = 0; fr < total; fr++) if (frameRms[fr] <= stats.quietLimit) quietCount++;
@@ -660,11 +759,62 @@
         const bbDynDb = db(stats.p98 + 1e-12) - db(stats.p02 + 1e-12);
         const hfDynDb = db(stats.hfP98 + 1e-12) - db(stats.hfP02 + 1e-12);
         const hissDeficitDb = clamp(bbDynDb - hfDynDb, -30, 30);
+        // Does the top end *follow the programme*? A tape hiss sits still while
+        // the music moves, so the 4–16 kHz follower and the frame level
+        // decorrelate. This is the only hiss measure that works on material with
+        // no quiet passage anywhere in it — where every window-based floor is
+        // just the music itself — and it is what separates a dull, noisy
+        // recording from a dull, clean one.
+        let mr = 0, mh = 0;
+        for (let fr = 0; fr < total; fr++) { mr += frameRms[fr]; mh += hfFrame[fr]; }
+        mr /= total; mh /= total;
+        let cr = 0, vr = 0, vh = 0;
+        for (let fr = 0; fr < total; fr++) {
+          const dr = frameRms[fr] - mr, dh = hfFrame[fr] - mh;
+          cr += dr * dh; vr += dr * dr; vh += dh * dh;
+        }
+        const rho = (vr > 1e-20 && vh > 1e-20) ? cr / Math.sqrt(vr * vh) : 1;
+        const hfFollowDb = 10 * Math.log10(Math.max(rho * rho, 1e-6));
+
+        // ── the tilt of the top end, in the music and in the gaps ──────────
+        // This is what identifies hiss. Music's top end is tied to its mids: when
+        // the performance drops, the 4–16 kHz band drops with it and the tilt
+        // (HF − MID) stays put. A hiss does not drop — so in the quiet frames the
+        // tilt *rises* by exactly the amount of noise sitting in the HF band.
+        // That difference is a calibrated number in dB: how much of the top end
+        // is noise rather than programme, which is precisely what a repair may
+        // take out (and all it may take out).
+        // The frames are split by *how loud they are*, not by what their tilt
+        // happens to be: the loud ones carry the programme (that is the tilt the
+        // music has), the quiet ones are where the noise is left alone.
+        const loudT = [], quietT = [];
+        for (let fr = 0; fr < total; fr++) {
+          if (!(midFrame[fr] > 1e-9 && hfFrame[fr] > 1e-9)) continue;
+          const t = db(hfFrame[fr] / midFrame[fr]);
+          if (frameRms[fr] >= stats.p70) loudT.push(t);
+          else if (frameRms[fr] <= stats.quietLimit) quietT.push(t);
+        }
+        const med = (arr) => {
+          if (!arr.length) return 0;
+          const c = arr.slice().sort((a, b) => a - b);
+          return c[Math.floor(c.length / 2)];
+        };
+        const musicTiltDb = med(loudT);
+        const hissTiltDb = med(quietT);
+        // Where the HF band sits when the recording is quiet, as a *band RMS* —
+        // the same quantity the worklet's sliding window produces, so the
+        // threshold the repair is gated by is a number both sides agree on.
+        const hfQuiet = [];
+        for (let fr = 0; fr < total; fr++) if (frameRms[fr] <= stats.quietLimit) hfQuiet.push(hfFrame[fr]);
+        const hfQuietRmsDb = (stats.useAll || hfQuiet.length < 4) ? db(stats.hfP02 + 1e-12) : db(med(hfQuiet));
+        const hissTiltStepDb = (loudT.length >= 3 && quietT.length >= 3)
+          ? clamp(hissTiltDb - musicTiltDb, 0, 24) : 0;
         // how much the recording actually breathes: a file with no quiet passages
         // gets confidence 0 — we then never claim noise that we cannot prove
         const frameRange = db(stats.p98) - db(stats.p05);
         return { spec, floorDb, hfFloorDb, midFloorDb, lowFloorDb, noiseSlope, flatness, rumble,
-          bbDynDb, hfDynDb, hissDeficitDb,
+          bbDynDb, hfDynDb, hissDeficitDb, hfFollowDb, hfQuietRmsDb,
+          musicTiltDb, hissTiltDb, hissTiltStepDb,
           crackleIndex: 0, crestP98Db: 0, crestGlobalDb: 0, musicDb: db(stats.p98),
           quietLevelDb: db(stats.quietLimit), quietCount: stats.quietCount, total,
           confidence: clamp((frameRange - 5) / 12, 0, 1) * clamp(stats.quietCount / 4, 0, 1),
@@ -692,23 +842,52 @@
     });
   }
 
+  /**
+   * How ragged the top end is, in dB — median absolute deviation of the
+   * spectrum from its own smoothed trend, measured above 2.5 kHz and below the
+   * detected cliff.
+   *
+   * A naturally rolled-off old recording has a smooth slope; a badly encoded
+   * one has holes, birdies and a comb. The number tells the synthesiser how
+   * much it may trust the band it derives the missing top end from.
+   */
+  function hfRaggedness(spec, cut) {
+    const sm = smoothSpec(spec, 2);
+    const hi = clamp(cut && cut > 4000 ? cut : 8000, 3000, 16000);
+    const vals = [];
+    for (let k = 0; k < spec.n; k++) {
+      const f = spec.freq[k];
+      if (f < 2500 || f > hi) continue;
+      vals.push(Math.abs(spec.db[k] - sm[k]));
+    }
+    if (vals.length < 12) return 0;
+    vals.sort((a, b) => a - b);
+    return clamp((vals[Math.floor(vals.length / 2)] - 1.5) / 6, 0, 1);
+  }
+
   /* --- dynamic range, clipping, correlation -------------------------------- */
 
-  /** Dynamic range proxy: loud frame RMS minus quiet frame RMS. */
+  /**
+   * Dynamic range proxy: loud frame RMS minus quiet frame RMS.
+   *
+   * The frames are cut at fixed multiples of the window from the start of the
+   * file and the RMS is accumulated per sample — the same numbers as summing
+   * each window on its own, without reading the file a second time (the fused
+   * `coreSteps` does the walk; this is the same measurement on its own).
+   */
   function dynamicRangeStep(channels, sr) {
     const win = Math.max(256, Math.round(sr * 0.05));
-    const nCh = channels.length, len = channels[0].length;
-    const count = len >= win ? Math.floor((len - win) / win) + 1 : 0;
+    const nCh = channels.length, len = nCh && channels[0] ? channels[0].length : 0;
+    if (!nCh || !len) return { step: stepRange('dynamic-range', 0, 0, () => {}), value: () => 20 };
+    const count = len >= win ? Math.floor(len / win) + 1 : 0;
     const vals = [];
-    const step = stepRange('dynamic-range', count, count * win * 1.1, (from, to) => {
-      for (let w = from; w < to; w++) {
-        const off = w * win;
-        let ms = 0;
-        for (let c = 0; c < nCh; c++) {
-          const s = channels[c];
-          for (let i = 0; i < win; i++) { const v = s[off + i]; ms += v * v; }
-        }
-        vals.push(Math.sqrt(ms / (win * nCh)));
+    let ms = 0;
+    const step = stepRange('dynamic-range', len, len * 0.6, (from, to) => {
+      for (let i = from; i < to; i++) {
+        let sq = 0;
+        for (let c = 0; c < nCh; c++) { const v = channels[c][i]; sq += v * v; }
+        ms += sq;
+        if ((i + 1) % win === 0) { vals.push(Math.sqrt(ms / (win * nCh))); ms = 0; }
       }
     });
     return {
@@ -731,9 +910,20 @@
 
   /** Fraction of samples sitting at digital full scale (clipping / limiting). */
   function clipStep(channels) {
-    return scanStep('clip', channels, 2.6, () => ({ clipped: 0, total: 0 }),
-      (st, c, ch, i) => { const v = ch[i]; if (v > 0.994 || v < -0.994) st.clipped++; st.total++; },
-      (st) => (st.total ? st.clipped / st.total : 0));
+    const nCh = channels.length;
+    const len = nCh && channels[0] ? channels[0].length : 0;
+    if (!nCh || !len) return { step: stepRange('clip', 0, 0, () => {}), value: () => 0 };
+    const st = { clipped: 0, total: 0 };
+    const step = stepRange('clip', len, len * 1.6, (from, to) => {
+      for (let i = from; i < to; i++) {
+        for (let c = 0; c < nCh; c++) {
+          const v = channels[c][i];
+          if (v > 0.994 || v < -0.994) st.clipped++;
+          st.total++;
+        }
+      }
+    });
+    return { step, value: () => (st.total ? st.clipped / st.total : 0) };
   }
 
   function clipRatio(channels) {
@@ -742,13 +932,235 @@
     return st.value();
   }
 
-  /** Mains hum: 50/100 or 60/120 Hz peakiness vs. the surrounding spectrum. */
-  function humScore(spec) {
-    const g = (f, bw) => bandMedian(spec, f - bw, f + bw);
-    const ref = (g(45, 6) + g(55, 6) + g(100, 8) + g(120, 8)) / 4;
-    const f50 = g(50, 2.5) - ref;
-    const f60 = g(60, 2.5) - ref;
-    return { score: Math.max(0, Math.max(f50, f60)) / 12, f50: f50, f60: f60 };
+  /* --- mains hum, measured exactly --------------------------------------- */
+
+  /** The mains grid, and the control frequencies the floor is read from. */
+  const HUM_SET = {
+    50: { mains: [50, 100, 150, 200], floor: [43, 54, 66, 78, 92, 112, 138, 168] },
+    60: { mains: [60, 120, 180, 240], floor: [52, 65, 74, 88, 104, 132, 156, 196] },
+  };
+
+  /**
+   * Mains hum, measured where it actually is.
+   *
+   * The detector this replaces read the spectrum through `bandMedian`, which
+   * *excludes* ±6 Hz around 50/60/100/120/150/180/200/300 — it was asking a band
+   * with the hum filtered out of it and could only ever answer "no hum". Reading
+   * raw FFT bins instead is luck of the bin grid: at 48 kHz an 8192-point
+   * transform has 5.86 Hz bins, so 50 and 60 Hz both fall between bins and which
+   * one "wins" depends on leakage from the music.
+   *
+   * This measures the exact frequencies with a sliding Goertzel over up to 48
+   * segments spread across the file, and compares them with control frequencies
+   * just off the mains grid. Two properties matter for a repair with −40 dB of
+   * authority, and both come from that:
+   *   · the level is exact, not grid-dependent;
+   *   · hum is *stationary* — a bass note is not. `steady` is the share of
+   *     segments where the tone is within 6 dB of its own median, which is what
+   *     keeps a sustained musical note out of the notch.
+   *
+   * Hum is common-mode, so two channels are summed before the measurement.
+   */
+  function humStep(channels, sr) {
+    const a = channels[0];
+    const b = channels.length > 1 ? channels[1] : null;
+    const n = a.length;
+    // A one-second window: wide enough that a 5 Hz shoulder sits five bins away
+    // (a Hann window leaks less than −50 dB there), so the *tonality* of a mains
+    // line can be measured over 40+ dB instead of the 12 dB a short window
+    // affords.
+    const segLen = Math.max(64, Math.round(sr * 1.0));
+    const segCount = clamp(Math.floor(n / segLen), 1, 48);
+    const stride = Math.max(segLen, Math.floor(n / segCount));
+    const dec = Math.max(1, Math.round(sr / 6000));       // every measurement bin is < 200 Hz
+    const decRate = sr / dec;                             // the rate the DFT actually runs at
+    // Every line that matters (mains frequency, its harmonics) plus, for each,
+    // the two shoulders five hertz to either side. The shoulders are what "no
+    // hum" means at that exact frequency: a mains line is *narrow*, so a tone
+    // standing well above its own five-hertz neighbourhood is a line, whatever
+    // the music around it happens to be doing.
+    const lines = [];
+    for (const mains of [50, 60]) {
+      const set = HUM_SET[mains];
+      for (const f of set.mains) {
+        if (!lines.some((u) => Math.abs(u.f - f) < 0.5)) {
+          lines.push({ f, mains, kind: 'tone', side: false });
+          lines.push({ f: f - 5, mains, kind: 'shoulder', side: true });
+          lines.push({ f: f + 5, mains, kind: 'shoulder', side: true });
+        }
+      }
+    }
+    const K = lines.length;
+    // Phasors in flat typed arrays and the window precomputed: this loop runs
+    // K × samples-per-segment × segments times (seven million on a three-minute
+    // file) and the property loads of an array of objects were costing ten times
+    // what the arithmetic did.
+    const phRe = new Float64Array(K), phIm = new Float64Array(K);
+    const phSr = new Float64Array(K), phSi = new Float64Array(K);
+    for (let k = 0; k < K; k++) {
+      phRe[k] = 1; phIm[k] = 0;
+      phSr[k] = Math.cos(TWO_PI * lines[k].f / decRate);
+      phSi[k] = -Math.sin(TWO_PI * lines[k].f / decRate);
+    }
+    const st = { mag: lines.map(() => []), abs: lines.map(() => []), rms: [] };
+    const f1 = new Biquad(), f2 = new Biquad();
+    let win = null;                       // the Hann window, built once per segment length
+    const idx = lines.map((L) => L);
+    const toneIdx = {};
+    for (const mains of [50, 60]) toneIdx[mains] = idx.findIndex((L) => L.kind === 'tone' && L.mains === mains && L.f === mains);
+    const harmIdx = {};
+    for (const mains of [50, 60]) harmIdx[mains] = HUM_SET[mains].mains.map((f) => idx.findIndex((L) => L.kind === 'tone' && L.f === f));
+
+    const slice = (from, to) => {
+      for (let sg = from; sg < to; sg++) {
+        const start = sg * stride;
+        if (start + segLen > n) continue;
+        f1.setLowpass(sr, 300, 0.541); f2.setLowpass(sr, 300, 1.306);
+        let sum = 0;
+        for (let i = start; i < start + segLen; i++) {
+          const x = b ? (a[i] + b[i]) * 0.5 : a[i];
+          sum += x * x;
+        }
+        const re = new Float64Array(K), im = new Float64Array(K);
+        const pRe = Float64Array.from(phRe), pIm = Float64Array.from(phIm);
+        const used = Math.floor(segLen / dec);
+        if (!win || win.length !== used) {
+          win = new Float64Array(used);
+          for (let m = 0; m < used; m++) win[m] = 0.5 - 0.5 * Math.cos(TWO_PI * m / used);
+        }
+        for (let m = 0, i = start; m < used; m++, i += dec) {
+          const s = b ? (a[i] + b[i]) * 0.5 : a[i];
+          const x = f2.process(f1.process(s)) * win[m];
+          for (let k = 0; k < K; k++) {
+            re[k] += x * pRe[k]; im[k] += x * pIm[k];
+            const nr = pRe[k] * phSr[k] - pIm[k] * phSi[k];
+            pIm[k] = pRe[k] * phSi[k] + pIm[k] * phSr[k];
+            pRe[k] = nr;
+          }
+        }
+        const rms = Math.sqrt(sum / segLen);
+        for (let k = 0; k < K; k++) {
+          const amp = 4 * Math.sqrt(re[k] * re[k] + im[k] * im[k]) / Math.max(used, 1);
+          st.mag[k].push(amp / Math.max(rms, 1e-9));            // relative to the segment
+          st.abs[k].push(amp);                                  // and in absolute terms
+        }
+        st.rms.push(rms);
+      }
+    };
+
+    const out = stepRange('hum', segCount, segCount * (segLen * 2 + (segLen / dec) * (1.5 + K * 3)), slice);
+    out.value = () => {
+      const dbo = (v) => 20 * Math.log10(Math.max(v, 1e-9));
+      const median = (arr) => {
+        if (!arr.length) return 0;
+        const c = arr.slice().sort((x, y) => x - y);
+        return c[Math.floor(c.length / 2)];
+      };
+      const branch = (mains) => {
+        const toneDb = (k) => dbo(median(st.mag[k]));
+        const fundIdx = harmIdx[mains][0];
+        const fundDb = toneDb(fundIdx);
+        // the *highest* shoulder: the worst case, so a tone is only called tonal
+        // when it beats both sides
+        let shoulderDb = -140;
+        for (let k = 0; k < K; k++) {
+          const L = idx[k];
+          if (L.kind === 'shoulder' && L.mains === mains && Math.abs(L.f - lines[fundIdx].f) === 5) shoulderDb = Math.max(shoulderDb, toneDb(k));
+        }
+        const harm = HUM_SET[mains].mains.slice(1).map((f, i) => {
+          const k = harmIdx[mains][i + 1];
+          let sh = -140;
+          for (let j = 0; j < K; j++) {
+            const L = idx[j];
+            if (L.kind === 'shoulder' && L.mains === mains && Math.abs(L.f - f) === 5) sh = Math.max(sh, toneDb(j));
+          }
+          return { hz: f, excess: toneDb(k) - sh };
+        });
+        const series = st.mag[fundIdx];
+        const med = median(series);
+        const steady = series.length ? series.filter((v) => dbo(v) > dbo(med) - 6).length / series.length : 0;
+        // Does the tone *follow the music*? A mains line sits at a constant
+        // absolute level through the quiet passages too; a note at the same
+        // frequency drops with everything else around it. This is the one test
+        // that separates a hum from music — and it is why a tune that happens to
+        // be written at 50 or 60 Hz does not have to be damaged to repair hum.
+        const abs = st.abs[fundIdx];
+        const rmsMed = median(st.rms);
+        const quiet = [];
+        for (let i = 0; i < st.rms.length; i++) if (st.rms[i] < rmsMed * 0.5) quiet.push(i);
+        const followDb = quiet.length >= 3 ? dbo(median(quiet.map((i) => abs[i]))) - dbo(median(abs)) : 0;
+        const persist = quiet.length >= 3 ? clamp((followDb + 7) / 5, 0, 1) : 1;
+        return { mains, excess: fundDb - shoulderDb, fundDb, shoulderDb, steady, followDb, persist, harm };
+      };
+      const b50 = branch(50), b60 = branch(60);
+      const best = b50.excess >= b60.excess ? b50 : b60;
+      const evidence = clamp((best.excess - 3) / 6, 0, 1);
+      const credibility = clamp((best.steady - 0.7) / 0.25, 0, 1);
+      return {
+        score: clamp(evidence * credibility * best.persist, 0, 1),
+        peakDb: clamp(best.excess, -20, 60),
+        steady: best.steady,
+        followDb: best.followDb,
+        persist: best.persist,
+        mainsHz: best.mains,
+        hum50Db: b50.excess,
+        hum60Db: b60.excess,
+        hum2Db: clamp(best.harm[0] ? best.harm[0].excess : 0, -20, 60),
+        hum3Db: clamp(best.harm[1] ? best.harm[1].excess : 0, -20, 60),
+      };
+    };
+    return out;
+  }
+
+  /** Highest bin level inside ±tol Hz of `f`. */
+  function spectrumPeak(spec, f, tol) {
+    let v = -140;
+    for (let k = 0; k < spec.n; k++) {
+      if (spec.db[k] > v && Math.abs(spec.freq[k] - f) <= tol) v = spec.db[k];
+    }
+    return v;
+  }
+
+  /**
+   * The strongest narrow resonances in the low mids — a boxy room, a honky
+   * cabinet, a resonant pressing. Broad rises are what the fixed EQ bank is for;
+   * this finds the *narrow* offenders so they can be notched precisely instead of
+   * pulling a whole octave down with them.
+   *
+   * @returns {{hz:number, excessDb:number, q:number}[]} strongest first, max 2
+   */
+  function resonanceScan(spec) {
+    const binHz = spec.n > 1 ? spec.freq[1] - spec.freq[0] : 1;
+    const trend = smoothSpec(spec, 4);
+    const found = [];
+    for (let k = 3; k < spec.n - 3; k++) {
+      const f = spec.freq[k];
+      if (f < 150 || f > 1800) continue;
+      if (spec.db[k] < spec.db[k - 1] || spec.db[k] < spec.db[k + 1]) continue;   // local maximum
+      // compare against a local trend about a third of an octave wide
+      const r = clamp(Math.round(f / binHz / 3), 5, 60);
+      let sum = 0, cnt = 0;
+      for (let j = k - r; j <= k + r; j++) {
+        if (j < 0 || j >= spec.n || j === k) continue;
+        sum += trend[j]; cnt++;
+      }
+      if (!cnt) continue;
+      const ex = spec.db[k] - sum / cnt;
+      if (ex < 3) continue;
+      // …and it has to be *narrow*: a broad rise is not a resonance
+      const off = Math.max(2, Math.round(f * 0.30 / binHz));
+      const drop = spec.db[k] - Math.max(spec.db[Math.min(spec.n - 1, k + off)], spec.db[Math.max(0, k - off)]);
+      if (drop < ex * 0.45) continue;
+      found.push({ hz: f, excessDb: ex, q: clamp(f / Math.max(20, drop), 1.5, 6) });
+    }
+    found.sort((a, b) => b.excessDb - a.excessDb);
+    const picked = [];
+    for (const c of found) {
+      if (picked.some((p) => Math.abs(Math.log2(p.hz / c.hz)) < 0.45)) continue;
+      picked.push(c);
+      if (picked.length === 2) break;
+    }
+    return picked;
   }
 
   /** Pearson correlation between the first two channels (mono-compat check). */
@@ -796,17 +1208,25 @@
    */
   function measurePlan(channels, sr) {
     const sp = spectrumStep(channels, sr, { fftSize: 8192, maxFrames: 140 });
-    const pk = peakStep(channels);
-    const cl = clipStep(channels);
+    const core = coreSteps(channels, sr);       // peak + clip + loudness + dynamics, one walk
     const cor = correlationStep(channels);
     const crk = crackleStep(channels, sr);
-    const ldn = loudnessStep(channels, sr);
-    const dyn = dynamicRangeStep(channels, sr);
     const nt = noiseStep(channels, sr);
+    const humExact = humStep(channels, sr);
+    // the crest reference is a strided walk over the same file: it rides in the
+    // final step instead of costing a pass of its own
+    let crestMs = 0, crestN = 0;
+    const fin = stepRange('finalise', 8, 60000, (from, to) => {
+      for (let k = from; k < to; k++) {
+        for (const ch of channels) {
+          for (let i = k; i < ch.length; i += 8) { crestMs += ch[i] * ch[i]; crestN++; }
+        }
+      }
+    });
     const steps = [
-      sp.step, pk, cl, cor, crk.step, ldn.step, dyn.step,
-      nt.steps[0], nt.steps[1], nt.steps[2], nt.steps[3],
-      stepRange('finalise', 1, 40000, () => {}),
+      core.step, sp.step, cor.step, crk.step,
+      core.steps[0], core.steps[1], core.steps[2], core.steps[3],
+      nt.steps[0], nt.steps[1], nt.steps[2], nt.steps[3], humExact, fin,
     ];
 
     function result() {
@@ -816,31 +1236,51 @@
       const nf = na.floorDb;
       const hfNf = na.hfFloorDb;
       const cut = hfCutoff(spec, 32);
-      const hum = humScore(spec);
+      const hum = humExact.value();
+      const resonances = resonanceScan(spec);
+      // how ragged the spectrum is above the codec cliff: a 64 kbps file has
+      // holes and birdies, a naturally dull recording has a smooth slope
+      const raggedHi = hfRaggedness(spec, cut);
       const m = {
         sr,
         channels: channels.length,
         duration: channels[0].length / sr,
-        peakDb: pk.value(),
-        crestDb: pk.value() - db(Math.sqrt(
-          (() => { let s = 0, c = 0; for (const ch of channels) { for (let i = 0; i < ch.length; i += 7) { s += ch[i] * ch[i]; c++; } } return s / c; })()
-        )),
-        loudness: ldn.value(),
+        peakDb: core.peakDb(),
+        nonFinite: core.nonFinite(),
+        crestDb: core.peakDb() - db(Math.sqrt(crestN ? crestMs / crestN : 0)),
+        loudness: core.loudness(),
         noiseFloorDb: nf,
         hfNoiseFloorDb: hfNf,
         noiseSlope: na.noiseSlope,
         noiseFlatness: na.flatness,
         noiseRumble: na.rumble,
         noiseConfidence: na.confidence,
+        hfFollowDb: na.hfFollowDb,
+        musicTiltDb: na.musicTiltDb,
+        hissTiltDb: na.hissTiltDb,
+        hissTiltStepDb: na.hissTiltStepDb,
         crackleIndex: crackle.index,
         noiseInfo: Object.assign({}, na, { crackleIndex: crackle.index, crestP98Db: crackle.crestP98Db, crestGlobalDb: crackle.globalCrestDb }),
         hfNoiseDeltaDb: hfNf - nf,
-        dynamicRangeDb: dyn.value(),
-        clipRatio: cl.value(),
+        dynamicRangeDb: core.dynamicRange(),
+        clipRatio: core.clipRatio(),
         musicLevelDb: na.musicDb,
+        hissRefDb: na.hfQuietRmsDb,        // the de-hisser's level reference (band RMS)
         humScore: hum.score,
-        hum50: hum.f50,
-        hum60: hum.f60,
+        humPeakDb: hum.peakDb,
+        humSteady: hum.steady,
+        humFollowDb: hum.followDb,
+        mainsHz: hum.mainsHz,
+        humPersist: hum.persist,
+        humMainsHz: hum.mainsHz,
+        hum2Db: hum.hum2Db,
+        hum3Db: hum.hum3Db,
+        hum50: hum.hum50Db,
+        hum60: hum.hum60Db,
+        resonances: resonances,
+        resoHz: resonances.length ? resonances[0].hz : 0,
+        resoExcessDb: resonances.length ? resonances[0].excessDb : 0,
+        hfRagged: raggedHi,
         hfCutoff: cut,
         correlation: cor.value(),
         // tonal descriptors (dB relative ratios)
@@ -886,7 +1326,14 @@
       m.hfSnrDb = m.musicLevelDb - hfNf;
       m.hissDeficitDb = na.hissDeficitDb === undefined ? 0 : na.hissDeficitDb;
       const hissLevel = clamp((55 - m.hfSnrDb) / 26 + 0.35, 0.35, 1);
-      m.hissAmount = clamp((m.hissDeficitDb - 1.0) / 4.0, 0, 1) * hissLevel * clamp(m.noiseConfidence * 1.5, 0, 1);
+      // Two independent ways of seeing the same thing: the top end does not fall
+      // with the music (the tilt step — calibrated in dB), or it does not move at
+      // all while the whole signal does (the dynamic-range deficit). Whichever is
+      // stronger wins; both are gated by the measured HF level and by whether the
+      // file actually has quiet passages to prove anything with.
+      const tiltEvidence = clamp(((m.hissTiltStepDb || 0) - 0.8) / 5.0, 0, 1);
+      const deficitEvidence = clamp((m.hissDeficitDb - 1.0) / 4.0, 0, 1);
+      m.hissAmount = clamp(Math.max(tiltEvidence, deficitEvidence) * hissLevel * clamp(m.noiseConfidence * 1.5, 0, 1), 0, 1);
       m.hfDropDb = bandMedian(spec, 6000, 8000) - bandMedian(spec, 12000, 16000);
       const smS = smoothSpec(spec, 6);
       let maxCliff = 0, cliffAt = 0;
@@ -949,21 +1396,26 @@
    * Used for the Before/After read-out so users can see the improvement.
    */
   function qualityScore(m) {
-    const topLoss = clamp(((m.hfCutoff || 0) < 17000 ? (17000 - (m.hfCutoff || 0)) / 9000 : 0), 0, 1);
-    const snr = clamp(m.snrDb / 60, 0, 1);
-    const hiss = clamp(m.hissAmount, 0, 1);
-    const crackle = clamp(m.crackleIndex, 0, 1);
+    // every term is guarded: a measurement that came out non-finite (a corrupt
+    // file, an empty buffer) must still produce a number, never a `NaN %` on
+    // screen or a `NaN` parameter downstream
+    const n = (x, d) => (isFinite(x) ? x : (d === undefined ? 0 : d));
+    const cut = n(m.hfCutoff, 0);
+    const topLoss = clamp(cut < 17000 ? (17000 - cut) / 9000 : 0, 0, 1);
+    const snr = clamp(n(m.snrDb) / 60, 0, 1);
+    const hiss = clamp(n(m.hissAmount), 0, 1);
+    const crackle = clamp(n(m.crackleIndex), 0, 1);
     const s =
       100
-      - 24 * clamp(m.bassRoll, 0, 1)
-      - 16 * clamp(m.mudScore, 0, 1)
-      - 14 * clamp(m.harshness, 0, 1)
-      - 22 * clamp(topLoss * 0.6 + m.bandLimited * 0.4, 0, 1)
+      - 24 * clamp(n(m.bassRoll), 0, 1)
+      - 16 * clamp(n(m.mudScore), 0, 1)
+      - 14 * clamp(n(m.harshness), 0, 1)
+      - 22 * clamp(topLoss * 0.6 + n(m.bandLimited) * 0.4, 0, 1)
       - 16 * (1 - snr)
       - 12 * hiss
       - 12 * crackle
-      - 6 * clamp(m.humScore, 0, 1)
-      - 6 * clamp((m.clipRatio || 0) * 300, 0, 1);
+      - 6 * clamp(n(m.humScore), 0, 1)
+      - 6 * clamp(n(m.clipRatio) * 300, 0, 1);
     return clamp(Math.round(s), 0, 100);
   }
 
@@ -1231,6 +1683,14 @@
       this.a1 = -2 * c / a0; this.a2 = (1 - al) / a0;
       return this;
     }
+    /** Constant-peak-gain band pass, as the worklet's Biquad builds it. */
+    setBandpass(sr, f, q) {
+      const w = TWO_PI * clamp(f, 5, sr * 0.49) / sr;
+      const c = Math.cos(w), s = Math.sin(w), al = s / (2 * (q || 0.707)), a0 = 1 + al;
+      this.b0 = al / a0; this.b1 = 0; this.b2 = -al / a0;
+      this.a1 = -2 * c / a0; this.a2 = (1 - al) / a0;
+      return this;
+    }
     process(x) {
       const y = this.b0 * x + this.z1;
       this.z1 = this.b1 * x - this.a1 * y + this.z2;
@@ -1246,7 +1706,7 @@
     hann, blackman, fft, spectrum, bandLevel, bandMedian, smoothSpec,
     hfCutoff, ratioDb, slopeDbPerOct, peakDb, loudness,
     stepRange, scanStep, runSteps, runStepsAsync,
-    dynamicRange, clipRatio, humScore, stereoCorrelation, measure, measureAsync,
+    dynamicRange, clipRatio, humStep, resonanceScan, hfRaggedness, stereoCorrelation, measure, measureAsync,
     noiseAnalysis, crackleDetect,
     detectSampleRate, encodeWav, decodeWav, peaks, rmsEnvelope, Biquad,
     applyBiquad, biquadHP, qualityScore,

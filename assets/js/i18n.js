@@ -182,6 +182,7 @@
       'toast.renderFail': 'Rendern fehlgeschlagen: {msg}',
 
       'err.decode': 'Die Datei konnte nicht gelesen werden.',
+      'err.broken': 'Diese Datei enthält beschädigte Audiodaten (keine gültigen Samples) — sie lässt sich nicht reparieren.',
       'err.render': 'Das Rendern ist fehlgeschlagen.',
 
       /* -------------------------------------------------------- German legal */
@@ -239,7 +240,7 @@
 <p>Spenden sind freiwillig und kein Kauf — die Adressen stehen im Fußbereich. Danke für jede Rückmeldung.</p>`,
 
       'about.body': `
-<p><strong>Version 1.3</strong> — eine komplette Audio-Restaurations-Kette im Browser. Alles rechnet auf deinem Gerät.</p>
+<p><strong>Version 1.4</strong> — eine komplette Audio-Restaurations-Kette im Browser. Alles rechnet auf deinem Gerät.</p>
 <h3>Die Kette in Reihenfolge</h3>
 <ul>
   <li><strong>Entzerren (EQ):</strong> sechs Bänder, automatisch anhand der Messung dosiert.</li>
@@ -468,6 +469,7 @@
       'toast.renderFail': 'Rendering failed: {msg}',
 
       'err.decode': 'The file could not be read.',
+      'err.broken': 'This file contains corrupted audio data (no valid samples) — it cannot be repaired.',
       'err.render': 'Rendering failed.',
 
       /* ------------------------------------------------------- English legal */
@@ -525,7 +527,7 @@
 <p>Tips are voluntary and not a purchase — the addresses are in the footer. Thanks for any feedback.</p>`,
 
       'about.body': `
-<p><strong>Version 1.3</strong> — a complete audio restoration chain in the browser. Everything computes on your device.</p>
+<p><strong>Version 1.4</strong> — a complete audio restoration chain in the browser. Everything computes on your device.</p>
 <h3>The chain, in order</h3>
 <ul>
   <li><strong>Corrective EQ:</strong> six bands, dosed automatically from the measurement.</li>

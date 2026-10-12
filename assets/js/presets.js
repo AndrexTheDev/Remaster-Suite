@@ -53,6 +53,13 @@
     glue: 0.35,        // glue compression
     warmth: 0.45,      // saturation
     tilt: 0.35,        // tone tilt
+    // The three below are repairs, so they are allowed to work hard — but only
+    // where something was measured: hum is notched by the measured mains level,
+    // boxiness by the measured resonance, width by the measured image.
+    hum: 0.85,         // mains notches (−36 dB at the fundamental at 0.85)
+    box: 3.5,          // dB taken out of the strongest measured resonance
+    width: 0.55,       // stereo width restoration (≈ +3.4 dB of side signal)
+    airRoom: 0.95,     // how much top end the synthesiser may rebuild
   };
 
   /* The same for a profile the *user* picked by hand.
@@ -153,7 +160,12 @@
     const crackle = clamp(m.crackleIndex, 0, 1);
     const hum = clamp(m.humScore, 0, 1);
     const flat = clamp(m.noiseFlatness, 0, 1);
-    const rumble = clamp(m.noiseRumble, 0, 1) * (1 - 0.3 * flat);
+    // Low-frequency energy only counts as *rumble* when it is neither part of a
+    // flat noise bed (that is hiss, which already has its own term) nor sitting
+    // where a measured mains line is (that is hum). Without both discounts a
+    // hissy, hummy, bottom-less old recording scores as a turntable, because its
+    // only low-frequency content is noise.
+    const rumble = clamp(m.noiseRumble, 0, 1) * (1 - 0.3 * flat) * (1 - 0.5 * flat) * (1 - 0.5 * hum);
     const hiss = clamp(m.hissAmount, 0, 1);
     const clean = clamp(m.cleanliness, 0, 1);
     const dull = clamp(Math.max(m.dullIndex || 0, m.topLoss || 0), 0, 1);
@@ -163,17 +175,26 @@
     const harsh = clamp(m.harshness, 0, 1);
 
     const s = {};
-    // vinyl rip: crackle is the signature, backed by hum, rumble and surface noise
-    s.vinyl = clamp((0.55 * crackle + 0.16 * hum + 0.14 * rumble + 0.12 * hiss + 0.08 * (1 - brick))
+    // vinyl rip: crackle is the signature, backed by rumble and surface noise.
+    //
+    // Mains hum is deliberately *not* one of them any more. Hum is interference,
+    // not a medium: it turns up on tape, on a live desk and in a one-microphone
+    // garage recording just as often as on a turntable, and with the hum
+    // measurement fixed it was single-handedly pushing every hummy old recording
+    // into the vinyl profile. A record instead has a *bottom end* (a mechanically
+    // coupled one), which is what `1 − thin` says here.
+    s.vinyl = clamp((0.58 * crackle + 0.16 * rumble + 0.09 * hiss + 0.08 * (1 - brick) + 0.06 * (1 - thin))
       * (crackle > 0.06 ? 1 : 0.42), 0, 1);
     // cassette: steady hiss, flat noise floor, rolled-off top, no crackle
     s.cassette = clamp(0.75 * hiss + 0.25 * flat * (1 - crackle) + 0.20 * dull * (1 - brick), 0, 1);
     // low bitrate / MP3: hard spectral cliff on otherwise clean material
     s.lowbitrate = clamp((0.62 * brick + 0.30 * clean * (1 - hiss) + 0.16 * dull * (1 - flat))
       * (1 - 0.5 * hiss) * (1 - 0.5 * crackle), 0, 1);
-    // 60s/70s garage or one-mic room session: thin, boxy, dull, noisy, analogue
-    s.garage = clamp(0.40 * dull * (1 - 0.7 * brick) + 0.20 * mud + 0.16 * thin
-      + 0.14 * rumble * (1 - flat) + 0.10 * (1 - clean), 0, 1);
+    // 60s/70s garage or one-mic room session: thin, boxy, dull, noisy, analogue —
+    // and, because it was cut in a room with whatever wiring was there, often
+    // hummy as well
+    s.garage = clamp(0.42 * dull * (1 - 0.7 * brick) + 0.20 * mud + 0.22 * thin
+      + 0.14 * rumble * (1 - flat) + 0.10 * (1 - clean) + 0.06 * hum + 0.10 * hiss, 0, 1);
     // telephone / dictaphone / badly band-limited source
     s.narrowband = clamp((9000 - cut) / 5000, 0, 1);
 
@@ -218,13 +239,31 @@
     // (4.6–7.5 kHz below the 0.8–1.6 kHz midrange): healthy ≈ 6 dB, rolled off
     // ≈ 9 dB, gone ≈ 18 dB.
     const gap = m.deriveGapDb === undefined ? 8 : clamp(m.deriveGapDb, 0, 30);
+    // The same distinction separates a codec from a genuinely dull recording:
+    // when the top end ends in a *cliff* (a bitrate low-pass), the content above
+    // it was there before the encoder removed it, so rebuilding it from the band
+    // just below the cliff is restoration — not invention. `brickwall` is the
+    // measured steepness of that cliff.
+    const brick = clamp(m.brickwall || 0, 0, 1);
+    const codecRoom = clamp(0.30 + 0.55 * brick, 0, 0.85);
+    // …and how far the synthesised band may reach above the one it was derived
+    // from. This is *not* a second reward for having a cliff — the cliff already
+    // raised `deriveRoom` above. It rises on one condition only: that the
+    // derivation band itself had to move down. A cliff at 11 kHz leaves the
+    // 6 kHz source untouched and nothing changes here; a cliff at 5 kHz forces
+    // the source down to ≈3.6 kHz, where the same synthesis produces a thinner
+    // result and has to be allowed to work harder.
+    const ragged = clamp(m.hfRagged || 0, 0, 1);
+    const srcShift = clamp((7000 - (m.cliffHz || 20000)) / 4500, 0, 1);
+    const airRoom = clamp(0.5 + 0.40 * srcShift * (1 - ragged), 0.5, 0.90);
+
     // Automatic mode stays inside the published budget (never below 0.30);
     // an explicitly chosen profile may rebuild more of a missing top end
     // (never below 0.65), which is how "garage"/"low bitrate" keep their
     // character on material whose top end is genuinely gone.
     const deriveRoom = manual
       ? clamp(1 - (gap - 8) / 40, 0.65, 1)
-      : clamp(1 - (gap - 8) / 18, 0.30, 1);
+      : Math.max(clamp(1 - (gap - 8) / 18, 0.30, 1), codecRoom);
 
     // how much low end is missing (bassRoll = 34–58 Hz below the −3 dB/oct line)
     const subDeficitDb = clamp((m.bassRoll || 0) * 16, 0, 16);
@@ -235,10 +274,26 @@
     const harshExcessDb = clamp((m.harshness || 0) * 10, 0, 10);
     const boxExcessDb = clamp(Math.max(band(2), 0), 0, 12);
 
+    // ── mains hum ─────────────────────────────────────────────────────────
+    // `humScore` comes from the exact-frequency measurement with its
+    // stationarity check, so a sustained bass note measured as "not always
+    // there" scores low even though it is strong.
+    const humNeed = clamp(m.humScore || 0, 0, 1);
+    // the strongest measured narrow resonance (boxy room, honky cabinet)
+    const resoList = m.resonances || [];
+    const resoExcess = resoList.length ? clamp(resoList[0].excessDb || 0, 0, 12) : 0;
+
+    // ── stereo width ──────────────────────────────────────────────────────
+    // A narrow image is a *correlated* one. Mono is the limit case (ρ = 1) and
+    // is left alone: there is no side signal to widen, and inventing one would
+    // be a fake image. `widenNeed` only rises where the channels are correlated
+    // but not identical.
+    const rho = m.correlation === undefined ? 1 : clamp(m.correlation, -1, 1);
+    const widenNeed = (m.channels > 1 ? smoothstep(0.55, 0.93, rho) : 0) * (1 - smoothstep(0.995, 1, rho));
+
     // noise: only repair what was confidently measured
     const hissNeed = clamp((m.hissAmount || 0) * clamp((m.noiseConfidence || 0) * 1.5, 0, 1), 0, 1);
     const crackleNeed = clamp(m.crackleIndex || 0, 0, 1);
-    const humNeed = clamp(m.humScore || 0, 0, 1);
 
     // is there headroom to add anything at all? (a master that already peaks at
     // −0.2 dBFS must not receive another 3 dB of bass)
@@ -255,9 +310,12 @@
       needAir: clamp(Math.max(airDeficitDb / 20, (m.brickwall || 0) * 0.9), 0, 1),
       deriveRoom,
       needSub: clamp(subDeficitDb / 12, 0, 1),
+      humNeed, resoNeed: clamp((resoExcess - 2) / 8, 0, 1), resoExcess,
+      resoList, widenNeed, airRoom, codecRoom,
       needMud: clamp(mudExcessDb / 10, 0, 1),
       needHarsh: clamp(harshExcessDb / 8, 0, 1),
-      needReso: clamp(Math.max(mudExcessDb / 12, harshExcessDb / 10, boxExcessDb / 10), 0, 1),
+      needReso: clamp(Math.max(mudExcessDb / 12, harshExcessDb / 10, boxExcessDb / 10,
+        (resoExcess - 2) / 8), 0, 1),
       bandExcess: [0, 1, 2, 3, 4, 5].map(band),
       confidence: c.confidence,
     };
@@ -342,18 +400,33 @@
     // factor that separates "rolled off, worth rebuilding" from "gone, leave it
     // alone", and it is deliberately applied to the amount, after the dose curve
     a.air = clamp(a.air * airDose * D.headroom * D.deriveRoom, 0, cap.air);
+    // The *ceiling* is a separate axis from the amount. `deriveRoom` says how
+    // much of the missing top end is worth asking for; `airRoom` says how far
+    // above the band it was derived from the synthesised band may reach. On a
+    // codec-damaged file the surviving band sits just below the cliff and the
+    // rebuilt band has to be able to stand on its own; on a healthy file the
+    // ceiling never leaves the shipped 0.5. It needs no power term of its own:
+    // the worklet multiplies the synthesised band by the (power-dosed) air
+    // amount *after* the ceiling, so a lower slider position stays quieter than
+    // a higher one whatever the ceiling is.
+    a.airRoom = clamp(D.airRoom, 0.5, cap.airRoom);
 
     /* ── 6 · noise repair ─────────────────────────────────────────────────
      * De-hiss and de-click are repairs: they engage in proportion to the
      * measured problem, plus a small amount for material with a high broadband
      * floor, and never on a signal that was measured as clean. */
-    const floorExtra = clamp((clamp(m.noiseFloorDb, -95, -30) + 58) / 22, 0, 1);
+    const floorExtra = clamp((clamp(num(m.noiseFloorDb, -70), -95, -30) + 58) / 22, 0, 1);
     // Half of a repair stage comes from the profile (that is what picking
     // "vinyl" or "cassette" means) and half from the measurement (how much
     // was detected). Both modules are threshold-gated inside the worklet — they
     // only touch samples their own detector flags — so a half amount on clean
     // material measures as a no-op rather than as damage.
-    const hissDose = smoothstep(0.04, 0.45, Math.max(D.hissNeed, D.humNeed * 0.7));
+    // The de-hisser now subtracts the *measured* amount of top-end noise (the
+    // analyser reports how many dB of the 4–16 kHz band the programme cannot
+    // account for), so its amount is a fraction of a real repair rather than a
+    // strength on a gate: anything the measurement is sure about is applied in
+    // full, and a marginal reading stays marginal.
+    const hissDose = smoothstep(0.04, 0.40, D.hissNeed);
     a.dehiss = clamp(a.dehiss * (0.5 + 0.5 * hissDose) + 0.25 * floorExtra * D.hissNeed, 0, cap.dehiss);
     a.declick = clamp(a.declick * (0.5 + 0.5 * smoothstep(0.03, 0.40, D.crackleNeed)), 0, cap.declick);
 
@@ -366,6 +439,63 @@
     a.warmth = a.warmth * (D.dense ? 0.45 : 1) * D.headroom;
     if (drDb < 12) a.warmth = Math.min(a.warmth, 0.20);
     a.warmth = clamp(a.warmth, 0, cap.warmth);
+
+    /* ── 7b · mains hum ───────────────────────────────────────────────────
+     * A repair with a lot of authority (−36 dB at the fundamental), so it is
+     * dosed from the measurement alone: the exact-frequency detector reports how
+     * far the 50/60 Hz tone sits above the surrounding spectrum *and* whether it
+     * was there in every segment of the file. A sustained musical note is loud
+     * but not stationary, and a level that never moves is what hum is. */
+    const humGate = smoothstep(0.05, 0.25, D.humNeed);
+    // The depth is the *measured* excess, not "as deep as the cap allows":
+    // removing `G` dB from a tone that stood `E` dB proud of its neighbours
+    // leaves `E − G` there, so `G ≈ E` is the one dose that lands the mains line
+    // on top of the music instead of either leaving hum or cutting a bass hole.
+    // (The worklet's law is −42 dB at the fundamental for `hum = 1`.)
+    // …plus three decibels of margin, because the chain hands the notch a signal
+    // with more low end than the source had: sub synthesis and saturation both
+    // put energy back at the mains frequency. Measured on the garage fixture, a
+    // notch sized to the source excess left the 50 Hz line 2.5 dB proud of its
+    // shoulders at the output; three decibels of margin lands it on the
+    // detector's own floor, and the notch stays five hertz wide either way.
+    const humWantDb = clamp((m.humPeakDb || 0) + 3, 0, 32);
+    a.hum = clamp((humWantDb / 42) * humGate, 0, cap.hum);
+    // …and the same, measured, for the two harmonics that carry mains buzz. A
+    // pure 50 Hz line (the usual case) leaves them at zero, so the bass that
+    // lives at 100 and 150 Hz is not touched; a recording with real harmonic
+    // content on the mains gets each one notched by exactly its own excess.
+    a.hum2 = clamp((clamp((m.hum2Db || 0) + 2, 0, 32) / 42) * humGate, 0, cap.hum);
+    a.hum3 = clamp((clamp((m.hum3Db || 0) + 2, 0, 32) / 42) * humGate, 0, cap.hum);
+    a.humHz = m.mainsHz === 60 ? 60 : 50;
+
+    /* ── 7c · boxiness: the measured resonances ───────────────────────────
+     * The dynamic de-resonator (below, `reso`) only pulls down what rings above
+     * its own running average — which a *constant* colouration never does, it is
+     * the average. Those need a static notch, and the measurement now finds them
+     * precisely (narrow peak, ≥ 3 dB above the local trend, 150–1800 Hz). The
+     * cut is deliberately shallow (≤ 3.5 dB): a mis-placed notch costs a third
+     * of an octave, while an untouched honk colours the whole record. */
+    const boxes = (D.resoList || []).slice(0, 2);
+    a.box = [0, 0];
+    a.boxF = [200, 400];
+    a.boxQ = [3, 3];
+    for (let i = 0; i < boxes.length; i++) {
+      const r = boxes[i];
+      const dose = smoothstep(3.2, 5.2, r.excessDb) * D.headroom;
+      const depth = Math.min(cap.box, 0.55 * r.excessDb) * dose;
+      // each notch carries its own allowance: two narrow notches half an octave
+      // apart do not add up, so a shared budget only ever starved the second one
+      const take = Math.min(depth, cap.box);
+      a.box[i] = -take;
+      a.boxF[i] = clamp(r.hz, 100, 1800);
+      a.boxQ[i] = clamp(r.q || 3, 1.4, 6);
+    }
+
+    /* ── 7d · stereo width ────────────────────────────────────────────────
+     * Only for an image that is narrow (channels strongly correlated) and not
+     * mono: the worklet adds the high-passed side signal, so the bass stays in
+     * the centre and a mono master stays mono. */
+    a.width = clamp(cap.width * smoothstep(0.08, 0.55, D.widenNeed), 0, cap.width);
 
     /* ── 8 · tone tilt ────────────────────────────────────────────────────
      * A gentle nudge, at most a quarter of what was measured, and only when
@@ -382,6 +512,18 @@
    * @param {number} power 0..1
    * @param {object} [overrides] manual tweaks
    */
+  /** Last line of defence against a parameter that was never measured. */
+  /** What a parameter means when the measurement could not provide a value. */
+  const NEUTRAL = {
+    autoLevel: 1, noiseFloor: -70, hissFloor: -80, airRoom: 0.5, airF: 6000, subRatio: 0.5,
+    humHz: 50, boxF1: 120, boxF2: 240, boxQ1: 3, boxQ2: 3,
+  };
+
+  function num(v, dflt) {
+    const x = Number(v);
+    return isFinite(x) ? x : dflt;
+  }
+
   function buildParams(presetId, metrics, power, overrides) {
     const diag = classify(metrics);
     // "auto" is not a sound of its own: it resolves to whatever was detected
@@ -402,6 +544,11 @@
     // repair stages (de-hiss, de-click) engage a little earlier than the
     // creative ones — but never before the slider has left zero
     const repair = (x) => x * (0.35 + 0.65 * amt) * on;
+    // Measured defects are not a matter of taste: once the slider has left zero,
+    // hum, boxiness and a collapsed image are fixed by the *measurement* — a
+    // mains notch shallower than the hum leaves the hum, and one deeper than it
+    // cuts the bass. These are gated, never scaled down.
+    const fix = (x) => x * smoothstep(0, 0.20, p);
 
     // bands are an amount like every other: they follow the same curve as the
     // rest of the chain (`p` alone made them 3 dB weaker at half power, which is
@@ -422,11 +569,46 @@
       glue: a.glue * amt,
       warmth: a.warmth * amt,
       tilt: a.tilt * p,
-      noiseFloor: clamp(metrics.noiseFloorDb, -95, -30),
-      hissFloor: clamp(metrics.hfNoiseFloorDb, -110, -25),
+      // Repairs that live outside the power curve: hum and the measured
+      // resonance notches are either measured or they are not, and a slider at
+      // 100 % must not invent them. They are gated by `p` (0 % stays
+      // bit-transparent) but otherwise applied as measured.
+      hum: fix(a.hum),
+      hum2: fix(a.hum2 || 0),
+      hum3: fix(a.hum3 || 0),
+      humHz: a.humHz,
+      boxG1: num(fix(a.box[0]), 0), boxF1: a.boxF[0], boxQ1: a.boxQ[0],
+      boxG2: num(fix(a.box[1]), 0), boxF2: a.boxF[1], boxQ2: a.boxQ[1],
+      // width is taste, not a defect: it follows the repair curve with the rest
+      width: num(repair(a.width), 0),
+      // how much top end the synthesiser may rebuild, and where it derives it
+      // from: a low-bitrate file needs the source band below its cliff, not the
+      // fixed 6 kHz band that sits partly above it. (`num` keeps a parameter
+      // that was never measured out of the worklet — a NaN there would silently
+      // switch the air band off.)
+      airRoom: num(a.airRoom, 0.5),
+      airF: num(clamp((metrics.brickwall || 0) > 0.3 && metrics.cliffHz ? metrics.cliffHz * 0.72 : 6000, 2200, 6000), 6000),
+      noiseFloor: clamp(num(metrics.noiseFloorDb, -70), -95, -30),
+      // The de-hisser's level reference is the HF band's RMS in the quiet
+      // passages (`hissRefDb`), not the spectrum's band sum: the worklet gates on
+      // an RMS of that band, so the two numbers have to be the same quantity.
+      hissFloor: clamp(num(metrics.hissRefDb, num(metrics.hfNoiseFloorDb, -80)), -110, -25),
+      // the programme's own HF − MID tilt, and how much of the top end the
+      // measurement found to be noise rather than programme (dB)
+      hissTilt: num(metrics.musicTiltDb, 0),
+      hissMax: num(clamp((metrics.hissTiltStepDb || 0) - 1.0, 0, 18), 0),
       autoLevel: 1,
     };
     if (overrides) Object.assign(params, overrides);
+    // Belt and braces: whatever the measurement was, the worklet never receives a
+    // non-finite number. A `NaN` parameter does not fail loudly — it either
+    // switches a stage off or poisons the whole signal, and the file comes out
+    // silent. `NEUTRAL` is "that stage does nothing" for the few parameters where
+    // zero is not neutral; everything else falls back to zero.
+    for (const k of Object.keys(params)) {
+      const v = params[k];
+      if (typeof v === 'number' && !isFinite(v)) params[k] = NEUTRAL[k] === undefined ? 0 : NEUTRAL[k];
+    }
     return params;
   }
 

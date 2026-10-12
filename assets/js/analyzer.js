@@ -192,6 +192,10 @@
     report(0, 'measure');
     // the measurement is about three quarters of the work
     const metrics = await DSP.measureAsync(channels, sr, (p) => report(p * 0.74, 'measure'));
+    // A file that is not made of numbers cannot be repaired: every filter in the
+    // chain would carry the NaN to the end of the output. Refuse it here, with a
+    // message, instead of handing the render parameters built from nonsense.
+    if (metrics.nonFinite) throw new Error('broken-audio');
     report(0.76, 'diagnose');
     const diag = Presets.diagnose(metrics);
 

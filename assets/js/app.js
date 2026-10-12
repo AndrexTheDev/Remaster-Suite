@@ -729,7 +729,10 @@
       setStatus(card, 'error');
       if (card.el.bar) card.el.bar.classList.add('is-error');
       clearCardWork(card);
-      setNote(card, (err && err.message) === 'worklet-load-failed' ? t('toast.workletFail') : t('err.decode') + ' ' + (err && err.message ? '(' + err.message + ')' : ''), true);
+      const msg = err && err.message;
+      setNote(card, msg === 'worklet-load-failed' ? t('toast.workletFail')
+        : msg === 'broken-audio' ? t('err.broken')
+          : t('err.decode') + ' ' + (msg ? '(' + msg + ')' : ''), true);
       $('[data-act="retry"]', card.el.card).hidden = false;
     }
   }

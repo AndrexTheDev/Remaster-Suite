@@ -4,6 +4,114 @@ All notable changes to the Remaster Suite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are the ones shown in
 *About & credits*.
 
+## [1.4.0] — 2026-10-12
+
+**The measurement release.** Three repairs that were dosed from a number nobody had ever checked
+now measure the defect itself and subtract exactly that: mains hum is notched by the level its own
+line stands above the music, hiss is recognised by the tilt of the top end in the gaps rather than
+by a level that sane recordings never have, and the two strongest room resonances are found and
+notched by hand-picked frequency and depth. A narrow stereo image gets its sides back — but a mono
+master stays mono. Nothing about the interface changed.
+
+### Added
+
+* **Mains hum is measured, then removed — and only that.** The exact frequencies are examined
+  directly (50 and 60 Hz and their harmonics, each against its own shoulders five hertz away) in a
+  one-second Hann window, on a decimated copy of the signal, and the line has to be there for the
+  whole file *and* refuse to drop when the music drops: that is what tells mains hum apart from a
+  bass note that happens to be written at 50 Hz, and it is why a perfectly steady tune no longer
+  has to be damaged to repair a hum that was never there. Measured: a garage recording with
+  **13.4 dB** of hum above its own neighbourhood comes out at **2.5 dB** — below the detector's own
+  3 dB line for calling something hum — at the recommended strength, and **1.8 dB** at full
+  strength. The build before it left the line exactly where it was (its demand law never fired on
+  that material) and even added half a decibel; the 100/150 Hz bands are untouched because the hum
+  has no energy there, where the old harmonic notch fired whenever the fundamental did and took
+  20 dB out of them.
+* **The notch is three hertz wide, not five, and it sits last in the chain.** Hum drifts in hertz,
+  not in octaves, so the width is absolute and the frequency is the measured one. Placed last,
+  after the exciter, the sub synthesiser and the saturator — all of which put energy back at the
+  mains frequency — it has the final word; the narrower bell costs the octave below half a
+  decibel instead of 2.5 dB.
+* **A hiss measurement that works on loud material.** A tape hiss at −49 dBFS is 20 dB *below* the
+  quiet parts of a normal recording, so every floor-based detector misses exactly the case a
+  listener hears. The analyser now measures the **tilt** of the top end (4 kHz+ against the
+  1.45 kHz band) separately in the loud frames and in the quiet ones: programme keeps its tilt
+  when it gets quiet, a hiss does not. The difference is a calibrated number of decibels — how
+  much of the top end is not programme — and it is what the repair subtracts. Measured: 7.7 dB on
+  the 1970s garage fixture, 3.9 dB on the cassette, 0.0–0.1 dB on clean, codec-damaged and vinyl
+  material (so nothing happens there).
+* **The de-hisser is keyed on the same bands and the same window as the analyser** — a 2048-sample
+  sliding RMS of the 4 kHz+ band and of the 1.45 kHz band, where it used to be a peak-ish envelope
+  follower, i.e. a different number with an arbitrary constant between it and the measurement. The
+  dose is applied **in decibels**: half of the repair is −6 dB of the noise, where a linear
+  crossfade of the gate gains is far less than that at the bottom of the range. Measured on the
+  garage fixture: the top-end floor between the notes comes down **6.2 dB** and the programme's own
+  top end moves by less than 0.3 dB; a steady hiss between the notes of a very quiet bed comes down
+  32 dB; a loud, continuous master stays within 0.1 dB.
+* **A file that is not made of numbers is refused, not "restored".** One `NaN` sample in a 32-bit
+  float WAV poisons every recursive filter behind it — the output is silence, but a silence that
+  cost a full render and looks like a successful one. The measurement now reports whether the file
+  is numeric, the analyser refuses such a file with a message instead of rendering it, and
+  `buildParams` cannot emit a non-finite parameter at all: whatever the measurement was, a stage
+  that has no measured value does nothing rather than something undefined.
+* **Two measured resonance notches.** The dynamic de-resonator can only pull down what rings above
+  its own running average — a *constant* colouration is the average, so a boxy room or a honky
+  cabinet survives it. The measurement now finds the two strongest narrow peaks (150–1800 Hz, at
+  least 3.2 dB above the local trend) and notches each at its own frequency, depth (up to 3.5 dB)
+  and sharpness.
+* **Stereo width restoration.** An image whose channels are strongly correlated but not identical
+  (a 1970s two-track master, a mono-summed CD) gets up to ~3.4 dB of high-passed side signal above
+  200 Hz. A genuinely mono master is left alone: there is no side signal to widen, and inventing
+  one would be a fake image.
+* **The air synthesiser can now rebuild a top end that was never there.** Its source band used to
+  be fixed at 6 kHz; on a codec-damaged file that band sits *above* the cliff, so it was
+  synthesising out of rubble. It is now derived from the measured cliff (`0.72 × cliff`, 2.2–6 kHz)
+  and the ceiling the synthesised band may reach above it (`airRoom`) is dosed from how much
+  programme survived below the cliff.
+
+### Changed
+
+* **Mains hum is interference, not a medium.** The classifier no longer lets a measured hum vote
+  for "vinyl rip" — a 1970s home recording on a cheap deck is hummy for the same reason a turntable
+  is, and with the hum detector fixed it was single-handedly turning every hummy old recording into
+  a vinyl rip. What marks vinyl out is what a needle does: crackle, rumble and surface noise — and
+  low-frequency energy only counts as rumble when it is neither part of a flat noise bed (that is
+  hiss) nor sitting on a measured mains line.
+* **The garage profile gets a hiss term.** Tape hiss is as much a one-mic 1960s recording's problem
+  as a cassette's, and the fixture that used to be diagnosed as a dull, thin, noisy recording is
+  now measured as just that instead of as a turntable.
+* **The analysis got several times cheaper.** The hum measurement used to be 21 resonators running
+  over every sample of every frame and was the single most expensive thing in the measurement pass;
+  it is now one decimated, windowed DFT of 27 exact frequencies. The four per-sample statistics
+  (peak, clipped samples, loudness and dynamic range) used to be four separate walks over the whole
+  file; they are now one, and the hiss band measurement fills its frames as it filters instead of
+  keeping a copy of the filtered signal to read back — 280 MB of buffers on a three-minute stereo
+  file that no longer exist. A three-minute stereo file measures in **1.3 s** in the suite's Node
+  run (2.4 s before) and in **1.7–1.9 s** inside the test browser — measured cold, while the test
+  process was still building the fixture — which is what keeps a phone inside its progress budget. (The largest remaining cost of an upload
+  is not the measurement at all but the 40-second preview render through the worklet: 3.2 s in the
+  test browser, measured.)
+
+### Verified
+
+* Five dependency-free suites: **552 checks** (dsp 73 · audit 224 · web 130 · e2e 108 · tuning 17),
+  all green.
+* The beta suite drives a real headless Chromium (drag-and-drop, Web Audio worklet, downloads,
+  phone viewports) and now feeds it the **same synthesised recordings the node suites use**,
+  served to the page and dropped like a user file, instead of signals generated inside the page.
+  It measures the phases of an upload as well as its total, so a regression can be attributed:
+  for a three-minute stereo take, decode 205 ms · measurement 1.3 s · preview render 3.2 s ·
+  preview measurement 0.4 s.
+* The mains notch has its own law section in the audit: a fixture with a *rich* hum (fundamental
+  plus two harmonics) proves each harmonic is dosed from its own measurement, a pure 50 Hz line
+  must not notch 100 or 150 Hz, the octave below the mains has to stay within 2 dB, and at 0 % dose
+  the notch must be out of the signal path entirely.
+* The de-hiss repair is a test, not a claim: the top-end floor between the notes has to come down
+  by more than 3 dB while the programme's own top end stays within 0.5 dB.
+* The two test bands that straddled the mains line (30–60 Hz and 32–58 Hz) now measure *below* it;
+  they were subtracting a repair from a restoration and calling the difference "sub bass".
+* The brightness and loudness contracts of 1.2.0 are unchanged and still enforced.
+
 ## [1.3.0] — 2026-10-12
 
 **The progress-and-phone release.** A long file now says what it is doing, how far along it is

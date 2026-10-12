@@ -167,6 +167,43 @@ H.section('engine · de-hiss (HF expander)');
   H.ok(loss < 2.5, 'leans out of the way on clean, continuous music', loss.toFixed(1) + ' dB');
 }
 
+H.section('engine · de-hiss, dosed by the measurement');
+{
+  // The whole point of a hiss repair is *where* it acts: the floor between the
+  // notes has to come down, and the music has to stay where it was. A stage that
+  // moves only the average is either doing nothing or damaging everything.
+  const sim = H.garageSim(RSDSP, SR, 14);
+  const metrics = RSDSP.measure([sim], SR);
+  const law = RP.buildParams('auto', metrics, 1);
+  const floor = (x) => {
+    const n = 2048, buf = new Float64Array(n);
+    const f1 = new RSDSP.Biquad(), f2 = new RSDSP.Biquad();
+    f1.setHighpass(SR, 4000, 0.707); f2.setHighpass(SR, 4000, 0.707);
+    let sum = 0, i = 0;
+    const vals = [];
+    for (let k = 0; k < x.length; k++) {
+      const v = f2.process(f1.process(x[k]));
+      const q = v * v;
+      sum += q - buf[i]; buf[i] = q; i++; if (i >= n) i = 0;
+      if (k % 512 === 0) vals.push(Math.sqrt(Math.max(sum, 0) / n));
+    }
+    vals.sort((a, b) => a - b);
+    const q = (p) => 20 * Math.log10(Math.max(vals[Math.floor(vals.length * p)], 1e-12));
+    return { p05: q(0.05), p50: q(0.50) };
+  };
+  H.ok(metrics.hissTiltStepDb > 3 && law.hissMax > 0.5,
+    'the analyser measures how much of the top end is noise',
+    metrics.hissTiltStepDb.toFixed(1) + ' dB step · hiss ' + metrics.hissAmount.toFixed(2)
+    + ' → dehiss ' + law.dehiss.toFixed(2) + ', max ' + law.hissMax.toFixed(1) + ' dB');
+  const dry = floor(sim);
+  const off = floor(H.render(Processor, [sim], Object.assign({}, law, { dehiss: 0 }))[0]);
+  const on = floor(H.render(Processor, [sim], law)[0]);
+  H.ok(on.p05 < off.p05 - 3, 'the room tone between the notes comes down',
+    off.p05.toFixed(1) + ' → ' + on.p05.toFixed(1) + ' dB HF floor (' + (off.p05 - on.p05).toFixed(1) + ' dB)');
+  H.ok(Math.abs(on.p50 - off.p50) < 0.5, '…while the music itself does not move',
+    off.p50.toFixed(1) + ' → ' + on.p50.toFixed(1) + ' dB');
+}
+
 H.section('engine · de-clicker');
 {
   const base = H.normalize(H.filter(RSDSP, H.pink(SR, 4, 0.25, 33), SR, 'lp', 9000, 0.707), 0.55);
@@ -402,6 +439,34 @@ H.section('codecs · JSZip + lamejs availability (vendored fallbacks)');
         `lamejs produces a valid MP3 stream (${mp3.length} bytes)`);
     }
   }
+}
+
+H.section('measurement · a broken file never becomes NaN parameters');
+{
+  // A WAV of float samples can contain anything, including NaNs. One NaN poisons
+  // every IIR filter for the rest of the file (the state stays NaN), so the chain
+  // must never be handed parameters built from a non-finite measurement — the
+  // user would get a silent, "perfectly remastered" file. The measurement marks
+  // such a file, still reports a finite score, and presets.js refuses to pass
+  // anything non-finite on.
+  const bad = new Float32Array(SR * 2);
+  for (let i = 0; i < bad.length; i++) bad[i] = Math.sin(i * 0.01) * 0.2;
+  bad[137] = NaN;                                   // one corrupt sample
+  const m = RSDSP.measure([bad], SR);
+  H.ok(m.nonFinite === true, 'the measurement notices a file that is not made of numbers',
+    'nonFinite=' + m.nonFinite + ' · peak ' + m.peakDb.toFixed(1) + ' dB');
+  H.ok(isFinite(m.score), 'and still reports a finite score instead of NaN %', m.score + ' / 100');
+
+  const params = RP.buildParams('auto', m, 0.8);
+  const badParams = Object.entries(params).filter(([, v]) => typeof v === 'number' && !isFinite(v));
+  H.ok(badParams.length === 0, 'every parameter built from that measurement is finite',
+    Object.keys(params).length + ' parameters · ' + (badParams.length ? badParams[0][0] : 'clean'));
+
+  // …and the guard does not fire on real recordings
+  const sims = [H.garageSim(RSDSP, SR, 8), H.cassetteSim(RSDSP, SR, 8),
+    H.vinylSim(RSDSP, SR, 8), H.lowBitrateSim(RSDSP, SR, 8)];
+  H.ok(sims.every((sig) => RSDSP.measure([sig], SR).nonFinite === false),
+    'the four problem recordings measure as numeric');
 }
 
 /* ═════════════════════════════════════════ the sliced measurement (progress) ══ */

@@ -487,12 +487,31 @@ section('audit · presets and parameters');
   ok(problems.length === 0, 'all six profiles are complete and sane', problems.join(', '));
   ok(Presets.PRESET_ORDER.length === 6 && Presets.PRESET_ORDER[0] === 'auto', 'the menu is anchored on "auto"');
 
-  // the worklet is the contract: every parameter it declares must be reachable?
-  const declared = [...workletSrc.matchAll(/k\('(\w+)'/g)].map((m) => m[1]);
-  ok(declared.length === 21, 'the processor declares 21 parameters', String(declared.length));
-  const ranges = { power: [0, 1], bypass: [0, 1], sub: [0, 1], subRatio: [0.34, 0.66], exciter: [0, 1], air: [0, 1], dehiss: [0, 1], declick: [0, 1], reso: [0, 1], glue: [0, 1], warmth: [0, 1], tilt: [-1, 1], noiseFloor: [-100, -20], hissFloor: [-110, -20], autoLevel: [0, 1] };
-  const sims = { garage: H.garageSim(DSP, 48000, 6), cassette: H.cassetteSim(DSP, 48000, 6), vinyl: H.vinylSim(DSP, 48000, 6), lowbitrate: H.lowBitrateSim(DSP, 48000, 6), clean: DSP.smoothSpec ? H.cassetteSim(DSP, 48000, 6) : null };
+  // the worklet is the contract. The descriptors are read *from the worklet* —
+  // name, default and the range it declares — so this cannot drift out of date
+  // the way a hand-written table does: a parameter added to the law without a
+  // descriptor (or set outside the range the worklet promises to accept) fails.
+  const declared = [];
+  const ranges = {};
+  for (const m of workletSrc.matchAll(/k\('(\w+)',\s*(-?[\d.]+)(?:,\s*(-?[\d.]+),\s*(-?[\d.]+))?\)/g)) {
+    declared.push(m[1]);
+    const dflt = Number(m[2]);
+    ranges[m[1]] = m[3] === undefined ? [Math.min(0, dflt), Math.max(1, dflt)] : [Number(m[3]), Number(m[4])];
+  }
+  ok(declared.length === 36, 'the processor declares 36 parameters', String(declared.length));
+  // A mains line that is not a pure sine. Real hum arrives with its harmonics,
+  // and a recording with a 100 Hz buzz has to be notched there *because that was
+  // measured* — this is the fixture that proves the harmonic notches are wired to
+  // the law instead of riding along with the fundamental.
+  const humRich = (() => {
+    const out = Float32Array.from(H.garageSim(DSP, 48000, 6));
+    const second = H.tone(100, 48000, 6, 0.020), third = H.tone(150, 48000, 6, 0.016);
+    for (let i = 0; i < out.length; i++) out[i] += second[i] + third[i];
+    return out;
+  })();
+  const sims = { garage: H.garageSim(DSP, 48000, 6), humrich: humRich, cassette: H.cassetteSim(DSP, 48000, 6), vinyl: H.vinylSim(DSP, 48000, 6), lowbitrate: H.lowBitrateSim(DSP, 48000, 6), clean: DSP.smoothSpec ? H.cassetteSim(DSP, 48000, 6) : null };
   const outOfRange = [];
+  const seen = new Map();                       // which parameters the law actually moves
   for (const key of Object.keys(sims)) {
     const s = sims[key];
     if (!s) continue;
@@ -500,27 +519,61 @@ section('audit · presets and parameters');
     for (const p of [0, 0.25, 0.5, 0.75, 1]) {
       const params = Presets.buildParams('auto', m, p);
       const keys = Object.keys(params);
-      if (keys.length !== 21) outOfRange.push(key + ' @' + p + ': ' + keys.length + ' params');
+      if (keys.length !== declared.length) outOfRange.push(key + ' @' + p + ': ' + keys.length + ' params');
       for (const k of keys) {
         if (!isFinite(params[k])) { outOfRange.push(key + '@' + p + '.' + k + ' not finite'); continue; }
         if (!declared.includes(k)) { outOfRange.push('unknown param ' + k); continue; }
         const r = ranges[k];
-        if (!r) continue;                       // band0..5 checked below
         if (params[k] < r[0] - 1e-6 || params[k] > r[1] + 1e-6) outOfRange.push(key + '@' + p + '.' + k + '=' + params[k].toFixed(3) + ' outside [' + r[0] + ',' + r[1] + ']');
       }
-      for (let b = 0; b < 6; b++) {
-        const v = params['band' + b];
-        if (!isFinite(v) || Math.abs(v) > 15.000001) outOfRange.push(key + '@' + p + '.band' + b + '=' + v);
-      }
       if (params.power < 0 || params.power > 1) outOfRange.push(key + '@' + p + '.power');
+      for (const k of keys) seen.set(k, seen.get(k) || Math.abs(params[k] - ranges[k][0]) > 1e-9);
     }
   }
   ok(outOfRange.length === 0, 'every parameter stays inside its declared range', outOfRange.slice(0, 4).join(' | '));
 
+  // …and the other direction: a descriptor nobody ever sets is dead weight, and
+  // a *repair* parameter that the law never moves is a feature that cannot fire.
+  // A narrow *stereo* pair, which the mono sims cannot provide: a collapsed
+  // image is the one defect that needs both channels at once. (Identical
+  // channels are mono, and mono deliberately stays mono.)
+  const narrowPair = (() => {
+    const first = H.garageSim(DSP, 48000, 6);
+    const second = Float32Array.from(first);
+    const room = H.noise(48000, 6, 0.05, 77);
+    for (let i = 0; i < second.length; i++) second[i] += room[i];
+    return [first, second];
+  })();
+  const stereoM = DSP.measure(narrowPair, 48000);
+  ok(Presets.buildParams('auto', stereoM, 0.8).width > 0.05,
+    'a narrow stereo image asks for width', Presets.buildParams('auto', stereoM, 0.8).width.toFixed(2));
+  ok(Presets.buildParams('auto', DSP.measure([sims.garage, sims.garage], 48000), 0.8).width === 0,
+    '…and a mono master is left alone');
+
+  const probes = Object.keys(sims).map((key) => () => DSP.measure([sims[key]], 48000)).concat([() => stereoM]);
+  const untouched = declared.filter((k) => {
+    if (k === 'bypass') return false;            // the A/B switch, not a law parameter
+    let moved = false;
+    for (const probe of probes) {
+      for (const p of [0.25, 0.75, 1]) {
+        const q = Presets.buildParams('auto', probe(), p);
+        if (Math.abs(q[k] - ranges[k][0]) > 1e-9) moved = true;
+      }
+    }
+    return !moved;
+  });
+  ok(untouched.length === 0, 'every declared parameter is driven by the law',
+    untouched.join(', ') || 'all ' + (declared.length - 1) + ' reachable');
+
   // 0 % must produce a completely inactive chain
   const zero = Presets.buildParams('auto', DSP.measure([sims.garage], 48000), 0);
+  // Amounts must be zero; the *rate* parameters (frequencies, sharpnesses, the
+  // level references the chain is told to expect) are not amounts — they sit at
+  // whatever was measured and are multiplied by a zero amount inside the worklet.
+  const RATES = ['noiseFloor', 'hissFloor', 'autoLevel', 'subRatio',
+    'humHz', 'boxF1', 'boxQ1', 'boxF2', 'boxQ2', 'airF', 'airRoom', 'hissTilt', 'hissMax'];
   const stillActive = Object.keys(zero).filter((k) => ['bypass'].indexOf(k) === -1 && Math.abs(zero[k]) > 1e-9
-    && ['noiseFloor', 'hissFloor', 'autoLevel', 'subRatio'].indexOf(k) === -1);
+    && RATES.indexOf(k) === -1);
   ok(stillActive.length === 0, 'at 0 % every module amount is exactly zero', stillActive.join(', '));
   ok(zero.power === 0, 'at 0 % the dry/wet crossfade is fully dry', String(zero.power));
 
@@ -694,6 +747,65 @@ section('audit · DSP robustness');
 }
 
 /* ══════════════════════════════════════════════════════════ 7 · codec audit ══ */
+
+section('audit · the mains notch');
+{
+  const SR = 48000, SEC = 6;
+  const num = (v) => (Math.round(Number(v) * 10) / 10).toFixed(1);
+  const P = H.loadProcessor(SR);
+  // A programme with real low end and a mains line on top of it: 50 Hz and its
+  // two harmonics. Then the same programme with a *pure* 50 Hz line, which must
+  // leave 100 and 150 Hz exactly where they were.
+  const bed = (() => {
+    const out = Float32Array.from(H.cassetteSim(DSP, SR, SEC));
+    const bass = H.tone(40, SR, SEC, 0.08);
+    for (let i = 0; i < out.length; i++) out[i] = out[i] * 0.4 + bass[i];
+    return out;
+  })();
+  const add = (sig, f, a) => {
+    const t = H.tone(f, SR, SEC, a), o = Float32Array.from(sig);
+    for (let i = 0; i < o.length; i++) o[i] += t[i];
+    return o;
+  };
+  const plain = add(bed, 50, 0.030);
+  const rich = add(add(plain, 100, 0.022), 150, 0.016);
+  // Only the notch is active: everything else at zero, and the level matcher off,
+  // so the numbers are the notch's and nothing else's.
+  const bare = { power: 1, bypass: 0, sub: 0, subRatio: 0.5, exciter: 0, air: 0, dehiss: 0, declick: 0, reso: 0,
+    glue: 0, warmth: 0, tilt: 0, band0: 0, band1: 0, band2: 0, band3: 0, band4: 0, band5: 0,
+    boxG1: 0, boxF1: 200, boxQ1: 3, boxG2: 0, boxF2: 400, boxQ2: 3, width: 0, airRoom: 0.5, airF: 6000,
+    noiseFloor: -70, hissFloor: -80, hissTilt: 0, hissMax: 0, autoLevel: 0, hum: 0, hum2: 0, hum3: 0, humHz: 50 };
+  const spec = (ch) => DSP.spectrum([ch], SR, { fftSize: 16384 });
+  const line = (ch, f) => DSP.bandLevel(spec(ch), f - 1.5, f + 1.5);
+  const octave = (ch) => DSP.bandLevel(spec(ch), 32, 45);
+
+  const off = H.render(P, [rich], bare)[0];
+  const on = H.render(P, [rich], Object.assign({}, bare, { hum: 0.40, hum2: 0.30, hum3: 0.20 }))[0];
+  ok(line(on, 50) < line(off, 50) - 12, 'a dosed notch takes the mains fundamental out',
+    num(line(off, 50)) + ' → ' + num(line(on, 50)) + ' dB');
+  ok(line(on, 100) < line(off, 100) - 8 && line(on, 150) < line(off, 150) - 5,
+    '…and each harmonic it was dosed for',
+    '100 Hz ' + num(line(off, 100)) + ' → ' + num(line(on, 100))
+    + ' · 150 Hz ' + num(line(off, 150)) + ' → ' + num(line(on, 150)) + ' dB');
+  // A five-hertz notch cannot reach the octave below: the worst it takes out of
+  // 32–45 Hz is the top bin's skirt, just over a decibel, while the line itself
+  // loses more than twelve.
+  ok(octave(off) - octave(on) < 2,
+    'the octave below the mains is left alone (that is where the bass lives)',
+    num(octave(off)) + ' → ' + num(octave(on)) + ' dB');
+
+  const pureOff = H.render(P, [plain], bare)[0];
+  const pureOn = H.render(P, [plain], Object.assign({}, bare, { hum: 0.40 }))[0];
+  ok(line(pureOn, 100) > line(pureOff, 100) - 1.0 && line(pureOn, 150) > line(pureOff, 150) - 1.0,
+    'a pure 50 Hz line does not notch 100 or 150 Hz with it',
+    '100 Hz ' + num(line(pureOff, 100)) + ' → ' + num(line(pureOn, 100))
+    + ' · 150 Hz ' + num(line(pureOff, 150)) + ' → ' + num(line(pureOn, 150)) + ' dB');
+
+  const undosed = H.render(P, [rich], bare)[0];
+  ok(line(undosed, 50) > line(off, 50) - 0.6 && line(undosed, 100) > line(off, 100) - 0.6,
+    'and at zero dose the notch is out of the signal path entirely',
+    num(line(off, 50)) + ' → ' + num(line(undosed, 50)) + ' dB');
+}
 
 section('audit · codecs');
 {

@@ -270,8 +270,11 @@ async function run() {
   const hfBefore = band(source, 9000, 15000);
   const hfAfter = band(decoded.channels, 9000, 15000);
   ok(hfAfter > hfBefore + 3, 'restored file has substantially more top end', hfBefore.toFixed(1) + ' → ' + hfAfter.toFixed(1) + ' dB');
-  const lowBefore = band(source, 30, 60);
-  const lowAfter = band(decoded.channels, 30, 60);
+  // Below the mains line. A 30–60 Hz window straddles the 50 Hz notch (this
+  // fixture is hummy on purpose), so it would subtract the hum repair from the
+  // bass restoration and call the difference "sub bass".
+  const lowBefore = band(source, 30, 45);
+  const lowAfter = band(decoded.channels, 30, 45);
   ok(lowAfter > lowBefore + 2, 'restored file has more sub bass', lowBefore.toFixed(1) + ' → ' + lowAfter.toFixed(1) + ' dB');
   let peak = 0, atCeiling = 0;
   for (const c of decoded.channels) {
