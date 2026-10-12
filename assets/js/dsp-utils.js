@@ -545,6 +545,144 @@
     return l.value();
   }
 
+  /* --- flat-top (clipping) detection --------------------------------------- */
+
+  /**
+   * Flat-top detection: every run of consecutive samples that are (a) at the
+   * same sign, (b) within a hair of each other, and (c) near the file's *peak*
+   * level is a candidate clipped waveform.
+   *
+   * The measurement is what lets the repair tell clipping from a merely loud
+   * recording, and it is done in a single pass with no knowledge of the peak:
+   * each candidate run is filed into a histogram by its magnitude, so the top
+   * occupied bucket *is* the peak, and only what sits within 0.35 dB of it
+   * counts as a plateau. For each such run the local period is estimated from
+   * the zero crossings just before it (only when they are regular — a periodic
+   * waveform is the only case where a period means anything), and the implied
+   * amplitude follows from how long the plateau is: a sine of amplitude A
+   * clipped at T stays at or above T while cos(ω·t) ≥ T/A, so
+   * A = T / cos(ω·n/2). A 997 Hz sine clipped at 1.25 implies 2.0 dB that is
+   * missing; the same sine *never* clipped implies 0.07 dB and is left alone.
+   * Where the crossings are not regular the estimate falls back to the length
+   * of the run alone, capped at +3 dB.
+   *
+   * Reference values: a healthy master has nothing near its peak that is flat;
+   * a clipped master has 0.02 % (light) to 0.5 %+ (hard) of its samples in flat
+   * runs at the peak level, 1–2 dB of peak missing.
+   */
+  function flatTopStep(channels, sr) {
+    const nCh = channels.length;
+    const len = nCh && channels[0] ? channels[0].length : 0;
+    const idle = () => ({ step: stepRange('clip', 0, 0, () => {}), value: () => ({
+      flatRatio: 0, levelDb: -120, runCount: 0, runMedian: 0, overshootDb: 0, maxRun: 0, evidence: 0,
+    }) });
+    if (!nCh || !len) return idle();
+    // 0.25 dB per bucket, 0 dBFS downwards: the top occupied bucket is the peak
+    const NB = 256, BIN = 0.25, GATE = 1.4;              // 1.4 buckets = 0.35 dB
+    const count = new Int32Array(NB);
+    const samples = new Float64Array(NB);
+    const lenSum = new Float64Array(NB);
+    const lenMax = new Int32Array(NB);
+    const impSum = new Float64Array(NB);
+    const impN = new Int32Array(NB);
+    let total = 0;
+    const TOL = 0.0025;
+    for (let c = 0; c < nCh; c++) {
+      const ch = channels[c];
+      const st = { prev: 0, armed: false, len: 0, mag: 0, sign: 1, pos: 0,
+        cross: new Int32Array(9), crossN: 0, crossW: 0 };
+      const period = () => {
+        if (st.crossN < 5) return 0;
+        const k = (st.crossW - 1 + 9) % 9;
+        let sum = 0, sum2 = 0, n = 0;
+        for (let i = 1; i < st.crossN; i++) {
+          const d = st.cross[(k - i + 1 + 9) % 9] - st.cross[(k - i + 9) % 9];
+          sum += d; sum2 += d * d; n++;
+        }
+        if (!n) return 0;
+        const mean = sum / n;
+        const sd = Math.sqrt(Math.max(0, sum2 / n - mean * mean));
+        return (mean < 2 || sd / mean > 0.35) ? 0 : 2 * mean;
+      };
+      const file = (runLen, mag) => {
+        const b = Math.min(NB - 1, Math.max(0, Math.floor((-20 * Math.log10(mag)) / BIN)));
+        count[b]++;
+        samples[b] += runLen;
+        lenSum[b] += runLen;
+        if (runLen > lenMax[b]) lenMax[b] = runLen;
+        const p = period();
+        let implied;
+        if (p > 0) {
+          const w = Math.min(1.4, (2 * Math.PI / p) * runLen * 0.5);
+          implied = -20 * Math.log10(Math.cos(w));
+        } else {
+          implied = Math.min(3, 0.9 + 0.25 * runLen);
+        }
+        impSum[b] += implied; impN[b]++;
+      };
+      for (let i = 0; i < ch.length; i++) {
+        const x = ch[i];
+        if ((x > 0 && st.prev <= 0) || (x < 0 && st.prev >= 0)) {
+          if (st.crossN) {
+            const k = (st.crossW - 1 + 9) % 9;
+            if (st.pos - st.cross[k] > sr / 24) st.crossN = 0;
+          }
+          st.cross[st.crossW] = st.pos;
+          st.crossW = (st.crossW + 1) % 9;
+          if (st.crossN < 9) st.crossN++;
+        }
+        st.prev = x;
+        const ax = x < 0 ? -x : x;
+        if (ax > 1e-5) {
+          if (st.armed && x * st.sign > 0 && Math.abs(ax - st.mag) <= TOL) {
+            st.len++;
+            st.mag = ax;
+            if (st.len > 2048) st.armed = false;        // not a peak
+          } else {
+            if (st.armed && st.len > 1) file(st.len, st.mag);
+            st.armed = true;
+            st.len = 1;
+            st.mag = ax;
+            st.sign = x < 0 ? -1 : 1;
+          }
+        } else {
+          if (st.armed && st.len > 1) file(st.len, st.mag);
+          st.armed = false;
+        }
+        st.pos++;
+        total++;
+      }
+      if (st.armed && st.len > 1) file(st.len, st.mag);
+    }
+    // the walk above is the step; nothing is left to slice, so it reports done
+    const step = stepRange('clip', 0, 0, () => {});
+    return {
+      step,
+      value: () => {
+        let top = -1;
+        for (let b = 0; b < NB; b++) if (count[b]) { top = b; break; }
+        if (top < 0) return { flatRatio: 0, levelDb: -120, runCount: 0, runMedian: 0, overshootDb: 0, maxRun: 0, evidence: 0 };
+        let n = 0, sm = 0, ls = 0, mx = 0, is = 0, inn = 0;
+        for (let b = top; b <= Math.min(NB - 1, top + GATE); b++) {
+          n += count[b]; sm += samples[b]; ls += lenSum[b];
+          if (lenMax[b] > mx) mx = lenMax[b];
+          is += impSum[b]; inn += impN[b];
+        }
+        const levelDb = -(top + 0.5) * BIN;
+        const overshootDb = inn ? is / inn : 0;
+        return {
+          flatRatio: total ? sm / total : 0,
+          levelDb,
+          runCount: n,
+          runMedian: n ? ls / n : 0,
+          overshootDb,
+          maxRun: mx,
+          evidence: Math.min(1, (sm / total) / 0.004) * clamp((overshootDb - 0.6) / 2, 0, 1),
+        };
+      },
+    };
+  }
+
   /* --- crackle / click detection ------------------------------------------- */
 
   /**
@@ -565,7 +703,7 @@
     let units = 0;
     for (const k of per) units += k;
     const state = channels.map(() => ({ z1: 0, z2: 0 }));
-    const st = { crests: [], gPeak: 0, gSum: 0, gCount: 0, pops: 0 };
+    const st = { crests: [], peaks: [], gPeak: 0, gSum: 0, gCount: 0, pops: 0 };
     const step = stepRange('crackle', units, units * win * 1.6, (from, to) => {
       let base = 0;
       for (let c = 0; c < channels.length; c++) {
@@ -589,6 +727,7 @@
             }
             st.gSum += ms; st.gCount += win;
             if (peak > st.gPeak) st.gPeak = peak;
+            st.peaks.push(peak);
             const rms = Math.sqrt(ms / win);
             if (rms > 1e-5) {
               const cf = peak / rms;
@@ -611,11 +750,33 @@
         const crestP98Db = 20 * Math.log10(p98 + 1e-9);
         const index = clamp((crestP98Db - 13) / 10, 0, 1) * 0.75
           + clamp((globalCrestDb - 13) / 10, 0, 1) * 0.25;
+        // The index was briefly gated on how far the loud frames' peaks stood
+        // above the file's *own* HF median, to stop a *repaired* file from
+        // reading as still-crackly: every term above is a ratio inside a frame,
+        // so it cannot see that the pops are gone — the few frames that still
+        // carry energy look spiky against their own tiny rms. That gate is gone
+        // again, for a better reason than it was added: the repair itself now
+        // works (the de-hisser's gate was following its own key through every
+        // pop, and the output guard was flattening the de-clipper's peaks), and
+        // a chain that really removes the crackle makes this index read it.
+        // Measured on the worn-record fixture: crest p98 25.9 dB with the pops,
+        // 12.1 dB after the chain, against 11.3 dB for the *clean* copy of the
+        // same record. The gate, meanwhile, was a false-negative generator on
+        // dense crackle — a worn record through a 128 kbit/s encoder reads
+        // 26.2 dB of p98 crest and was being scored 0.07 because the pops are so
+        // dense that they *are* the file's median HF frame. Prominence is kept
+        // in the returned statistics because it is a useful number to look at;
+        // it no longer multiplies the index.
+        st.peaks.sort((a, b) => a - b);
+        const medPeak = st.peaks.length ? st.peaks[Math.floor(st.peaks.length * 0.5)] : 0;
+        const p90Peak = st.peaks.length ? st.peaks[Math.min(st.peaks.length - 1, Math.floor(st.peaks.length * 0.90))] : 0;
+        const prominenceDb = 20 * Math.log10((p90Peak + 1e-12) / (medPeak + 1e-12));
         return {
-          index: clamp(index, 0, 1),
+          index,
           crestP98Db,
           globalCrestDb,
           medianCrestDb: 20 * Math.log10(med + 1e-9),
+          peakProminenceDb: prominenceDb,
           frames: st.crests.length,
           spikes: st.pops,
         };
@@ -1429,6 +1590,7 @@
     const core = coreSteps(channels, sr);       // peak + clip + loudness + dynamics, one walk
     const cor = correlationStep(channels);
     const crk = crackleStep(channels, sr);
+    const flatTop = flatTopStep(channels, sr);
     const nt = noiseStep(channels, sr);
     const humExact = humStep(channels, sr);
     // Per-song detail: how the stereo image is built band by band, how
@@ -1447,7 +1609,7 @@
       }
     });
     const steps = [
-      core.step, sp.step, cor.step, crk.step, sb.step,
+      core.step, sp.step, cor.step, crk.step, flatTop.step, sb.step,
       core.steps[0], core.steps[1], core.steps[2], core.steps[3],
       nt.steps[0], nt.steps[1], nt.steps[2], nt.steps[3], humExact, isp.step, fin,
     ];
@@ -1456,6 +1618,7 @@
       const spec = sp.value();
       const na = nt.value();
       const crackle = crk.value();
+      const clipInfo = flatTop.value();
       const nf = na.floorDb;
       const hfNf = na.hfFloorDb;
       const cut = hfCutoff(spec, 32);
@@ -1483,6 +1646,14 @@
         hissTiltDb: na.hissTiltDb,
         hissTiltStepDb: na.hissTiltStepDb,
         crackleIndex: crackle.index,
+        // flat tops: the signature of a clipped master (see clipStep)
+        clipFlatRatio: clipInfo.flatRatio,
+        clipLevelDb: clipInfo.levelDb,
+        clipRunCount: clipInfo.runCount,
+        clipRunMedian: clipInfo.runMedian,
+        clipOvershootDb: clipInfo.overshootDb,
+        clipMaxRun: clipInfo.maxRun,
+        clipEvidence: clipInfo.evidence,
         noiseInfo: Object.assign({}, na, { crackleIndex: crackle.index, crestP98Db: crackle.crestP98Db, crestGlobalDb: crackle.globalCrestDb }),
         hfNoiseDeltaDb: hfNf - nf,
         dynamicRangeDb: core.dynamicRange(),
@@ -1966,6 +2137,7 @@
   /* ----------------------------------------------------------------- exports */
 
   const API = {
+    flatTopStep,
     TWO_PI, clamp, db, lin,
     hann, blackman, fft, spectrum, bandLevel, bandMedian, smoothSpec,
     hfCutoff, ratioDb, slopeDbPerOct, peakDb, loudness,

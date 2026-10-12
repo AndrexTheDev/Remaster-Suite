@@ -196,12 +196,13 @@ and runs per sample, control-rate decimated for speed:
 | --- | --- | --- |
 | 0 | **Presence follower** | a 13 ms envelope against a one-second average; it gates every synthesis stage, so nothing is generated in a gap — the air and the sub octave arrive with the music, not with the noise floor |
 | 1 | **Input DC guard** | 2 Hz one-pole: removes a damaged file's offset without rotating the phase of the 20–60 Hz region, where the sub-bass repair works |
+| 1a | **De-clip** | a *plateau* in the waveform — one to hundreds of samples sitting flat at the file's own peak level, which is what a limited master did to its peaks — is reconstructed: the run's implied overshoot is estimated from the local period of the zero crossings, and a cosine arc is written back into it. The detector keys on the measured plateau level of *this* file, not on a constant, which is what separates clipping from a merely loud waveform: a loud but unclipped recording measures 0.0007 % flat samples and 0.07 dB of implied overshoot, a clipped one 0.39 % and 1.7 dB. It runs first among the repairs, before anything else looks at the waveform — and the output guard's knee moves up with whatever the stage reconstructed (a per-file maximum), because that guard sits *below* the plateau of a clipped master and would otherwise flatten the restored arc straight back into the flat top it came from: on a 997 Hz tone clipped at 0.99, −16.2 dB of error left in the plateau with a fixed knee against −29.1 dB with the knee lifted |
 | 1b | **Sub-sonic guard** | a 12 dB/octave high-pass at 18–30 Hz, switched on *only* when the quiet passages measured rumble below the music and no mains line that could explain it. A turntable's rumble lives there; no instrument does, which is why the corner stays under 30 Hz |
 | 2 | **Static EQ bank** | 6 biquads: 60 Hz shelf, 200 Hz mud, 450 Hz box, 1.3 kHz honk, 3.2 kHz presence, 7 kHz air — the profile's anchors, dosed from the measurement |
 | 2b | **Per-song corrective EQ** | 12 bands, 50 Hz … 8 kHz at Q 1.4, correcting the file's own departures from its own spectral trend — net of what the six profile bands do. ±1.5 dB dead zone, ±6 dB cap, no boost near the noise floor, no correction in a band the file does not fill |
 | 2c | **Measured resonance notches** | the two strongest narrow peaks the analyser finds (150 Hz – 1.8 kHz, ≥ 3.2 dB above the local trend), each notched at its own frequency, depth and sharpness. A boxy room is a *constant* colouration, which the dynamic de-resonator below cannot see |
 | 3 | **Dynamic de-resonator** | 6 narrow bands (220 Hz … 3.1 kHz) watch their own envelope against a long-term average; anything ringing way above it gets pulled down. Steady tones pass, room ring does not. |
-| 4 | **De-hiss** | Linkwitz-Riley split, keyed on the *tilt* of the top end (4 kHz+ against the 1.45 kHz band, the same two bands and the same window the analyser measures), so it attenuates where the top end stops following the programme and leaves everything else alone: between the notes the same repair is worth 6 dB, over music less than 0.3 dB. The split itself is measured too (2.2–4 kHz, where this file's noise starts) |
+| 4 | **De-hiss** | Linkwitz-Riley split, keyed on the *tilt* of the top end (4 kHz+ against the 1.45 kHz band, the same two bands and the same window the analyser measures), so it attenuates where the top end stops following the programme and leaves everything else alone: between the notes the same repair is worth 6 dB, over music less than 0.3 dB. The split itself is measured too (2.2–4 kHz, where this file's noise starts). The gate closes slowly (250 ms) and opens quickly (8 ms), and its last 0.1 % of range is a continuous crossfade rather than a branch: its key is a 43 ms window that a pop dominates, so a gate that follows it sample-by-sample punches a hole in the top end at every click (measured on a worn record: 38 HF frames above 15 dB of crest, against 6 with the de-clicker alone) |
 | 5 | **De-click** | low-pass prediction (4 kHz, 4th order) plus a fast/slow envelope ratio, and 0.35 ms of look-ahead: a detected impulse plans a repair window that reaches half a millisecond *in front of* the spike (a codec puts most of a pop's energy there) and 1 ms behind it, and the window is replaced by the prediction with tapered ends. The look-ahead is the stage's only latency — see below |
 | 5b | **De-esser** | a dynamic dip over 5.2–9.5 kHz, keyed on the fast/slow ratio of that band: a quiet "s" and a loud one are the same problem, and a recording without sibilance measures zero. It sits before the synthesisers, so the exciter and the air cannot rebuild what it just removed |
 | 6 | **Harmonic exciter** | 3 bands, each: band-pass → asymmetric saturation (even *and* odd harmonics) → band-pass → envelope gate. Synthesise the overtones that were never recorded. |
@@ -211,16 +212,25 @@ and runs per sample, control-rate decimated for speed:
 | 10 | **Warmth + tilt** | gentle saturation and a low/high shelf pair for the final tone balance |
 | 11 | **Stereo (M/S)** | a bass that measured out of phase in one channel is folded to mono below 200 Hz; the side signal of an image that measured narrow but not mono is lifted back towards the programme's own bandwidth, and a mono master is never widened |
 | 12 | **Mains hum notch** | three biquads, three hertz wide, at the measured mains frequency and its harmonics — dosed from the level the line stands above its own neighbourhood, and placed *after* every stage that can put low-frequency energy back. Bypassed completely when nothing was measured |
-| 13 | **Output** | 2 Hz DC guard (keeps the offset the saturation stages can add out of the export), auto level match, then a tanh soft-clip guard that saturates at −0.02 dBFS so a 16-bit export can never hit the rail |
+| 13 | **Output** | 2 Hz DC guard (keeps the offset the saturation stages can add out of the export), auto level match, then a tanh soft-clip guard that saturates at −0.02 dBFS so a 16-bit export can never hit the rail. Its knee — and the hard rail behind it — moves up by whatever the de-clipper reconstructed, so the guard that protects the export cannot undo the repair; on a file that was not de-clipped both are exactly what they always were |
+| 14 | **True-peak limiter** | the export ceiling. Samples under full scale do not mean the *waveform* is under it, and a codec that has to encode an overdriven waveform distorts it — so the last stage holds the file to the true-peak target every streaming service asks for: −1 dBTP, or −2 dBTP when the master is louder than −14 LUFS. The peak is estimated between the samples with the same seven-tap windowed sinc the *measurement* (`ispDb`) uses, the gain is computed 1.5 ms ahead of the sample it applies to and minimised over that window, and the detector is shared between the channels so the image cannot move. A file already under the ceiling is bit-transparent (`gain = 1.000000`, no level change); a file over it comes down by the overshoot it had |
 
 The dry/wet cross-fade happens at the very end: `out = dry + power · (wet − dry)`. The chain is
-minimum-phase IIR throughout, so it adds no delay of its own — with one exception: the **de-clicker**
-needs half a millisecond of look-ahead to repair the part of a codec-smeared pop that sits *before*
-the spike the detector fired on, and while that stage is engaged the output is 0.35 ms late (17
-samples at 48 kHz). The cross-fade delays its dry side by the same amount, so the A/B switch and the
-strength slider stay phase-coherent and sample-aligned: you hear the change and not the delay. With
-the de-clicker off — or its strength at 0 — the latency is exactly 0. The offline render (the file
-you save) is bit-identical to what you heard live either way.
+minimum-phase IIR throughout, so it adds no delay of its own — with three exceptions, all of them
+repairs that cannot be done without seeing a little of the future:
+
+* the **de-clicker** needs half a millisecond of look-ahead to repair the part of a codec-smeared
+  pop that sits *before* the spike the detector fired on (17 samples at 48 kHz, 0.35 ms);
+* the **de-clipper** waits for the end of a flat run before it can reconstruct it (271 samples at
+  48 kHz, 5.6 ms — the longest run it will repair);
+* the **true-peak limiter** computes the gain 1.5 ms ahead of the sample it applies to (76 samples
+  at 48 kHz), because a ceiling that is only enforced after the peak has passed is a clipper.
+
+The sums are reported per render (`latency`, 0 when the stages are off), and the cross-fade delays
+its dry side by the same amount, so the A/B switch and the strength slider stay phase-coherent and
+sample-aligned: you hear the change and not the delay. With the repair stages off — or at strength
+0 — the latency is exactly 0. The offline render (the file you save) is bit-identical to what you
+heard live either way.
 
 ### Offline render
 

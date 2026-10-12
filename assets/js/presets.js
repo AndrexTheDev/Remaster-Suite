@@ -49,6 +49,7 @@
     exciter: 0.26,     // harmonic exciter
     air: 0.30,         // 8–16 kHz air synthesis (dosed by need × deriveRoom)
     dehiss: 0.92,      // downward expander (a repair — allowed to work hard)
+    declip: 0.85,      // flat-top (clipping) reconstruction — a repair
     declick: 0.85,     // impulse repair
     glue: 0.35,        // glue compression
     warmth: 0.45,      // saturation
@@ -75,7 +76,7 @@
    * result. */
   const MANUAL = {
     reso: 0.80, sub: 0.80, exciter: 0.70, air: 0.80,
-    dehiss: 0.95, declick: 0.95, glue: 0.55, warmth: 0.65, tilt: 0.50,
+    dehiss: 0.95, declip: 0.95, declick: 0.95, glue: 0.55, warmth: 0.65, tilt: 0.50,
     eq: 9,             // a profile the user picked may correct more of the shape
   };
 
@@ -276,6 +277,27 @@
     return out;
   }
 
+  /**
+   * Did a codec actually take something away?
+   *
+   * A hard spectral cliff is the signature of lossy encoding, and the
+   * measurement finds it — but *where* the cliff sits decides whether there is
+   * anything to repair. A 320 kbit/s MP3 cuts at about 20 kHz, i.e. above what
+   * a listener hears: the label "low bitrate" there is not a finding, it is the
+   * edge of the analysis band. Measured on one programme encoded at 96, 128,
+   * 192, 256 and 320 kbit/s, every one of them reported a cliff between 19.2
+   * and 19.5 kHz, and the app called all five "low bitrate" — including, most
+   * visibly, the 320 kbit/s file the *export* had just written, which made
+   * re-uploading an export look like a defect that had been there all along.
+   *
+   * Below this point the loss is real and the chain that rebuilds the top
+   * octave is the right answer; above it there is nothing missing to rebuild.
+   */
+  function codecLoss(m) {
+    const cut = Math.min(m.hfCutoff || 0, m.cliffHz || 0);
+    return cut > 0 && cut < 17000;
+  }
+
   function classify(m) {
     const cut = m.hfCutoff || 0;
     const crackle = clamp(m.crackleIndex, 0, 1);
@@ -315,8 +337,11 @@
     // this split, the most common record in a private archive — an old vinyl
     // rip that was later pushed through a 128 kbit/s encoder — lost its codec
     // treatment exactly because it was also hissy and crackly.
-    s.lowbitrate = clamp(0.62 * brick
-      + (0.30 * clean * (1 - hiss) + 0.16 * dull * (1 - flat)) * (1 - 0.5 * hiss) * (1 - 0.5 * crackle), 0, 1);
+    // …and the cliff has to be *inside* the audible top octave to count (see
+    // `codecLoss`): a cliff at 20 kHz is the analysis band edge, not a bitrate.
+    s.lowbitrate = clamp((0.62 * brick
+      + (0.30 * clean * (1 - hiss) + 0.16 * dull * (1 - flat)) * (1 - 0.5 * hiss) * (1 - 0.5 * crackle))
+      * (codecLoss(m) ? 1 : 0), 0, 1);
     // 60s/70s garage or one-mic room session: thin, boxy, dull, noisy, analogue —
     // and, because it was cut in a room with whatever wiring was there, often
     // hummy as well
@@ -424,6 +449,19 @@
     const hissNeed = clamp((m.hissAmount || 0) * clamp((m.noiseConfidence || 0) * 1.5, 0, 1), 0, 1);
     const crackleNeed = clamp(m.crackleIndex || 0, 0, 1);
 
+    /* ── clipping (flat tops) ──────────────────────────────────────────────
+     * Two independent numbers have to agree before a file is called clipped
+     * (see the analyser's flat-top pass): how much of it sits in flat runs at
+     * its *own peak level*, and how much peak those runs imply was cut off.
+     * Either one alone is wrong — a loud sine that was never clipped has a lot
+     * of the first and 0.07 dB of the second (measured), and a single stray
+     * pair of equal samples has the second and none of the first. The dose is
+     * a repair, so it is gated, never scaled to taste: below 0.002 % of flat
+     * samples at the peak level there is nothing to reconstruct. */
+    const clipShare = clamp(m.clipFlatRatio || 0, 0, 1);
+    const clipImplied = clamp(m.clipOvershootDb || 0, 0, 6);
+    const clipNeed = smoothstep(0.00002, 0.0008, clipShare) * smoothstep(0.7, 1.6, clipImplied);
+
     /* ── the six per-song decisions ────────────────────────────────────────
      * Everything above is a *problem* the profile then treats. Everything below
      * is a property of this one file — a rumble it has, a sibilance it has, an
@@ -480,7 +518,7 @@
     return {
       topDeficitDb, codecDeficitDb, airDeficitDb, subDeficitDb, subPresentDb,
       mudExcessDb, harshExcessDb, boxExcessDb,
-      hissNeed, crackleNeed, humNeed, headroom, dense,
+      hissNeed, crackleNeed, clipNeed, clipShare, clipImplied, humNeed, headroom, dense,
       // normalised needs (0..1) used by the doses
       needTop: clamp(topDeficitDb / 18, 0, 1),
       needAir: clamp(Math.max(airDeficitDb / 20, (m.brickwall || 0) * 0.9), 0, 1),
@@ -659,7 +697,7 @@
           g *= 0.55;                                   // floor unknown → be careful
         }
         // above a codec cliff the content was *removed*
-        if (m.brickwall > 0.25 && m.cliffHz && f > m.cliffHz * 1.0) g = Math.min(g, 0.8);
+        if (m.brickwall > 0.25 && codecLoss(m) && f > m.cliffHz * 1.0) g = Math.min(g, 0.8);
       } else if (g < 0 && f <= 80) {
         // Taking the bottom away is the one correction that can remove what the
         // recording actually has, so it needs more evidence than the dead zone:
@@ -793,6 +831,32 @@
     const hissDose = smoothstep(0.04, 0.40, D.hissNeed);
     a.dehiss = clamp(a.dehiss * (0.5 + 0.5 * hissDose) + 0.25 * floorExtra * D.hissNeed, 0, cap.dehiss);
     a.declick = clamp(a.declick * (0.5 + 0.5 * smoothstep(0.03, 0.40, D.crackleNeed)), 0, cap.declick);
+    // The de-clipper is the same kind of stage — it only touches the samples
+    // its own detector flags as flat tops at the file's peak level — so the
+    // dose is the evidence, mapped onto the profile's repair budget.
+    // …and like every repair here, it runs on *evidence*. The floor is not
+    // cosmetic: the chain's own soft-clip guard leaves a few flat samples at the
+    // rail in its output, so a processed file measured again reports a flat-share
+    // of about 2e-5 — two flat tops per hundred thousand samples, which is the
+    // guard's residue and not damage. With the dose scaled from zero that reading
+    // was enough to switch the stage on at half strength on a *re-upload*, i.e.
+    // the app was de-clipping its own output. Below the floor the stage stays off.
+    a.declip = D.clipNeed > 0.15 ? clamp(cap.declip * (0.5 + 0.5 * D.clipNeed), 0, cap.declip) : 0;
+    // …and the level the detector keys on is this file's measured plateau
+    a.declipLevel = num(m.clipLevelDb, -0.1);
+
+    /* ── 6b · the export ceiling ───────────────────────────────────────────────
+     * Every streaming target is a *true-peak* target, and the numbers are not
+     * negotiable: −1 dBTP, or −2 dBTP when the master is louder than −14 LUFS
+     * (a hot master is the one that gets transcoded hard, so it is the one that
+     * needs more room). The app measures the file's own true peak — `ispDb` —
+     * so this is a decision the measurement can make on its own: what the file
+     * arrives with decides which ceiling the limiter is set to. A file that is
+     * already under it pays nothing for the stage (it is bit-transparent below
+     * the ceiling); a file that is over it finally stops arriving at the
+     * encoder overdriven. */
+    const loud = (m.loudness === undefined ? -70 : m.loudness) > -14;
+    a.tpCeil = loud ? -2 : -1;
 
     /* ── 7 · dynamics and warmth ──────────────────────────────────────────
      * Saturation adds density, so it belongs on sparse, dynamic recordings.
@@ -982,7 +1046,13 @@
       exciter: a.exciter * amt,
       air: a.air * amt,
       dehiss: repair(a.dehiss),
+      // the de-clipper's own detector runs on the *measured* plateau level, so
+      // it stays dormant (amount 0) on anything that was not measured as
+      // clipped, whatever the slider says
+      declip: a.declip > 0 ? repair(a.declip) : 0,
+      declipLevel: num(clamp(a.declipLevel, -60, 0), -0.1),
       declick: repair(a.declick),
+      tpCeil: num(a.tpCeil, 0),
       glue: a.glue * amt,
       warmth: a.warmth * amt,
       tilt: a.tilt * p,
@@ -1004,7 +1074,7 @@
       // that was never measured out of the worklet — a NaN there would silently
       // switch the air band off.)
       airRoom: num(a.airRoom, 0.5),
-      airF: num(clamp((metrics.brickwall || 0) > 0.3 && metrics.cliffHz ? metrics.cliffHz * 0.72 : 6000, 2200, 6000), 6000),
+      airF: num(clamp((metrics.brickwall || 0) > 0.3 && codecLoss(metrics) ? metrics.cliffHz * 0.72 : 6000, 2200, 6000), 6000),
       noiseFloor: clamp(num(metrics.noiseFloorDb, -70), -95, -30),
       // The de-hisser's level reference is the HF band's RMS in the quiet
       // passages (`hissRefDb`), not the spectrum's band sum: the worklet gates on
@@ -1121,7 +1191,7 @@
         act('exciter', p.exciter || 0));
       add('airLost', clamp(D.needAir, 0, 1), dbv(D.airDeficitDb), act('air', p.air || 0));
     }
-    if ((m.brickwall || 0) > 0.25 && m.cliffHz) {
+    if ((m.brickwall || 0) > 0.25 && codecLoss(m)) {
       add('codec', clamp(m.brickwall, 0, 1), { n: m.cliffHz, unit: 'hz' },
         act('rebuild', p.airF || 0, 'hz'));
     }
@@ -1157,12 +1227,24 @@
     /* ── level, dynamics, medium ───────────────────────────────────────── */
     const dr = m.dynamicRangeDb === undefined ? 18 : m.dynamicRangeDb;
     if (dr < 12) add('dense', clamp((12 - dr) / 8, 0, 1), dbv(dr), act('noSquash', null));
-    if ((m.clipRatio || 0) > 0.002) {
-      add('clipping', clamp(m.clipRatio * 40, 0, 1), pct(m.clipRatio * 100), act('headroom', null));
+    // Clipping has two sides, and the app now does something about one of them.
+    // A rail (the old `clipRatio`) is the loud half; the signature that matters
+    // more is a *plateau* just under full scale, which is what a limited master
+    // has and what a listener hears as a buzz. Both feed one finding; when the
+    // de-clipper runs, the finding carries the repair instead of a warning.
+    const clipEv = m.clipEvidence === undefined ? 0 : m.clipEvidence;
+    const clipSev = Math.max(clipEv, (m.clipRatio || 0) > 0.002 ? 0.6 : 0);
+    if (clipSev > 0.05) {
+      const overshoot = m.clipOvershootDb === undefined ? null : dbv(m.clipOvershootDb);
+      if ((p.declip || 0) > 0) add('clipping', clamp(clipSev, 0, 1), overshoot, act('declip', m.clipOvershootDb || 0, 'db'));
+      else add('clipping', clamp(clipSev, 0, 1), overshoot, act('headroom', null));
     }
     if (m.peakDb > -1) add('hotPeak', clamp((m.peakDb + 3) / 3, 0, 1), dbv(m.peakDb), act('ceiling', null));
-    if (m.ispDb !== undefined && m.ispDb > m.peakDb + 0.1 && m.ispDb > -1) {
-      add('truePeak', clamp((m.ispDb + 1) / 1.5, 0, 1), dbv(m.ispDb), act('truePeak', null));
+    if (m.ispDb !== undefined && m.ispDb > -1.05) {
+      // the *measured* true peak against the ceiling the chain will hold it to
+      const ceil = (p.tpCeil === undefined || p.tpCeil === 0) ? 0 : p.tpCeil;
+      add('truePeak', clamp((m.ispDb + 1) / 1.5, 0, 1), { n: m.ispDb, unit: 'dbtp' },
+        ceil < 0 ? act('truePeak', ceil, 'dbtp') : act('ceiling', null));
     }
     const dcDb = m.dcOffsetDb === undefined ? -120 : m.dcOffsetDb;
     if (dcDb > -46) add('dcOffset', clamp((dcDb + 60) / 14, 0, 1), dbv(dcDb), act('dcGuard', null));
@@ -1206,7 +1288,8 @@
     if (d.hum > 0.35) push('hum', d.hum);
     if (d.brick > 0.4) push('codec', d.brick);
     if (d.harsh > 0.35) push('harsh', d.harsh);
-    if (m.clipRatio > 0.002) push('clipping', 0.6);
+    if ((m.clipEvidence || 0) > 0.05) push('clipping', clamp(m.clipEvidence, 0, 1));
+    else if (m.clipRatio > 0.002) push('clipping', 0.6);
     if (m.dynamicRangeDb < 9) push('squashed', 0.5);
     if (m.correlation < 0.2 && m.channels > 1) push('narrow', 0.5);
     // the per-song findings are part of the sentence as well: they are the ones

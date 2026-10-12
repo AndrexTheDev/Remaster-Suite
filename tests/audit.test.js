@@ -581,10 +581,11 @@ section('audit · presets and parameters');
     const dflt = Number(m[2]);
     ranges[m[1]] = m[3] === undefined ? [Math.min(0, dflt), Math.max(1, dflt)] : [Number(m[3]), Number(m[4])];
   }
-  // 53 = the original 36 + the per-song stage: a sub-sonic corner, a de-esser,
-  // a mono-maker for out-of-phase bass, a glue timing, the de-hisser's crossover
-  // and twelve bands of corrective EQ.
-  ok(declared.length === 53, 'the processor declares the whole per-song parameter set', String(declared.length));
+  // 56 = the original 36 + the per-song stage: a sub-sonic corner, a de-esser,
+  // a mono-maker for out-of-phase bass, a glue timing, the de-hisser's crossover,
+  // twelve bands of corrective EQ, the de-clipper's dose and clip level — and the
+  // true-peak ceiling the export limiter holds the file to.
+  ok(declared.length === 56, 'the processor declares the whole per-song parameter set', String(declared.length));
   // A mains line that is not a pure sine. Real hum arrives with its harmonics,
   // and a recording with a 100 Hz buzz has to be notched there *because that was
   // measured* — this is the fixture that proves the harmonic notches are wired to
@@ -689,8 +690,29 @@ section('audit · presets and parameters');
   ok(Presets.buildParams('auto', DSP.measure([sims.garage, sims.garage], 48000), 0.8).width === 0,
     '…and a mono master is left alone');
 
+  // A clipped master — the fixture class the de-clipper exists for, and the one
+  // the probe list was missing: without it `declip` was the single parameter the
+  // law never demonstrably reached, which is exactly what this check is for.
+  // (The reconstruction itself is proven in the dsp suite against a tone whose
+  // truth is known; here it is only about the law reaching the parameter.)
+  const clippedM = (() => {
+    const env = H.songEnvelope(48000, 6, 0.05);
+    let x = H.mul(H.pink(48000, 6, 0.5, 63), 1);
+    for (let i = 0; i < x.length; i++) x[i] *= env[i];
+    x = H.filter(DSP, x, 48000, 'hp', 30, 0.707);
+    x = H.filter(DSP, x, 48000, 'lp', 19000, 0.707);
+    for (let i = 0; i < x.length; i++) x[i] = Math.tanh(x[i] * 1.8) * 0.99;
+    return DSP.measure([H.normalize(x, 0.999)], 48000);
+  })();
+  ok(Presets.buildParams('auto', clippedM, 0.72).declip > 0.3,
+    'a clipped master asks for the de-clipper',
+    Presets.buildParams('auto', clippedM, 0.72).declip.toFixed(3) + ' (evidence ' + clippedM.clipEvidence.toFixed(3) + ')');
+  ok(Presets.buildParams('auto', DSP.measure([sims.vinyl], 48000), 0.72).declip === 0
+    && Presets.buildParams('auto', DSP.measure([sims.cassette], 48000), 0.72).declip === 0,
+    '…and material that was never clipped does not, however loud it is');
+
   const probes = Object.keys(sims).map((key) => () => DSP.measure([sims[key]], 48000))
-    .concat([() => stereoM, () => phaseM, () => rumbleM]);
+    .concat([() => stereoM, () => phaseM, () => rumbleM, () => clippedM]);
   const untouched = declared.filter((k) => {
     if (k === 'bypass') return false;            // the A/B switch, not a law parameter
     let moved = false;
@@ -715,7 +737,12 @@ section('audit · presets and parameters');
     // the per-song stages add two more: where the de-hisser splits and how the
     // glue compressor is timed are *measurements* of the file, not amounts —
     // each is multiplied by its own zero amount inside the worklet.
-    'glueTime', 'hissF'];
+    // The de-clipper adds a third kind: `declipLevel` is the clip level the
+    // measurement found, a *threshold*, and the stage returns early on a zero
+    // amount before it ever compares a sample against it. `tpCeil` is the same
+    // kind of thing at the other end of the chain: a *target*, expressed as the
+    // dBTP the export must not exceed, where 0 means the limiter is off.
+    'glueTime', 'hissF', 'declipLevel', 'tpCeil'];
   const stillActive = Object.keys(zero).filter((k) => ['bypass'].indexOf(k) === -1 && Math.abs(zero[k]) > 1e-9
     && RATES.indexOf(k) === -1);
   ok(stillActive.length === 0, 'at 0 % every module amount is exactly zero', stillActive.join(', '));
@@ -1120,6 +1147,12 @@ section('audit · documentation matches the product');
   // one delay in the chain, and the README has to say so.
   ok(/look-?ahead/i.test(readme) && /0\.35 ms/.test(readme),
     'the README documents the de-clicker look-ahead and its 0.35 ms');
+  // …and the two stages that were added since: the latency paragraph is the
+  // contract every caller reads, so each of its three numbers has to be there
+  ok(/5\.6 ms/.test(readme) && /271 samples/.test(readme), 'the README documents the de-clipper\'s look-ahead');
+  // (the README uses a typographic minus, as it does everywhere else)
+  ok(/\u22121 dBTP/.test(readme) && /\u22122 dBTP/.test(readme) && /\u221214 LUFS/.test(readme),
+    'the README states the true-peak ceilings and when the tighter one applies');
   ok(!/has \*\*zero latency\*\*/.test(readme), 'and no longer claims the chain is latency-free');
 }
 

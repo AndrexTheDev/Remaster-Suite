@@ -247,6 +247,42 @@ H.section('engine · de-clicker');
     'de-clicker keeps the music body intact');
 }
 
+H.section('engine · the de-hisser does not undo the de-clicker');
+{
+  // A worn record: the pops are the de-clicker's job, and the de-hisser sits in
+  // front of it because it is the noise the pops have to be found *in*. It used
+  // to fight that job: its gate followed its own key sample-by-sample, and the
+  // key is a 43 ms sliding RMS of 4–16 kHz — a window a pop dominates out of all
+  // proportion to its length. Every pop therefore slammed the gate shut (and the
+  // level term opened it again), which turned each repaired click into a 43 ms
+  // hole in the top end with broadband edges: measured on this fixture the chain
+  // left *38* HF frames above 15 dB of crest where the de-clicker alone leaves
+  // 6. The gate now closes slowly (250 ms — hiss is stationary, nothing about it
+  // is fast) and opens fast (8 ms — a musical transient must not be dulled), and
+  // its "nothing to attenuate" branch is a continuous crossfade instead of a step
+  // at the last 0.1 % of its range.
+  let bed = H.filter(RSDSP, H.mul(H.pink(SR, 8, 0.40, 31), 1), SR, 'lp', 7000, 0.60);
+  bed = H.filter(RSDSP, bed, SR, 'lp', 5000, 0.55);
+  const clean = H.normalize(bed, 0.74);
+  const pops = H.addCrackle(clean, 9, 0.85, 8);
+  const m = RSDSP.measure([pops], SR);
+  const law = RP.buildParams('auto', m, 1);
+  const crest = (sig) => RSDSP.crackleDetect([sig], SR);
+  const dry = crest(pops);
+  const chain = crest(H.render(Processor, [pops], law)[0]);
+  const clickOnly = crest(H.render(Processor, [pops], Object.assign({}, law, { dehiss: 0 }))[0]);
+  H.ok(law.dehiss > 0.05 && law.declick > 0.05,
+    'the fixture asks for both repairs at once', 'dehiss ' + law.dehiss.toFixed(2) + ', declick ' + law.declick.toFixed(2));
+  H.ok(chain.crestP98Db < dry.crestP98Db - 8,
+    'the chain takes the pops out of the top end (crest p98 of the 8.5 kHz+ band)',
+    dry.crestP98Db.toFixed(1) + ' → ' + chain.crestP98Db.toFixed(1) + ' dB');
+  H.ok(chain.crestP98Db < clickOnly.crestP98Db + 1.5,
+    '…and the de-hisser leaves the de-clicker the room to do it (it used to add 10 dB of its own transients here)',
+    'chain ' + chain.crestP98Db.toFixed(1) + ' dB, de-clicker alone ' + clickOnly.crestP98Db.toFixed(1) + ' dB, dry ' + dry.crestP98Db.toFixed(1) + ' dB');
+  H.ok(chain.index < dry.index - 0.5, 'which the crackle index agrees with',
+    dry.index.toFixed(2) + ' → ' + chain.index.toFixed(2));
+}
+
 H.section('engine · de-clicker on a lossy rip');
 {
   // The case from the beta report: a vinyl rip that arrived as a 128 kbit/s
@@ -411,6 +447,279 @@ H.section('engine · de-clicker on a lossy rip');
     worstSnare.toFixed(1) + ' dB below the hit');
   H.ok(touched < kit.sig.length * 0.08, 'and only a small part of the kit is touched at all',
     (100 * touched / kit.sig.length).toFixed(2) + ' % of samples');
+}
+
+H.section('engine · de-clipper on a clipped master');
+{
+  // Half of what the loudness war left behind is clipping — a flat top where the
+  // waveform used to have a peak. The de-clipper estimates the peak from the
+  // samples on either side of the run and fills the arc back in. The proof is a
+  // fixture whose truth is known: a 997 Hz tone, clipped, so the reconstruction
+  // can be compared sample by sample against the sine it came from.
+  //
+  // Two things make or break it in the chain, and both are asserted here:
+  //   · the repair has to *survive* the rest of the chain — a reconstruction
+  //     that reaches above the file's own peak needs the level matcher's
+  //     headroom guard to give the level back, otherwise the soft-clip guard
+  //     flattens exactly the peaks the de-clipper just restored;
+  //   · the de-clicker downstream must not treat a plateau as a click. It did:
+  //     a clipped plateau is a broadband discontinuity, the detector fires at
+  //     its edge, and a window planned there reaches back into the plateau and
+  //     pulls it down to a third of its level. Measured, that cost more than the
+  //     de-clipper gained, so the plateau is now vetoed per sample.
+  const CLIP = 0.99, SEC = 6, AMP = 1.25, FREQ = 997;
+  const n = SR * SEC, truth = new Float32Array(n);
+  for (let i = 0; i < n; i++) truth[i] = AMP * Math.sin(2 * Math.PI * FREQ * i / SR);
+  const clipped = Float32Array.from(truth);
+  for (let i = 0; i < n; i++) if (clipped[i] > CLIP) clipped[i] = CLIP; else if (clipped[i] < -CLIP) clipped[i] = -CLIP;
+  // the tone is clipped on both halves of every period: the flat tops are long
+  // and perfectly regular, which is the friendliest case for a reconstruction
+  // and the easiest one to measure
+  const SOLO = () => Object.assign({}, H.DEFAULT_PARAMS, { power: 1, autoLevel: 1 });
+  const off = H.renderEx(Processor, [clipped], Object.assign({}, SOLO(), { declip: 0, declick: 0 }));
+  const on = H.renderEx(Processor, [clipped], Object.assign({}, SOLO(), { declip: 0.72, declick: 0 }));
+  H.ok(on.latency === 271 && off.latency === 0,
+    'the de-clipper declares its 271 samples of look-ahead (5.6 ms, the longest run it will repair), and none when idle',
+    'engaged ' + on.latency + ', bypassed ' + off.latency);
+
+  // find one flat top in the middle of the file and look at what came out —
+  // a *contiguous* run of one sign, which is what a clipped peak looks like
+  let s0 = -1, len = 0;
+  for (let i = SR; i < n - 1; i++) {
+    const flatHere = Math.abs(clipped[i]) >= CLIP - 1e-6;
+    const flatNext = Math.abs(clipped[i + 1]) >= CLIP - 1e-6 && (clipped[i + 1] > 0) === (clipped[i] > 0);
+    if (flatHere && flatNext) { if (s0 < 0) s0 = i; len = i - s0 + 2; }
+    else if (flatHere && s0 >= 0) { break; }
+  }
+  H.ok(s0 > 0 && len >= 5 && len <= 20, 'the fixture really has flat tops to repair',
+    'run at ' + s0 + ' of ' + len + ' samples');
+  const win = (o, lat) => {
+    let lo = 9, hi = -9;
+    for (let i = s0; i < s0 + len; i++) { const v = o.out[0][i + lat]; if (v < lo) lo = v; if (v > hi) hi = v; }
+    return { lo, hi };
+  };
+  const flat = win(off, 0), arc = win(on, on.latency);
+  H.ok(flat.hi - flat.lo < 0.01, 'without the stage the flat top is exactly what it says on the tin',
+    (1000 * (flat.hi - flat.lo)).toFixed(1) + ' ‰ of range');
+  H.ok(arc.hi - arc.lo > 0.05, 'with it the plateau carries an arc again, not a rail',
+    'range ' + (arc.hi - arc.lo).toFixed(4) + ' (was ' + (flat.hi - flat.lo).toFixed(4) + ')');
+  H.ok(arc.hi <= 0.9995, 'and still fits under full scale — the headroom comes from the level matcher, not from clipping the repair',
+    'peak ' + arc.hi.toFixed(4));
+
+  // …and it is the *right* arc. The comparison is scale-free on purpose: the
+  // guard legitimately turns a restored file down (that is the price of getting
+  // the peaks back), so dividing a global scale out is the only way to ask
+  // whether the *shape* is right. Against the truth the difference is 10 dB:
+  // without the stage the damaged samples are a rail at 0.99, with it they
+  // follow the sine to −34 dB.
+  const shapeErr = (o) => {
+    const lat = o.latency;
+    let se = 0, ss = 0, sr2 = 0;
+    for (const i of damaged) { if (i + lat >= n) continue; const e = o.out[0][i + lat], r = truth[i]; se += e * e; ss += e * r; sr2 += r * r; }
+    const a = ss / se;
+    let num = 0;
+    for (const i of damaged) { if (i + lat >= n) continue; const e = a * o.out[0][i + lat] - truth[i]; num += e * e; }
+    return 10 * Math.log10(num / sr2 + 1e-30);
+  };
+  const damaged = [];
+  for (let i = SR; i < n; i++) if (Math.abs(clipped[i]) >= CLIP - 1e-6) damaged.push(i);
+  const errOff = shapeErr(off), errOn = shapeErr(on);
+  H.ok(errOn < errOff - 8 && errOn < -30,
+    'and it is the right arc: the damaged samples follow the sine to within a per cent',
+    'best-fit error over the flat tops ' + errOff.toFixed(1) + ' → ' + errOn.toFixed(1) + ' dB');
+
+  // …and the reconstruction has to survive the *guard* too, which is the one
+  // stage that can undo the whole repair: its knee starts 0.55 dB below full
+  // scale, i.e. *below* the plateau of a clipped master, so a guard that does
+  // not know how far the de-clipper reconstructed flattens the arc straight
+  // back into a flat top. In the automatic mode the level matcher's headroom
+  // duck hides most of that (the duck moves the arcs below the knee, at the
+  // price of a file that is 1.7 dB quieter); with the matcher off it is the
+  // whole repair. Measured with the knee fixed at the old value: −16.2 dB of
+  // error in the plateau, i.e. barely better than not repairing at all; with
+  // the knee moving with `declip.head` (what the stage has actually
+  // reconstructed): −29.1 dB.
+  const manual = H.renderEx(Processor, [clipped], Object.assign({}, SOLO(), { declip: 0.72, declick: 0, autoLevel: 0 }));
+  const errManual = shapeErr(manual);
+  H.ok(errManual < errOff - 8,
+    'and the output guard does not undo it when the level matcher is off',
+    'best-fit error over the flat tops ' + errOff.toFixed(1) + ' → ' + errManual.toFixed(1) + ' dB');
+  H.ok(errManual < errOn + 1.5, 'the repair is the same repair in either mode',
+    'auto level on ' + errOn.toFixed(1) + ' dB, off ' + errManual.toFixed(1) + ' dB');
+
+  // the third harmonic is what a listener hears as the clipping buzz — the odd
+  // symmetry of a flat top, and the number that has to move
+  const h3 = (sig, lat) => {
+    let sg = 0, s3 = 0;
+    for (let i = SR; i < SR * 3; i++) {
+      const w = 2 * Math.PI * FREQ * i / SR;
+      sg += sig[i + lat] * Math.sin(w);
+      s3 += sig[i + lat] * Math.sin(3 * w);
+    }
+    return 20 * Math.log10(Math.abs(s3 / sg) + 1e-12);
+  };
+  H.ok(h3(on.out[0], on.latency) < h3(off.out[0], 0) - 8,
+    'the clipping buzz (third harmonic) drops with it',
+    h3(off.out[0], 0).toFixed(1) + ' → ' + h3(on.out[0], on.latency).toFixed(1) + ' dB below the fundamental');
+
+  // the de-clicker must leave the repaired arc alone — and, more importantly,
+  // must leave a plateau alone when the de-clipper is *off*, which is the
+  // regression this section exists for
+  const both = H.renderEx(Processor, [clipped], Object.assign({}, SOLO(), { declip: 0.72, declick: 0.85 }));
+  const clickOnly = H.renderEx(Processor, [clipped], Object.assign({}, SOLO(), { declip: 0, declick: 0.85 }));
+  const flatClick = win(clickOnly, clickOnly.latency);
+  H.ok(flatClick.hi - flatClick.lo < 0.01 && flatClick.lo > CLIP - 0.02,
+    'the de-clicker does not repair a clipped plateau as if it were a click',
+    'range ' + (flatClick.hi - flatClick.lo).toFixed(4) + ' at ' + flatClick.lo.toFixed(3));
+  const arcBoth = win(both, both.latency);
+  H.ok(arcBoth.hi - arcBoth.lo > 0.05 && arcBoth.lo > 0.6,
+    'and leaves the de-clipper\'s repair standing when both stages run',
+    'range ' + (arcBoth.hi - arcBoth.lo).toFixed(4) + ' at ' + arcBoth.lo.toFixed(3));
+  H.ok(both.latency === 288, 'the two repair stages add up to 288 samples of reported latency',
+    String(both.latency));
+}
+
+H.section('engine · de-clipper stays out of the way');
+{
+  // The other half of the job: material that was never clipped must not be
+  // touched. A de-clipper that finds a peak where there is none is worse than
+  // no de-clipper at all — it would round off every legitimate transient.
+  const SOLO = (extra) => Object.assign({}, H.DEFAULT_PARAMS, { power: 1, autoLevel: 1 }, extra);
+  const flatOf = (sig) => { const st = RSDSP.flatTopStep([sig], SR); st.step.slice(0, st.step.units); return st.value(); };
+  const loud = H.normalize(H.pink(SR, 6, 0.45, 11), 0.995);            // loud, but nothing reaches the rail
+  const vinyl = H.addCrackle(H.normalize(H.filter(RSDSP, H.pink(SR, 6, 0.40, 31), SR, 'lp', 9000, 0.55), 0.9), 7, 0.85, 5);
+  const tape = H.cassetteSim(RSDSP, SR, 6);
+  for (const [tag, sig] of [['a loud master that never clipped', loud], ['a vinyl rip with pops', vinyl], ['a cassette transfer', tape]]) {
+    const m = RSDSP.measure([sig], SR);
+    H.ok(m.clipEvidence < 0.02,
+      'no clipping evidence on ' + tag,
+      'flat ' + (100 * m.clipFlatRatio).toFixed(4) + ' %, implied ' + m.clipOvershootDb.toFixed(2) + ' dB, evidence ' + m.clipEvidence.toFixed(3));
+    const P = RP.buildParams('auto', m, RP.PRESETS[RP.classify(m).id].recommended);
+    H.ok(!(P.declip > 0), 'and the automatic dose stays at zero for ' + tag,
+      'declip ' + P.declip.toFixed(3) + ' (evidence ' + m.clipEvidence.toFixed(3) + ')');
+  }
+  // …and even *forced* on (the profile's manual position) it does nothing: no
+  // run is ever long enough to look like a flat top, so there is nothing to
+  // repair and the output is the input
+  const off = H.renderEx(Processor, [loud], SOLO({ declip: 0, declick: 0 }));
+  const on = H.renderEx(Processor, [loud], SOLO({ declip: 0.95, declick: 0 }));
+  H.ok(Math.abs(flatOf(on.out[0]).flatRatio - flatOf(off.out[0]).flatRatio) < 2e-5,
+    'the stage is dormant even when it is switched on for material without clipping',
+    (100 * flatOf(off.out[0]).flatRatio).toFixed(4) + ' % → ' + (100 * flatOf(on.out[0]).flatRatio).toFixed(4) + ' %');
+}
+
+H.section('engine · true-peak limiter (the export ceiling)');
+{
+  // The last defect a master can have, and the one that only shows up after the
+  // export: samples under full scale do not mean the *waveform* is under it. A
+  // signal that turns around between two samples reaches higher between them,
+  // and a codec that has to encode an overdriven waveform distorts it. Every
+  // streaming target is therefore a true-peak target (−1 dBTP, −2 dBTP above
+  // −14 LUFS), and the app measures the file's own true peak as `ispDb`.
+  //
+  // Three things are asserted here: that the ceiling is held *and measured* —
+  // the detector is the same estimator the measurement uses, so the two agree
+  // by construction — that a file which does not need the limiter pays nothing
+  // for it, and that the gain is shared between the channels, because a limiter
+  // that works per channel pulls the image sideways whenever one side is louder.
+  const MIN = () => Object.assign({}, H.DEFAULT_PARAMS, { power: 1, autoLevel: 0 });
+  const hot = (() => {
+    const seconds = 6;
+    const env = H.songEnvelope(SR, seconds, 0.05);
+    let x = H.mul(H.pink(SR, seconds, 0.45, 17), 1);
+    for (let i = 0; i < x.length; i++) x[i] *= env[i];
+    x = H.mix([x, H.mul(H.tone(60, SR, seconds, 0.2), 1), H.mul(H.tone(3000, SR, seconds, 0.1), 1)]);
+    const s = H.normalize(x, 1.0);                      // a master at the rail
+    for (let i = 0; i < s.length; i++) {
+      const v = s[i];
+      s[i] = v > 0.94 ? 0.94 + 0.06 * Math.tanh((v - 0.94) / 0.06)
+        : v < -0.94 ? -0.94 + 0.06 * Math.tanh((v + 0.94) / 0.06) : v;
+    }
+    return s;
+  })();
+  const free = H.renderEx(Processor, [hot], MIN());
+  H.ok(free.latency === 0, 'a ceiling of 0 dB switches the stage off entirely — no delay, no gain',
+    'latency ' + free.latency);
+  const freeIsp = RSDSP.measure([free.out[0]], SR).ispDb;
+
+  const limit = (ceil) => H.renderEx(Processor, [hot], Object.assign({}, MIN(), { tpCeil: ceil }));
+  const at = {};
+  for (const ceil of [-1, -2]) {
+    const r = limit(ceil);
+    at[ceil] = { r, isp: RSDSP.measure([r.out[0]], SR).ispDb, peak: H.peak(r.out[0]) };
+    H.ok(r.latency === 76, 'the stage reports its look-ahead (76 samples at 48 kHz: 1.5 ms plus the interpolator)',
+      'ceiling ' + ceil + ' → ' + r.latency);
+    H.ok(at[ceil].isp <= ceil + 0.15,
+      'the file arrives under the ' + ceil + ' dBTP ceiling the limiter was given',
+      'true peak measured ' + at[ceil].isp.toFixed(2) + ' dBTP (was ' + freeIsp.toFixed(2) + ' dBTP unlimited)');
+  }
+  // …and it takes only what the peaks need: a limiter that pulls the whole file
+  // down by the overshoot would make every loud master noticeably quieter than
+  // the file that came in, which is not restoration either
+  const rmsOf = (a) => { let e = 0; for (let i = 0; i < a.length; i++) e += a[i] * a[i]; return Math.sqrt(e / a.length); };
+  const takenDb = 20 * Math.log10(rmsOf(at[-1].r.out[0]) / rmsOf(free.out[0]));
+  H.ok(takenDb > -1.5 && takenDb < 0.2, 'and takes only the headroom the peaks need, not the whole file',
+    takenDb.toFixed(2) + ' dB of level');
+
+  // Nothing that is already below the ceiling may pay for the stage, and the
+  // claim is exact rather than approximate: the gain stays at 1.000000 and the
+  // output is the input, delayed. Two caveats about *how* that is measured,
+  // both properties of the chain rather than of the limiter:
+  //   · auto-level off — with it on, the matcher compares dry and wet block
+  //     energy, and its dry reference moves when a stage adds latency, so it
+  //     settles a few hundredths of a decibel away from the unlimited render;
+  //   · the first second skipped — the master A/B crossfade ramps from dry to
+  //     wet over ~0.2 s, and that blend is exactly where a differently delayed
+  //     dry reference is audible (measured: 2e-2 at 2.5 ms, 1e-5 by 0.6 s).
+  const quiet = H.mul(hot, 0.25);
+  const qOff = H.renderEx(Processor, [quiet], MIN());
+  const qOn = H.renderEx(Processor, [quiet], Object.assign({}, MIN(), { tpCeil: -1 }));
+  let worst = 0;
+  for (let i = SR; i + qOn.latency < qOn.out[0].length; i++) {
+    const d = Math.abs(qOn.out[0][i + qOn.latency] - qOff.out[0][i]);
+    if (d > worst) worst = d;
+  }
+  H.ok(worst < 1e-6, 'a file 12 dB below the ceiling comes through the stage untouched',
+    'largest difference ' + worst.toExponential(1) + ' (24 bit is 6e-8)');
+
+  // both channels through one gain: with a loud left and a quiet right, the
+  // ratio between them has to survive the limiting, or the image walks
+  const L = hot, R = H.mul(hot, 0.10);
+  const pairOff = H.renderEx(Processor, [L, R], MIN());
+  const pairOn = H.renderEx(Processor, [L, R], Object.assign({}, MIN(), { tpCeil: -2 }));
+  const ratio = (chans, lat) => {
+    let sl = 0, sr = 0;
+    for (let i = SR; i + lat < chans[0].length; i++) { sl += chans[0][i + lat] * chans[0][i + lat]; sr += chans[1][i + lat] * chans[1][i + lat]; }
+    return 10 * Math.log10(sl / (sr + 1e-30));
+  };
+  const drift = Math.abs(ratio(pairOn.out, pairOn.latency) - ratio(pairOff.out, 0));
+  H.ok(drift < 0.2, 'and the same gain is applied to both channels — the image does not move',
+    'L/R ratio moved by ' + drift.toFixed(3) + ' dB');
+  H.ok(RSDSP.measure([pairOn.out[0], pairOn.out[1]], SR).ispDb <= -2 + 0.15,
+    'a stereo pair is held under the ceiling too',
+    RSDSP.measure([pairOn.out[0], pairOn.out[1]], SR).ispDb.toFixed(2) + ' dBTP');
+
+  // The whole repair chain on one file, and a check on the *output* rather than
+  // on what one stage intended: this is the combination that exposed a NaN.
+  // Every stage that holds its output back adds to the chain's delay, and the
+  // chain's dry reference has to be as long as the sum — it was sized for the
+  // two repair stages before the limiter existed, so with all three engaged the
+  // reference read *before* its buffer, which is `undefined`, which is NaN by
+  // the time it reaches the mix. Measured: NaN audio for the first 2.7 s of a
+  // loud master, until the master crossfade reached exactly 1.
+  const everything = Object.assign({}, H.DEFAULT_PARAMS, {
+    power: 1, autoLevel: 1, declip: 0.65, declipLevel: -0.13, declick: 0.6,
+    dehiss: 0.16, glue: 0.09, tpCeil: -2,
+  });
+  const full = H.renderEx(Processor, [hot], everything);
+  let nonFinite = 0;
+  for (let i = 0; i < full.out[0].length; i++) if (!isFinite(full.out[0][i])) nonFinite++;
+  H.ok(nonFinite === 0, 'with every repair stage engaged the output is finite — every sample of delay is covered',
+    nonFinite + ' non-finite samples, latency ' + full.latency);
+  H.ok(full.latency === 271 + 17 + 76, 'and the three look-aheads add up to one number the caller can trust',
+    String(full.latency) + ' samples (271 de-clip + 17 de-click + 76 limiter)');
+  H.ok(RSDSP.measure([full.out[0]], SR).ispDb <= -2 + 0.15, 'the chain as a whole still lands under the ceiling',
+    RSDSP.measure([full.out[0]], SR).ispDb.toFixed(2) + ' dBTP');
 }
 
 H.section('engine · dynamic de-resonator');

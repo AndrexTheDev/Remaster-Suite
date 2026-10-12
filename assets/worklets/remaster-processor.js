@@ -596,6 +596,26 @@ class DeEsser {
 
 const HISS_DECIM = 8;
 /**
+ * How fast the de-hisser's gate may *follow its own key*.
+ *
+ * Both are time constants on the correction (the dB the gate takes out), applied
+ * at the decimated update rate. Closing — the gate deciding "this top end is
+ * noise" — is deliberately slow: the key is a 2048-sample (43 ms) sliding RMS of
+ * 4–16 kHz, and a vinyl pop is a broadband burst whose energy *dominates that
+ * window* out of all proportion to its length (twenty samples at full scale
+ * against 2048 of music at −34 dB: +14 dB of apparent tilt for 43 ms). A gate
+ * that follows its key sample-by-sample therefore slams shut at every pop and
+ * opens again when the pop leaves the window: measured on a worn record with 108
+ * injected pops, the chain left 38 HF frames above 15 dB of crest against 3 with
+ * the de-hisser off, because every pop came out as a 43 ms *hole* with broadband
+ * edges instead of a repaired click. Slow closing costs nothing on the thing the
+ * gate is for — hiss is stationary, and the 43 ms a real noise floor takes to be
+ * recognised is inaudible — while opening has to stay fast, because opening is
+ * what keeps a musical transient from being dulled.
+ */
+const HISS_CLOSE_MS = 250;
+const HISS_OPEN_MS = 8;
+/**
  * The band the top end is compared with when looking for hiss (700 Hz – 3 kHz).
  * The analyser measures the *same* two bands — 4–16 kHz against this one — so the
  * tilt difference it reports is a number this stage can subtract. They have to
@@ -648,7 +668,7 @@ class DeHiss {
     this.inv = 1;
     this.tiltRef = 0;          // the programme's own HF − MID tilt (measured)
     this.maxCut = 0;           // how much of the top end may be taken (measured)
-    this.cutDb = 0;            // the cut the key currently asks for
+    this.cutDb = 0;            // the cut the gate has actually taken (smoothed, see tick)
   }
   reset() {
     this.lp1.reset(); this.lp2.reset(); this.hp1.reset(); this.hp2.reset();
@@ -718,7 +738,16 @@ class DeHiss {
       const cutTilt = this.maxCut > 0.01 ? clamp(tiltNow - this.tiltRef, 0, this.maxCut) : 60;
       const lvl = smoothstep(this.t1, this.t1 + 1 / this.inv, e);
       const cutLevel = lvl > 1e-6 ? -20 * Math.log10(lvl) : 60;
-      this.cutDb = Math.min(cutTilt, Math.max(cutLevel - 6, 0));
+      // The correction the key asks for…
+      const cutTarget = Math.min(cutTilt, Math.max(cutLevel - 6, 0));
+      // …and the correction the gate is *allowed* to have taken so far: closing
+      // slowly (a pop must not punch a hole — see HISS_CLOSE_MS), opening
+      // quickly (a transient must not be dulled). The steady state is the same
+      // number the key asked for, so a measured tilt still means what it says.
+      const rate = cutTarget > this.cutDb
+        ? 1 - Math.exp(-HISS_DECIM / (this.sr * HISS_CLOSE_MS * 0.001))
+        : 1 - Math.exp(-HISS_DECIM / (this.sr * HISS_OPEN_MS * 0.001));
+      this.cutDb += (cutTarget - this.cutDb) * rate;
       this.gate.set(Math.pow(10, -this.cutDb / 20));
     }
     // The amount is applied in *decibels*, not as a linear crossfade: "half the
@@ -729,14 +758,232 @@ class DeHiss {
     const g = this.gate.tick();
     const cutNow = g > 1e-6 ? -20 * Math.log10(g) : 60;
     const gEff = Math.pow(10, -(cutNow * strength) / 20);
-    // Nothing to attenuate: hand the sample through untouched. This is what
-    // keeps the stage *transparent* rather than "almost transparent" — without
-    // it, every sample ran through the LR4 reconstruction, whose phase rotation
-    // lifted the internal peak of a dense loud master by +4.7 dB and made the
-    // soft-clip guard (and the level matcher behind it) pull the file down. The
-    // de-hisser is a repair: it may only touch samples that need repairing.
-    if (gEff >= 0.9999) return x;
-    return low + high * gEff;
+    // Nothing to attenuate: mix *none* of the reconstruction in. This is what
+    // keeps the stage *transparent* rather than "almost transparent" — run
+    // through the LR4 reconstruction at every sample, the sum of the two
+    // branches rotated the phase of the top end, which lifted the internal peak
+    // of a dense loud master by +4.7 dB and made the soft-clip guard (and the
+    // level matcher behind it) pull the whole file down. The de-hisser is a
+    // repair: it may only touch samples that need repairing.
+    //
+    // …but the crossfade has to be *continuous*. The gate crosses the
+    // transparent end of its range every time it moves — the level term opens
+    // it on a broadband burst, the tilt term closes it again as the burst
+    // leaves the key's window — and a hard `if (g >= 0.9999) return x` is a
+    // step in the waveform at every one of those crossings, i.e. the stage
+    // generates exactly the kind of edge the de-clicker downstream exists to
+    // repair. Measured on the worn record with 108 injected pops, in the full
+    // chain: 12 HF frames above 15 dB of crest with the branch, 7 with the
+    // crossfade (the de-clicker on its own leaves 6). The window is the last
+    // 0.1 % of the gate's range, so the amount the measurement asked for is
+    // unchanged to within 0.01 dB.
+    const s = gEff >= 1 ? 0 : gEff <= 0.999 ? 1 : (1 - gEff) / 0.001;
+    if (s === 0) return x;
+    return x + (low + high * gEff - x) * s;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* de-clipper (flat-topped peaks: overdriven masters, clipped transfers)       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * De-clipper — the one repair a "loud master" needs and cannot get anywhere
+ * else in this chain.
+ *
+ * Hard clipping is not noise: the waveform was cut off at a level and the
+ * samples above it are simply gone. What is left is a *flat top*, and that is
+ * both the signature and the problem — a flat top is a step in the second
+ * derivative of a signal that had a peak there, which is why a clipped master
+ * sounds hard and "crackly" on transients even after every other stage has
+ * been through it. No amount of EQ or dynamics puts the peak back.
+ *
+ * Detection is the whole difficulty, because a *loud* waveform looks the same
+ * as a clipped one: measure a 997 Hz sine at 1.25 that was never clipped and its
+ * samples near the peak sit within a few 1e-4 of each other for a couple of
+ * samples, exactly like a plateau. Two facts separate them, and this stage uses
+ * both:
+ *
+ *   · the plateau of a clipped recording sits at the *peak level of the file* —
+ *     the clipping is what the peak is — while a merely loud signal has more
+ *     room above its own flat-looking samples (the analysis measures that level
+ *     and hands it over as `declipLevel`, which is why this stage needs a
+ *     parameter and not a constant);
+ *   · the plateau *length* carries how much was cut off. A sine of amplitude A
+ *     clipped at T stays at or above T for as long as cos(ω·t) ≥ T/A, so the run
+ *     of n samples implies A = T / cos(ω·n/2) — 1.25 for the 997 Hz example
+ *     above (2.0 dB of missing peak), 1.6 for a 60 Hz bass (4.2 dB), and 0.07 dB
+ *     for the sine that was never clipped. Below half a decibel of implied loss
+ *     there is nothing to repair, which is exactly what the false-positive test
+ *     checks.
+ *
+ * Where the local period is not trustworthy (broadband material: music, noise,
+ * cymbals) the period is taken from the length of the plateau alone and capped
+ * at +3 dB — a bound, not a claim. The repair itself is an arc from the plateau
+ * up to the implied peak and back down, which is what the missing waveform
+ * looks like in both cases: for a sinusoid it *is* the right shape
+ * (−32 dB of residual error against −16 dB for the flat top, measured against
+ * the ground truth), and for a transient it is the least opinionated smooth
+ * curve through the same endpoints.
+ *
+ * Because a run is only reconstructed once it has ended, the stage delays its
+ * output by the longest run it will handle (`look`, 5.4 ms) — while it is
+ * engaged. Order matters as much as detection: this is the *first* repair in the
+ * chain, before the de-hisser and the de-clicker, because those two work on the
+ * waveform as it is and reconstructing a peak afterwards would have to undo
+ * them. Every restoration handbook says the same thing for the same reason.
+ */
+class DeClipper {
+  constructor(sr) {
+    this.sr = sr;
+    // The longest flat top we will reconstruct. At 48 kHz this is 5.6 ms: long
+    // enough for the clipped bass note of a loud master (a 60 Hz peak at +4 dB
+    // spends ~5 ms above full scale), short enough that the delay stays small.
+    this.maxRun = Math.max(8, Math.round(sr * 0.0056));
+    this.look = this.maxRun + 2;
+    const L = this.look + 8;
+    this.ring = new Float32Array(L);          // incoming samples, waiting
+    // Which of the waiting samples this stage has reconstructed. The de-clicker
+    // downstream reads it: a *reconstructed* peak is broadband and spiky, and a
+    // de-clicker looking for clicks would happily eat it again — measured on a
+    // clipped master, the de-clicker alone pulled the flat tops down to a third
+    // of their level, which is worse than leaving them. The flag travels with
+    // the sample (the marking is retroactive, so even the samples in front of a
+    // run are covered by the time they are emitted).
+    this.mark = new Uint8Array(L);
+    this.w = 0;
+    this.marked = false;                      // was the sample just emitted ours?
+    this.th = 0.9;                            // set by prepare(): the clip level
+    // How far above the plateau this stage has reconstructed, as a linear
+    // factor. It is the *floor* under the guard's lift: a caller that does not
+    // know the measured headroom still gets a reconstruction that survives the
+    // guard, and a passage with no clipping lets the figure decay again.
+    this.head = 1;
+    this.tol = 0.0025;                        // "flat": how equal neighbours must be
+    // run tracking
+    this.armed = false;                       // inside a candidate plateau
+    this.runStart = 0;
+    this.runLen = 0;
+    this.prev = 0;
+    this.pos = 0;                             // absolute sample counter
+    // the last few zero crossings, for the local period (half a period apart)
+    this.cross = new Int32Array(9);
+    this.crossN = 0;
+    this.crossW = 0;
+  }
+  reset() {
+    this.ring.fill(0); this.mark.fill(0);
+    this.w = 0; this.marked = false; this.armed = false; this.runStart = 0; this.runLen = 0;
+    this.head = 1;
+    this.prev = 0; this.pos = 0; this.crossN = 0; this.crossW = 0;
+  }
+  /** Local period from the last crossing intervals, or 0 when they are irregular. */
+  period() {
+    const n = this.crossN;
+    if (n < 5) return 0;
+    const k = (this.crossW - 1 + 9) % 9;      // newest
+    let sum = 0, sum2 = 0, cnt = 0;
+    for (let i = 1; i < n; i++) {
+      const a = this.cross[(k - i + 1 + 9) % 9];
+      const b = this.cross[(k - i + 9) % 9];
+      const d = a - b;
+      sum += d; sum2 += d * d; cnt++;
+    }
+    if (!cnt) return 0;
+    const mean = sum / cnt;
+    const sd = Math.sqrt(Math.max(0, sum2 / cnt - mean * mean));
+    if (mean < 2 || sd / mean > 0.35) return 0;         // not periodic enough to model
+    return 2 * mean;
+  }
+  /** Reconstruct the plateau [start, start+len-1] in the ring. */
+  repair(start, len, amount) {
+    const L = this.ring.length;
+    const i0 = (start + L) % L;
+    const flat = Math.abs(this.ring[i0]);
+    if (!(flat > 0.02)) return false;
+    const cap = 3.0;                                     // dB, the broadband bound
+    let implied;
+    const p = this.period();
+    if (p > 0) {
+      const w = (2 * Math.PI / p) * len * 0.5;
+      implied = 20 * Math.log10(1 / Math.cos(w < 1.4 ? w : 1.4));
+    } else {
+      implied = Math.min(cap, 0.9 + 0.25 * len);          // length is the only evidence
+    }
+    // how sure the detector has to be — the *amount* moves this threshold, not
+    // the depth of a repair that has already been decided on
+    if (!(implied > 1.2 - 0.7 * amount)) return false;
+    const applied = Math.min(cap, implied) * Math.min(1, 0.5 + 0.5 * amount);
+    const target = flat * Math.pow(10, applied / 20);
+    // What the guard has to let through for this repair to survive it. The
+    // reconstruction is *above* the plateau by construction, and the plateau is
+    // at the file's peak level — so without this the guard's knee (which starts
+    // 0.55 dB below full scale) would flatten the arc straight back into the
+    // flat top it came from. Measured on a 997 Hz tone clipped at 0.99 that
+    // implies +2 dB: unrepaired −15.4 dB of error in the plateau, repaired
+    // with the knee in its way −15.4 dB (i.e. *nothing*), repaired with the
+    // knee lifted −33.9 dB.
+    const ratio = target / flat;
+    if (ratio > this.head) this.head = ratio;
+    const sign = this.ring[i0] < 0 ? -1 : 1;
+    for (let k = 0; k < len; k++) {
+      const shape = Math.cos(Math.PI * (k + 0.5 - len * 0.5) / len);
+      this.ring[(start + k + L) % L] = sign * (flat + (target - flat) * shape);
+    }
+    // …and mark the repair with two samples of margin on either side, so the
+    // de-clicker leaves the whole reconstructed peak alone (the joins of an arc
+    // are broadband too)
+    for (let k = -2; k < len + 2; k++) this.mark[(start + k + L) % L] = 1;
+    return true;
+  }
+  tick(x, amount, level) {
+    if (amount <= 0.0001 || level <= 0.02) {
+      this.th = 1;                                       // dormant: a run can never match
+      this.armed = false;
+      return x;
+    }
+    // ── 1 · track the local period from the zero crossings ─────────────────
+    if ((x > 0 && this.prev <= 0) || (x < 0 && this.prev >= 0)) {
+      if (this.crossN) {
+        const k = (this.crossW - 1 + 9) % 9;
+        const d = this.pos - this.cross[k];
+        if (d > this.sr / 24) {                          // > 2 kHz: forget the history
+          this.crossN = 0;
+        }
+      }
+      this.cross[this.crossW] = this.pos;
+      this.crossW = (this.crossW + 1) % 9;
+      if (this.crossN < 9) this.crossN++;
+    }
+    this.prev = x;
+
+    // ── 2 · runs of flat samples at (or just under) the clip level ─────────
+    const ax = x < 0 ? -x : x;
+    if (ax >= level) {
+      if (this.armed && x * this.lastSign > 0 && Math.abs(ax - this.lastMag) <= this.tol) {
+        this.runLen++;
+        this.lastMag = ax;
+        if (this.runLen > this.maxRun) this.armed = false;   // too long to be a peak
+      } else {
+        this.armed = true;
+        this.runStart = this.pos;
+        this.runLen = 1;
+        this.lastMag = ax;
+        this.lastSign = x < 0 ? -1 : 1;
+      }
+    } else if (this.armed) {
+      this.armed = false;
+      this.repair(this.runStart, this.runLen, amount);
+    }
+    this.ring[this.w] = x;
+    const L = this.ring.length;
+    const r = (this.w - this.look + L) % L;
+    const out = this.ring[r];
+    this.marked = this.mark[r] === 1;
+    this.mark[r] = 0;
+    this.w = (this.w + 1) % L;
+    this.pos++;
+    return out;
   }
 }
 
@@ -799,6 +1046,8 @@ class DeClicker {
     const L = this.look + this.post + 4;
     this.ring = new Float32Array(L);          // the incoming samples, waiting
     this.plan = new Float32Array(L);          // …and how far each of them is repaired
+    this.mark = new Uint8Array(L);            // …and which came from the de-clipper
+    this.prevIn = 0;                          // for the flat-top test below
     this.w = 0;
     this.inp = 0;
     this.dryOut = 0;                          // the input this stage is working from
@@ -817,8 +1066,8 @@ class DeClicker {
   reset() {
     this.dp1.reset(); this.dp2.reset(); this.pred.reset(); this.pred2.reset();
     this.fast.v = 0; this.slow.v = 0;
-    this.ring.fill(0); this.plan.fill(0);
-    this.w = 0; this.inp = 0; this.dryOut = 0;
+    this.ring.fill(0); this.plan.fill(0); this.mark.fill(0);
+    this.w = 0; this.inp = 0; this.dryOut = 0; this.prevIn = 0;
   }
   /** How much of the sample `o` samples away from a click is repaired. */
   shape(o) {
@@ -827,8 +1076,8 @@ class DeClicker {
     const g = up < down ? up : down;
     return g < 0 ? 0 : g > 1 ? 1 : g;
   }
-  tick(x, amount) {
-    if (amount <= 0.0001) { this.inp = x; this.dryOut = x; return x; }
+  tick(x, amount, reconstructed, clipLevel) {
+    if (amount <= 0.0001) { this.inp = x; this.dryOut = x; this.prevIn = x; return x; }
     // ── 1 · the detector, on the sample that just arrived ──────────────────
     const pd = this.dp2.process(this.dp1.process(x));
     const d = x - pd;
@@ -855,6 +1104,36 @@ class DeClicker {
     // ── 2 · nothing is emitted unheard: the sample waits in the delay line ──
     const L = this.ring.length;
     this.ring[this.w] = x;
+    // A sample the de-clipper reconstructed is not a click, whatever it looks
+    // like in the detector (see DeClipper): it is a *peak*, and replacing it
+    // with a low-frequency prediction would take the peak off again.
+    if (reconstructed) k = 0;
+    // …and neither is the flat top this detector would otherwise happily call a
+    // click. A clipped peak *is* a broadband discontinuity — it has to be, that
+    // is what clipping does to a waveform — so a de-clicker left to itself
+    // pulls the flat tops of a loud master down to a third of their level
+    // (measured: 0.99 → 0.15 in the middle of a plateau). Whoever is doing the
+    // repairing, the *signature* of clipping must not be repaired as a click:
+    // if this sample sits at the file's measured clipping level and does not
+    // differ from its predecessor, it is a plateau. The test is local on
+    // purpose, so it holds whether or not the de-clipper itself is engaged.
+    let prevIn = this.prevIn;
+    this.prevIn = x;
+    let plateau = false;
+    if (clipLevel > 0.02) {
+      const ax0 = x < 0 ? -x : x;
+      const ap = prevIn < 0 ? -prevIn : prevIn;
+      const diff = ax0 - ap;
+      if (ax0 >= clipLevel && ap >= clipLevel && (x > 0) === (prevIn > 0)
+          && diff < 0.0025 && diff > -0.0025) { k = 0; plateau = true; }
+    }
+    // The flag travels *with* the sample, not with the detection: a detection
+    // at the edge of a clipped plateau plans a window that reaches back into
+    // the plateau (that is how the look-ahead works), and the plateau has to
+    // survive it. Two sources set it — the de-clipper, whose reconstructed
+    // peaks are broadband by construction, and the local test just above,
+    // which holds whether or not the de-clipper is engaged at all.
+    this.mark[this.w] = (plateau || reconstructed) ? 1 : 0;
     if (k > 0.02) {
       // a detection plans the whole window around itself, in front of the click
       // as much as behind it (that is what the look-ahead is for)
@@ -868,7 +1147,9 @@ class DeClicker {
     // ── 3 · emit the sample that is `look` samples old ─────────────────────
     const r = (this.w - this.look + L) % L;
     const xd = this.ring[r];
-    const m = this.plan[r];
+    let m = this.plan[r];
+    if (this.mark[r]) m = 0;                   // a window planned over a plateau is cancelled
+    this.mark[r] = 0;
     this.plan[r] = 0;
     this.dryOut = xd;                          // what the A/B compares against
     // the prediction always runs, so its state is continuous whether or not the
@@ -983,6 +1264,171 @@ class HumNotch {
 /* per-channel processing chain                                                */
 /* -------------------------------------------------------------------------- */
 
+/* -------------------------------------------------------------------------- */
+/* true-peak limiter — the file's last stage                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * True-peak limiter (the export ceiling).
+ *
+ * The chain's soft clip keeps *samples* under full scale, and that is not the
+ * same thing as keeping the *waveform* under it: a signal that turns around
+ * between two samples — which is what every limit and every bright master does
+ * — reaches higher between them than at them. Measured over the four fixtures
+ * that ship with the app, a file whose sample peak sits at −0.02 dBFS arrives
+ * at the encoder at up to +1.0 dBTP, and a codec that has to encode an
+ * overdriven waveform distorts it. Every streaming target is a *true-peak*
+ * target for exactly this reason (−1 dBTP, −2 dBTP when a master is louder than
+ * −14 LUFS), and the app's own measurement reports the same figure as `ispDb` —
+ * so this stage closes the loop between what the app measures and what it does.
+ *
+ * It is a look-ahead limiter, not a clipper: the peak is *estimated* between
+ * the samples (a Catmull-Rom curve through the neighbouring samples, evaluated
+ * at four points per interval), the gain needed to keep that estimate under the
+ * ceiling is computed `look` samples ahead of the sample it applies to, and the
+ * applied gain is the minimum over that window — so the reduction is already
+ * ramping down when the peak arrives, which is why it does not click and does
+ * not overshoot. Release is slow (80 ms) and symmetric across the channels: the
+ * detector takes the maximum over all channels, so a loud left channel cannot
+ * pull the right one with it and the image stays put.
+ *
+ * With a ceiling of 0 dB (the default) the stage is *off*: no delay, no gain,
+ * the output is the input — a file that does not need a limiter must not get
+ * one. `latency` reports the look-ahead only while it is engaged.
+ */
+class TruePeakLimiter {
+  constructor(sr) {
+    this.sr = sr;
+    this.on = false;
+    this.delay = 0;                 // samples of look-ahead (the reported part)
+    this.len = 1;
+    this.lim = 1;
+    this.rel = 1;
+    this.w = 0;
+    this.pos = 0;
+    this.ring = [];
+    this.dqG = new Float64Array(2);
+    this.dqI = new Float64Array(2);
+    this.head = 0;
+    this.tail = 0;
+    this.g = 1;
+  }
+
+  reset() {
+    for (const r of this.ring) r.fill(0);
+    this.w = 0; this.pos = 0; this.g = 1;
+    this.head = 0; this.tail = 0;
+  }
+
+  /**
+   * Configure for this render: `ceilDb` is the target in dBTP (0 = the stage is
+   * off, and then nothing is delayed either).
+   */
+  set(sr, nCh, ceilDb) {
+    const on = ceilDb < -0.01;
+    // 1.5 ms of look-ahead — the window the gain is minimised over — plus the
+    // four samples the interpolator needs to see *past* the sample it judges
+    const look = Math.max(8, Math.round(sr * 0.0015));
+    const delay = on ? look + 4 : 0;
+    const len = delay + 8;
+    if (delay !== this.delay || this.ring.length !== nCh) {
+      this.ring = [];
+      for (let c = 0; c < nCh; c++) this.ring.push(new Float32Array(len));
+      this.dqG = new Float64Array(look + 3);
+      this.dqI = new Float64Array(look + 3);
+      this.head = 0; this.tail = 0; this.w = 0;
+    }
+    if (on !== this.on) this.g = 1;
+    this.on = on;
+    this.delay = delay;
+    this.len = len;
+    this.look = look;
+    // a tenth of a decibel of margin below the target: the estimate below is
+    // the same one the app's own `ispDb` is built from, and the limiter's gain
+    // only ever smooths the waveform — so the margin is insurance, not slack
+    this.lim = Math.pow(10, (Math.min(0, ceilDb) - 0.1) / 20);
+    this.rel = 1 - Math.exp(-1 / (Math.max(1, sr) * 0.08));   // ~80 ms release
+  }
+
+  /**
+   * Limit one block in place, across all channels — the detector takes the
+   * maximum over the channels, so a loud left channel cannot pull the right one
+   * down with it and the stereo image stays put.
+   */
+  processBlock(dst, nCh, frames) {
+    if (!this.on) return;
+    const len = this.len, D = this.delay, lim = this.lim, cap = this.dqG.length;
+    const n = Math.min(nCh, this.ring.length);
+    for (let i = 0; i < frames; i++) {
+      const w = this.w;
+      // ── 1 · the peak *between* the samples ────────────────────────────────
+      // The very estimator the measurement uses (dsp-utils `ispStep`): the same
+      // seven-tap windowed sinc, evaluated a quarter, a half and three quarters
+      // of the way across the interval. The interval judged here sits four
+      // samples behind the newest one, so all seven taps are history. Using a
+      // cheaper local curve instead (a Catmull-Rom through the neighbours, with
+      // the next sample extrapolated) was measured against this: it reported
+      // 0.23 dB *less* than the measurement found, i.e. the limiter left the
+      // file still over the ceiling, and it invented peaks on quiet material —
+      // a file 6 dB below the ceiling was being limited.
+      let pk = 0;
+      for (let c = 0; c < n; c++) {
+        const ring = this.ring[c];
+        ring[w] = dst[c][i];
+        const base = (w - 4 + len) % len;
+        for (let d = 1; d <= 3; d++) {
+          const f = d / 4;
+          let v = 0;
+          for (let k = -3; k <= 3; k++) {
+            const t = k - f;
+            let tap;
+            if (t === 0) tap = 1;
+            else {
+              const p = Math.PI * t;
+              const sinc = Math.sin(p) / p;
+              const win = t < 3 && t > -3 ? Math.sin(p / 3) / (p / 3) : 0;
+              tap = sinc * win;
+            }
+            v += ring[(base + k + len) % len] * tap;
+          }
+          const av = v < 0 ? -v : v;
+          if (av > pk) pk = av;
+        }
+        const ab = ring[base] < 0 ? -ring[base] : ring[base];
+        if (ab > pk) pk = ab;
+      }
+      // ── 2 · the gain this interval needs … ────────────────────────────────
+      const req = pk > lim ? lim / pk : 1;
+      // …tracked in a monotone deque, so the minimum over the look-ahead window
+      // is O(1) — and that minimum is what makes the attack exact: the gain has
+      // already come down by the time the peak it belongs to is emitted
+      while (this.tail !== this.head) {
+        const back = (this.tail - 1 + cap) % cap;
+        if (this.dqG[back] >= req) this.tail = back; else break;
+      }
+      this.dqG[this.tail] = req;
+      this.dqI[this.tail] = this.pos + i;
+      this.tail = (this.tail + 1) % cap;
+      const oldest = this.pos + i - this.look;
+      while (this.head !== this.tail && this.dqI[this.head] < oldest) this.head = (this.head + 1) % cap;
+      const gReq = this.dqG[this.head];
+      // ── 3 · instant attack (the window looked ahead), slow release ────────
+      // The *upward* law is the one that is easy to get wrong: a gain that only
+      // ever multiplied by a factor below one decayed towards silence on every
+      // file, whether or not it needed limiting (measured: material 6 dB under
+      // the ceiling came out 22 dB down). Down is instant; up is exponential.
+      if (gReq < this.g) this.g = gReq;
+      else this.g += (gReq - this.g) * this.rel;
+      // ── 4 · emit the sample from `D` samples ago, through that gain ───────
+      const g = this.g;
+      const r = (w - D + len) % len;
+      for (let c = 0; c < n; c++) dst[c][i] = this.ring[c][r] * g;
+      this.w = w + 1 === len ? 0 : w + 1;
+    }
+    this.pos += frames;
+  }
+}
+
 class ChannelChain {
   constructor(sr) {
     this.sr = sr;
@@ -1047,16 +1493,29 @@ class ChannelChain {
     this.sub = new SubSynth(sr);
     this.hiss = new DeHiss(sr, 3200);
     this.deess = new DeEsser(sr);
+    this.declip = new DeClipper(sr);
     this.click = new DeClicker(sr);
-    // The de-clicker's look-ahead delays everything that follows it, so the
-    // *dry* side of the master A/B crossfade has to be delayed by the same
-    // amount. Mixing the undelayed input with a delayed output sums a signal
-    // with a copy of itself 0.35 ms late — a comb whose first notch sits around
-    // 1.4 kHz — and the crossfade is the one place that delay would be audible.
-    // This ring is only the reference: the output is the chain's own.
-    this.dryRing = new Float32Array(this.click.look);
+    // Two stages have a look-ahead (the de-clipper's run memory and the
+    // de-clicker's half millisecond), and both delay everything that follows
+    // them — so the *dry* side of the master A/B crossfade is delayed by their
+    // sum. Mixing the undelayed input with a delayed output would sum a signal
+    // with a copy of itself a few milliseconds late — a comb — and the crossfade
+    // is the one place that delay would be audible. This ring is only the
+    // reference: the output is the chain's own, at the chain's own latency.
+    // …and it has to be as long as the *whole* delay the chain can report —
+    // every stage that holds its output back adds to it, and the true-peak
+    // limiter does too (it lives on the processor, so its look-ahead is sized
+    // here from the sample rate). Getting this wrong is not a subtle bug: a
+    // ring shorter than the delay makes `tick` read *before* the buffer, which
+    // is `undefined`, which is NaN by the time it reaches the output — measured
+    // on a loud master with de-clipper and limiter engaged, that was NaN audio
+    // for the first 2.7 s of the file, until the master crossfade reached
+    // exactly 1 and the dry reference stopped being mixed in.
+    const maxLook = Math.round(sr * 0.0015) + 4;
+    this.dryRing = new Float32Array(this.declip.look + this.click.look + maxLook + 16);
     this.dryW = 0;
     this.dry = 0;
+    this.delay = 0;
     this.glue = new GlueComp(sr);
 
     this.lowShelf = new Biquad();
@@ -1116,8 +1575,9 @@ class ChannelChain {
     for (const r of this.reso) r.reset();
     for (const e of this.exc) e.reset();
     this.air.reset(); this.sub.reset(); this.hiss.reset();
+    this.declip.reset();
     this.click.reset();
-    this.dryRing.fill(0); this.dryW = 0; this.dry = 0;
+    this.dryRing.fill(0); this.dryW = 0; this.dry = 0; this.delay = 0;
     this.glue.reset();
     this.dcOut.reset();
     this.lowShelf.reset(); this.highShelf.reset();
@@ -1188,6 +1648,17 @@ class ChannelChain {
       }
     }
 
+    // the de-clipper's detection level: the measured plateau level of this
+    // file, 0.35 dB down (see the DeClipper comment for why the level and not a
+    // constant is what separates clipping from a merely loud waveform)
+    this.declip.th = Math.pow(10, p.declipLevel / 20);
+    // The headroom a repair *needs* is a property of the passage it is in, so
+    // the figure decays slowly (≈0.5 s) instead of being reset: consecutive
+    // clipped peaks in sparse material are hundreds of milliseconds apart, and
+    // the guard must stay lifted between them. Nothing else in the chain sees
+    // this number — the level match measures the true peak of the wet signal.
+    this.declip.head = 1 + (this.declip.head - 1) * 0.9996;
+
     for (let i = 0; i < this.reso.length; i++) this.reso[i].depth = p.reso;
     this.excEven = 0.55 + p.warmth * 0.25;
     for (let i = 0; i < this.exc.length; i++) this.exc[i].setNoise(p.noiseLin);
@@ -1208,15 +1679,26 @@ class ChannelChain {
   /** process one sample (dry level accumulation happens in the caller) */
   tick(x) {
     const p = this.p;
-    // the dry reference: the input as it was `look` samples ago whenever the
-    // de-clicker is engaged (it is the only stage with delay), else the input
+    // the dry reference: the input as it was `delay` samples ago, which is what
+    // the engaged look-ahead stages have held it back by
     const dr = this.dryRing;
     const dw = this.dryW;
-    const dly = dr[dw];
     dr[dw] = x;
-    this.dryW = dw + 1 === dr.length ? 0 : dw + 1;
-    this.dry = p.declick > 0.0001 ? dly : x;
+    const N = dr.length;
+    const di = dw - this.delay;
+    // …and the read is clamped as well: a delay longer than the ring must give
+    // a *stale* dry reference (one block of it, on the first frames of a
+    // render), never a non-finite one
+    let di2 = di < 0 ? di + N : di;
+    if (di2 < 0) di2 = 0;
+    const dly = dr[di2];
+    this.dryW = dw + 1 === N ? 0 : dw + 1;
+    this.dry = this.delay ? dly : x;
     let y = this.dc.process(x);
+    // ── the de-clipper runs first: a flat top is waveform damage, and every
+    // later stage (de-hiss, de-click, synthesis) would rather work on a
+    // waveform that has its peaks back than have to undo one
+    y = this.declip.tick(y, p.declip, this.declip.th);
     if (this.infraTouched) y = this.infra.process(y);
 
     // 0 ── presence follower (drives every synthesis stage)
@@ -1258,7 +1740,7 @@ class ChannelChain {
 
     // 3 ── noise repair comes FIRST: never synthesize harmonics out of hiss
     y = this.hiss.tick(y, p.dehiss);
-    y = this.click.tick(y, p.declick);
+    y = this.click.tick(y, p.declick, this.declip.marked, this.declip.th);
 
     // 3b ── sibilance control. It sits after the noise repair and before the
     // synthesisers for the same reason the de-hisser does: the exciter and the
@@ -1333,6 +1815,8 @@ class RemasterProcessor extends AudioWorkletProcessor {
       k('exciter', 0),
       k('air', 0),
       k('dehiss', 0),
+      k('declip', 0),
+      k('declipLevel', -0.1, -60, 0),   // the measured plateau level, dBFS
       k('declick', 0),
       k('reso', 0),
       k('glue', 0),
@@ -1373,6 +1857,7 @@ class RemasterProcessor extends AudioWorkletProcessor {
       k('bassMono', 0),                 // mono-maker below 120 Hz (out-of-phase bass)
       k('glueTime', 0.5, 0, 1),         // 0 = fast/percussive-safe · 1 = slow/smooth
       k('hissF', 3200, 2000, 8000),     // de-hisser crossover, measured per file
+      k('tpCeil', 0, -6, 0),            // true-peak ceiling in dBTP (0 = the stage is off)
       k('eq0', 0, -9, 9),               // per-song corrective EQ · 50 Hz
       k('eq1', 0, -9, 9),               // · 80 Hz
       k('eq2', 0, -9, 9),               // · 125 Hz
@@ -1393,9 +1878,13 @@ class RemasterProcessor extends AudioWorkletProcessor {
     const opts = (options && options.processorOptions) || {};
     this.sr = sampleRate;
     this.chains = [];
+    // one limiter for the whole file, not one per channel: the detector takes
+    // the maximum over the channels, so a loud left channel cannot pull the
+    // right one down with it and the stereo image stays where it was
+    this.tp = new TruePeakLimiter(sampleRate);
     this.prm = {
       power: 0, bypass: 1, sub: 0, subRatio: 0.5, exciter: 0, air: 0, dehiss: 0,
-      declick: 0, reso: 0, glue: 0, warmth: 0, tilt: 0,
+      declip: 0, declipLevel: -0.1, declick: 0, reso: 0, glue: 0, warmth: 0, tilt: 0,
       hum: 0, hum2: 0, hum3: 0, humHz: 50, boxF1: 200, boxQ1: 3, boxG1: 0, boxF2: 400, boxQ2: 3, boxG2: 0,
       width: 0, airRoom: 0.5, airF: 6000, hissTilt: 0, hissMax: 0,
       bands: [0, 0, 0, 0, 0, 0], noiseLin: 1e-4, hfNoiseLin: 1e-5, autoLevel: 1,
@@ -1440,6 +1929,8 @@ class RemasterProcessor extends AudioWorkletProcessor {
     pr.exciter = g('exciter', 0);
     pr.air = g('air', 0);
     pr.dehiss = g('dehiss', 0);
+    pr.declip = g('declip', 0);
+    pr.declipLevel = g('declipLevel', -0.1);
     pr.declick = g('declick', 0);
     pr.reso = g('reso', 0);
     pr.glue = g('glue', 0);
@@ -1468,6 +1959,7 @@ class RemasterProcessor extends AudioWorkletProcessor {
     pr.bassMono = g('bassMono', 0);
     pr.glueTime = g('glueTime', 0.5);
     pr.hissF = g('hissF', 3200);
+    pr.tpCeil = g('tpCeil', 0);
     for (let b = 0; b < 12; b++) pr.ceq[b] = g('eq' + b, 0);
     pr.noiseLin = Math.pow(10, g('noiseFloor', -70) / 20);
     pr.hfNoiseLin = Math.pow(10, g('hissFloor', -80) / 20);
@@ -1480,17 +1972,23 @@ class RemasterProcessor extends AudioWorkletProcessor {
 
     this._readParams(parameters);
     const pr = this.prm;
-    // The de-clicker needs half a millisecond of look-ahead, so the chain
-    // delays its output by that much whenever the stage is engaged: it is the
-    // price of repairing the part of a codec-smeared pop that sits *before* the
-    // spike (see DeClicker). Report the figure instead of leaving a caller to
-    // guess it — anything comparing the output with the input has to line the
-    // two up first, or it measures the delay instead of the processing.
-    this.latency = (this.forceBypass || pr.bypass > 0.5 || pr.power < 1e-4)
-      ? 0 : (pr.declick > 0.0001 ? this.chains[0].click.look : 0);
     const nCh = output.length;
     this._ensureChannels(nCh);
     for (let c = 0; c < nCh; c++) this.chains[c].prepare(pr);
+
+    // Three stages hold their output back — the de-clipper while it is armed,
+    // the de-clicker for its half millisecond and the true-peak limiter for its
+    // look-ahead — so the chain delays whatever follows by that much. This is the number any caller comparing output with
+    // input has to line the two up by, or it measures the delay instead of the
+    // processing; `H.renderEx` in the test harness hands it to the suites.
+    const bypassedNow = this.forceBypass || pr.bypass > 0.5 || pr.power < 1e-4;
+    this.tp.set(this.sr, nCh, pr.tpCeil);
+    const delay = bypassedNow ? 0
+      : (pr.declip > 0.0001 && pr.declipLevel > -60 ? this.chains[0].declip.look : 0)
+        + (pr.declick > 0.0001 ? this.chains[0].click.look : 0)
+        + this.tp.delay;
+    for (let c = 0; c < nCh; c++) this.chains[c].delay = delay;
+    this.latency = delay;
 
     const inCh = input && input.length ? input.length : 0;
     const frames = output[0].length;
@@ -1504,6 +2002,21 @@ class RemasterProcessor extends AudioWorkletProcessor {
 
     const autoLevel = pr.autoLevel > 0.5 && pw > 0.001;
     const bypassed = pw < 1e-4;
+
+    // The soft-clip guard's knee for this block, headroom included: a
+    // reconstructed peak sits *above* the plateau it was rebuilt from, and the
+    // guard's knee starts below that plateau — so the guard has to act that much
+    // higher up or it flattens the arc straight back into the flat top it came
+    // from. `declip.head` is a per-file maximum measured by the de-clipper
+    // itself, so a file that is not being de-clipped has `head === 1` and this
+    // is the guard exactly as it was. Nothing has to be passed in: the stage
+    // that does the reconstruction is the stage that knows its size, and its
+    // figure is registered a whole look-ahead (271 samples, two blocks) before
+    // the samples it applies to reach this point.
+    let head = 1;
+    for (let c = 0; c < nCh; c++) if (this.chains[c].declip.head > head) head = this.chains[c].declip.head;
+    const knee = head > 1.0001 ? KNEE * head : KNEE;
+    const krng = head > 1.0001 ? RANGE * head : RANGE;
 
     for (let c = 0; c < nCh; c++) {
       const chain = this.chains[c];
@@ -1542,7 +2055,21 @@ class RemasterProcessor extends AudioWorkletProcessor {
           // Soft-clip guard, last stage in the chain: a tanh knee above −0.55 dBFS
           // that saturates *below* full scale, so a 16-bit export can never pin a
           // sample at the ceiling. Transparent below the knee.
-          if (wet > KNEE) wet = KNEE + RANGE * ftanh((wet - KNEE) / RANGE);
+          //
+          // The knee moves up by the headroom the de-clipper's reconstruction
+          // needs — `chain.declip.head` is what it has actually used on this
+          // file, `pr.declipHead` what the measurement promised it would need.
+          // A guard at the old knee would flatten every reconstructed arc back
+          // into a flat top; lifted, the arc arrives intact and the *level
+          // matcher* below is what pays for it, by the only currency it has:
+          // it ducks the finished file until the restored peak fits where the
+          // un-repaired one used to sit. The guard's own ceiling scales with
+          // the knee, so its shape (and its promise about a 16-bit export) is
+          // unchanged — only the level it acts at moves.
+          if (knee > KNEE) {
+            if (wet > knee) wet = knee + krng * ftanh((wet - knee) / krng);
+            else if (wet < -knee) wet = -knee + krng * ftanh((wet + knee) / krng);
+          } else if (wet > KNEE) wet = KNEE + RANGE * ftanh((wet - KNEE) / RANGE);
           else if (wet < -KNEE) wet = -KNEE + RANGE * ftanh((wet + KNEE) / RANGE);
           drySq += xr * xr;
           // Every level the matcher compares is measured on the *input* to its
@@ -1562,7 +2089,15 @@ class RemasterProcessor extends AudioWorkletProcessor {
           midDrySq += md * md;
           midWetSq += mw * mw;
           const mixed = xr + pw * (wet - xr);
-          dst[i] = mixed > 1 ? 1 : mixed < -1 ? -1 : mixed;
+          // The last hard limit of the chain. It is a *rail*, not a second
+          // soft-clipper: it exists so that no arithmetic surprise can write an
+          // out-of-range sample into the export buffer. It therefore has to sit
+          // where the guard above it saturates (`knee + krng`), because a hard
+          // clamp at 1.0 would do exactly what the guard was lifted to stop
+          // doing — cut the top off every reconstructed peak. On a file that is
+          // not being de-clipped both are 1.0 and this line is unchanged.
+          const rail = knee + krng;
+          dst[i] = mixed > rail ? rail : mixed < -rail ? -rail : mixed;
         }
       }
 
@@ -1659,11 +2194,15 @@ class RemasterProcessor extends AudioWorkletProcessor {
         let lo = m + sd + add, ro = m - sd - add;
         // the widening happens after the per-channel soft-clip guard, so the
         // same knee is applied here — a 16-bit export still cannot pin a sample
-        if (lo > KNEE) lo = KNEE + RANGE * ftanh((lo - KNEE) / RANGE);
-        if (ro > KNEE) ro = KNEE + RANGE * ftanh((ro - KNEE) / RANGE);
+        if (lo > knee) lo = knee + krng * ftanh((lo - knee) / krng);
+        if (ro > knee) ro = knee + krng * ftanh((ro - knee) / krng);
         L[i] = lo; R[i] = ro;
       }
     }
+    // The true-peak limiter is the last thing that happens to the audio — after
+    // the width stage, which adds side energy and would otherwise be the one
+    // part of the chain no ceiling covered.
+    if (!bypassed) this.tp.processBlock(output, nCh, frames);
     return true;
   }
 }

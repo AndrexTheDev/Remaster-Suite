@@ -200,6 +200,7 @@
       'find.act.dehiss': 'Entrauschen {v}',
       'find.act.hissSplit': 'Trennung bei {v}',
       'find.act.declick': 'Entknacksen {v}',
+      'find.act.declip': 'Clipping rekonstruiert (bis {v} über Vollaussteuerung)',
       'find.act.expander': 'Rausch-Expander',
       'find.act.box': 'Kerbung {v}',
       'find.act.eqCut': 'Absenkung {v}',
@@ -216,7 +217,7 @@
       'find.act.noSquash': 'keine weitere Verdichtung',
       'find.act.headroom': 'Headroom-Guard',
       'find.act.ceiling': 'weiche Decke −0,02 dBFS',
-      'find.act.truePeak': 'Hinweis für den Export',
+      'find.act.truePeak': 'True-Peak-Limiter auf {v}',
       'find.act.dcGuard': 'DC-Sperre 2 Hz',
       'find.act.glueTime': 'Glue-Timing {v}',
 
@@ -563,6 +564,7 @@
       'find.act.dehiss': 'de-hiss {v}',
       'find.act.hissSplit': 'split at {v}',
       'find.act.declick': 'de-click {v}',
+      'find.act.declip': 'clipping reconstructed (peaks up to {v} over full scale)',
       'find.act.expander': 'noise expander',
       'find.act.box': 'notch {v}',
       'find.act.eqCut': 'cut {v}',
@@ -579,7 +581,7 @@
       'find.act.noSquash': 'no further squashing',
       'find.act.headroom': 'headroom guard',
       'find.act.ceiling': 'soft ceiling −0.02 dBFS',
-      'find.act.truePeak': 'a note for the export',
+      'find.act.truePeak': 'true-peak limiter at {v}',
       'find.act.dcGuard': 'DC guard 2 Hz',
       'find.act.glueTime': 'glue timing {v}',
 
