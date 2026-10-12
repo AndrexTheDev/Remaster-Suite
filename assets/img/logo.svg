@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512"
+     role="img" aria-label="Harmonic Restoration — Remaster Suite">
+  <title>Harmonic Restoration · Remaster Suite</title>
+  <desc>A record whose groove becomes a waveform: gold for the original, green for the restoration.</desc>
+
+  <defs>
+    <linearGradient id="hrWave" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FFD700"/>
+      <stop offset="0.38" stop-color="#FFC800"/>
+      <stop offset="0.62" stop-color="#B8E03A"/>
+      <stop offset="1" stop-color="#00E676"/>
+    </linearGradient>
+    <radialGradient id="hrPlate" cx="0.5" cy="0.36" r="0.75">
+      <stop offset="0" stop-color="#1c2129"/>
+      <stop offset="0.62" stop-color="#161a21"/>
+      <stop offset="1" stop-color="#0f1217"/>
+    </radialGradient>
+  </defs>
+
+  <!-- the record -->
+  <circle cx="256" cy="256" r="232" fill="url(#hrPlate)" stroke="#2A2E37" stroke-width="4"/>
+  <g fill="none" stroke="#23262e" stroke-width="2.5">
+    <circle cx="256" cy="256" r="196"/>
+    <circle cx="256" cy="256" r="172"/>
+    <circle cx="256" cy="256" r="148"/>
+    <circle cx="256" cy="256" r="124"/>
+    <circle cx="256" cy="256" r="102"/>
+  </g>
+  <circle cx="256" cy="256" r="76" fill="#191d24" stroke="#2A2E37" stroke-width="3"/>
+  <circle cx="256" cy="256" r="20" fill="#0d0f12"/>
+
+  <!-- the groove that becomes a waveform -->
+  <polyline fill="none" stroke="url(#hrWave)" stroke-width="16"
+            stroke-linecap="round" stroke-linejoin="round"
+            points="34,256 58,256 74,204 90,312 106,166 122,340 138,120 152,352 166,196 180,304 194,224 208,282 222,240 236,268 250,250 262,250 274,250 288,268 302,240 316,282 330,224 344,304 358,196 372,352 386,120 400,340 416,166 432,312 448,204 464,256 478,256"/>
+</svg>
