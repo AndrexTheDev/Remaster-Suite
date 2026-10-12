@@ -206,7 +206,15 @@ node tests/audit.test.js   # repository hygiene, markup, stylesheet, contrast, b
                            # coverage, parameter ranges, DSP edge cases, codec round-trips, budgets
 node tests/e2e.test.js     # realistic journeys: five problem recordings, slider sweep, profile
                            # overrides, 10-file batch → ZIP, mono/32 k/96 k, hostile input
+node tests/beta/beta.js    # big beta: drives a real headless Chromium over the DevTools
+                           # protocol — real drops, real AudioWorklet, real dialogs and
+                           # downloads — and photographs the screenshot matrix
 ```
+
+The beta writes `docs/BETA-REPORT.md` and the screenshot matrix to `docs/beta/`.
+It needs the optional dev dependency `@sparticuz/chromium` (a packaged headless
+Chromium, used because CI machines rarely ship a browser); `npm test` runs the
+four dependency-free suites and stays green everywhere.
 
 Signals are simulated (garage session, cassette, vinyl rip, low-bitrate, clean) and the whole
 application is exercised in a DOM with a miniature Web Audio implementation that runs the real
