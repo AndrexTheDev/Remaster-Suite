@@ -294,8 +294,27 @@
    * octave is the right answer; above it there is nothing missing to rebuild.
    */
   function codecLoss(m) {
-    const cut = Math.min(m.hfCutoff || 0, m.cliffHz || 0);
-    return cut > 0 && cut < 17000;
+    // Two ways a lossy stage can have removed something audible, and the
+    // difference between them is *where* the wall is:
+    //
+    //  · a measured cliff inside the top octave (4–17 kHz) is a codec's
+    //    signature, whatever the programme around it sounds like. A 128 kbit/s
+    //    MP3 cuts at ~14.5 kHz and this fires on it;
+    //  · a bandwidth ceiling below 17 kHz *can* be the same thing, but it can
+    //    just as well be a dull programme — an old transfer that stops at 8 kHz
+    //    because that is all the medium had. That one is named by its own card
+    //    ("dull top end") and its treatment is the same air synthesis, so the
+    //    codec name is only used when the file's own dullness does *not*
+    //    explain the ceiling. `min(hfCutoff, cliffHz)` alone got this wrong in
+    //    both directions: it called every dull record that had ever been
+    //    encoded a low-bitrate file — including this app's own 320 kbit/s
+    //    export, which was the complaint that started the round — while a wall
+    //    at 7.5 kHz (below the old cliff search's floor) was invisible.
+    const cliff = m.cliffHz || 0;
+    if (cliff > 0 && cliff < 17000) return true;
+    const cut = m.hfCutoff || 0;
+    const dull = clamp(Math.max(m.dullIndex || 0, m.topLoss || 0), 0, 1);
+    return cut > 0 && cut < 17000 && dull < 0.6;
   }
 
   function classify(m) {
@@ -312,7 +331,13 @@
     const hiss = clamp(m.hissAmount, 0, 1);
     const clean = clamp(m.cleanliness, 0, 1);
     const dull = clamp(Math.max(m.dullIndex || 0, m.topLoss || 0), 0, 1);
-    const brick = clamp(m.brickwall, 0, 1);
+    // …and the brickwall only counts where it is a *codec* wall (see
+    // codecLoss): the score itself is honest — there is a wall, and it drops
+    // 12 dB over 1.6 kHz — but a wall at 19 kHz took away nothing anybody
+    // hears, and a wall is where streaming services, codecs and this app's own
+    // export put one. Gating the *interpretation* is what keeps a 320 kbit/s
+    // re-upload out of the low-bitrate profile.
+    const brick = codecLoss(m) ? clamp(m.brickwall, 0, 1) : 0;
     const thin = clamp(m.bassRoll, 0, 1);
     const mud = clamp(m.mudScore, 0, 1);
     const harsh = clamp(m.harshness, 0, 1);

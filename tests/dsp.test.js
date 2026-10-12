@@ -769,7 +769,7 @@ H.section('engine · the repairs do not depend on the level');
   for (let i = 0; i < a.out.length; i++) { const d = b.out[i] - K * a.out[i]; e += d * d; rr += (K * a.out[i]) * (K * a.out[i]); }
   const residual = 10 * Math.log10(e / rr);
   H.ok(residual < -30, 'the two finished files are the same file 20 dB down',
-    residual.toFixed(1) + ' dB of level-normalised residual (was −12.6 dB with the de-hisser's reference clamped)');
+    residual.toFixed(1) + ' dB of level-normalised residual (was −12.6 dB while the de-hisser reference was clamped)');
 }
 
 H.section('engine · dynamic de-resonator');

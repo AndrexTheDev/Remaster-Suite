@@ -1741,11 +1741,35 @@
       let maxCliff = 0, cliffAt = 0;
       for (let k = 0; k < spec.n; k++) {
         const f = spec.freq[k];
-        if (f < 8000 || f > 19500) continue;
+        // The search starts at 4 kHz, not 8: a codec's lowpass is a *sudden*
+        // drop of 9 dB or more inside 1.6 kHz, and a cheap encoder puts one
+        // anywhere from 4 to 20 kHz. With the window starting at 8 kHz a
+        // 96–128 kbit/s wall at 7.5 kHz was invisible — the analyser reported
+        // "no cliff" for a file that is nothing but cliff — and the profile
+        // that exists for exactly that file could not be reached. A gentle
+        // roll-off (any real recording) clears the 9 dB threshold of
+        // `brickwall` by construction: −12 dB/octave loses 6 dB over 1.6 kHz.
+        if (f < 4000 || f > 19500) continue;
         let j = k, span = 0;
         while (j < spec.n && span < 1600) { span = spec.freq[j] - f; j++; }
-        const drop = smS[k] - smS[Math.min(spec.n - 1, j - 1)];
-        if (drop > maxCliff) { maxCliff = drop; cliffAt = f; }
+        const kj = Math.min(spec.n - 1, j - 1);
+        const drop = smS[k] - smS[kj];
+        // …and a cliff has to *end*. A codec's wall is the last thing in the
+        // file: above it there is nothing left to lose, so the next 1.6 kHz
+        // costs almost nothing more (above/drop measured 0.00 at 128 kbit/s,
+        // −0.62 at 96 kbit/s, 0.32 at the audible edge of a simulated one). A
+        // filter's slope never ends — it keeps taking 1.6 kHz per 1.6 kHz, so
+        // above/drop stays at 0.85–1.00 inside a roll-off (measured on this
+        // app's own 320 kbit/s export and on a vinyl simulation) and such a
+        // window is not a wall. Without the test the reported cliff for a
+        // mellow record sat several kHz below where its top end actually dies,
+        // which is also the number the air repair is built from. A roll-off
+        // whose tail has already reached the floor does pass this test — that
+        // one is separated by *where* it sits, see `codecLoss` in presets.js.
+        let l = kj, span2 = 0;
+        while (l < spec.n && span2 < 1600) { span2 = spec.freq[l] - spec.freq[kj]; l++; }
+        const above = smS[kj] - smS[Math.min(spec.n - 1, l - 1)];
+        if (drop > maxCliff && above <= 0.45 * drop) { maxCliff = drop; cliffAt = f; }
       }
       m.cliffDb = maxCliff;
       m.cliffHz = cliffAt;

@@ -161,6 +161,13 @@ Automatic mode therefore works on a **chain**, not on a label:
   the two budgets for each stage, and then the *measured* requirement decides how much of it is
   used. This is what stops a codec cliff from being capped by the vinyl ceiling, or a dirty cassette
   from being capped by the cassette's (deliberately cautious) de-click budget.
+* **A wall is only a codec when it is where a codec cuts.** The analyser looks for the steepest
+  1.6 kHz drop that *ends* — above it there is nothing left to lose. A cliff inside the top octave
+  (4–17 kHz) is a codec's signature whatever else is in the file; a ceiling below 17 kHz only counts
+  when the file's own dullness does not already explain it (that file gets the dull-top card, and the
+  same air repair). Without the split the app called its own 320 kbit/s export "low bitrate" on every
+  re-upload, because lame's antialias filter leaves a 15 dB wall at 18 955 Hz — a wall that removes
+  nothing anybody hears.
 * **A permission is not a dose, and a hint is not a problem.** A faint reading joins the tone mix as
   far as it is worth, but only real evidence unlocks a budget — and a file with one problem is still
   a file with one problem (measured drift on a solo cassette: 0.03 dB of tone and 0.00 of budget).

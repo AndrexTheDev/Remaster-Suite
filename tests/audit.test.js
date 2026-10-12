@@ -501,6 +501,37 @@ section('audit · several problems at once');
   ok(d.scores.lowbitrate > 0.55,
     'a *measured* codec cliff counts in full however noisy the transfer around it is',
     d.scores.lowbitrate.toFixed(2));
+  /* …and *where* the wall is decides what it means. Both files below end in a
+   * wall about 15 dB high inside 1.6 kHz; one keeps everything up to 19 kHz,
+   * the other stops at 14.5. The first is this app's own 320 kbit/s export —
+   * measured on the real file: cutoff 8 156 Hz, lame's antialias wall at
+   * 18 955 Hz / 15.1 dB, and a file that is simply mellow (dull 1.00, because
+   * the chain low-passed it). The old rule, `min(hfCutoff, cliffHz) < 17 kHz`,
+   * read that 19 kHz wall as a bitrate and called the app's own output a
+   * low-bitrate file on every re-upload. */
+  let mellow = H.filter(DSP, H.filter(DSP, H.pink(SR, 8, 0.40, 31), SR, 'lp', 7000, 0.60), SR, 'lp', 5000, 0.55);
+  mellow = H.normalize(mellow, 0.74);
+  const mellowM = DSP.measure([mellow], SR);
+  const own = Object.assign({}, mellowM, { cliffHz: 18955, cliffDb: 15.1, brickwall: 0.51 });
+  ok(mellowM.hfCutoff < 10000 && (mellowM.dullIndex || 0) > 0.6,
+    'the mellow fixture has the real export\u2019s shape (band-limited, dull)',
+    'cutoff ' + mellowM.hfCutoff.toFixed(0) + ' Hz, dull ' + (mellowM.dullIndex || 0).toFixed(2));
+  ok(own.brickwall > 0.4 && Presets.classify(own).id !== 'lowbitrate',
+    'a wall above the top octave is a low-pass, not a low bit rate',
+    'brick ' + own.brickwall.toFixed(2) + ' → ' + Presets.classify(own).id);
+  ok(Presets.diagnose(own).issues.indexOf('codec') < 0,
+    '…and the diagnosis does not name a codec that took nothing audible',
+    Presets.diagnose(own).issues.join(', ') || 'none');
+  const m128 = DSP.measure([H.lowBitrateSim(DSP, SR, 12)], SR);
+  ok(Presets.classify(m128).id === 'lowbitrate' && Presets.diagnose(m128).issues.indexOf('codec') >= 0,
+    'a wall inside the top octave is a low-bitrate file, whatever else is wrong with it',
+    Presets.classify(m128).id + ' / ' + (Presets.diagnose(m128).issues.join(', ') || 'none'));
+  /* …and a slope is not a wall: the reported cliff for a mellow file has to sit
+   * where its top end dies, not in the middle of its own roll-off. */
+  ok((mellowM.cliffHz || 0) > 12000,
+    'the cliff of a smoothly rolled-off file sits at its top end, not mid-slope',
+    (mellowM.cliffHz || 0).toFixed(0) + ' Hz here, 6 088 Hz mid-slope on the app\u2019s own output before the test');
+
   // …and the tone is the mix of the two curves, not the winner's
   const mix = Presets.mixAnchors(d.id, d);
   const win = Presets.PRESETS[d.id].anchors;
