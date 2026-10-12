@@ -247,6 +247,172 @@ H.section('engine · de-clicker');
     'de-clicker keeps the music body intact');
 }
 
+H.section('engine · de-clicker on a lossy rip');
+{
+  // The case from the beta report: a vinyl rip that arrived as a 128 kbit/s
+  // MP3. An encoder does not keep the one to three samples a pop consists of —
+  // it smears them across the window it codes in, so most of the click's energy
+  // ends up *in front of* the spike a detector can fire on. This fixture
+  // simulates exactly that (each pop spread over ±5 ms with a raised cosine,
+  // the spike itself kept at height) so the test needs no encoder, and it
+  // asserts what a listener notices: the pops end up *below* the music, a clean
+  // file is left alone, and a drum kit does not pay for any of it.
+  const MIN = () => Object.assign({}, H.DEFAULT_PARAMS, { power: 1, autoLevel: 0 });
+  const rip = (() => {
+    const seconds = 12, perSecond = 9, amp = 0.85;
+    // a worn record: the music's own top end sits well under the pops, so a
+    // click stands out in the band it lives in (which is the band the app's
+    // crackle reading looks at too)
+    let bed = H.filter(RSDSP, H.mul(H.pink(SR, seconds, 0.40, 31), 1), SR, 'lp', 7000, 0.60);
+    bed = H.filter(RSDSP, bed, SR, 'lp', 5000, 0.55);
+    const clean = H.normalize(bed, 0.74);
+    // the measured shape of a codec's damage: the pop's energy lands within
+    // −40…+40 samples of the spike (96 % of it), with the spike itself intact
+    const half = Math.round(0.0009 * SR);
+    const kernel = new Float64Array(2 * half + 1);
+    for (let i = 0; i <= half; i++) {
+      const w = 0.5 * (1 + Math.cos(Math.PI * i / half));
+      kernel[half + i] = w; kernel[half - i] = w;
+    }
+    let ksum = 0; for (let i = 0; i < kernel.length; i++) ksum += kernel[i] * kernel[i];
+    for (let i = 0; i < kernel.length; i++) kernel[i] /= Math.sqrt(ksum);
+    const dirty = Float32Array.from(clean);
+    const rand = H.rng(8);
+    const positions = [];
+    for (let n = 0; n < perSecond * seconds; n++) {
+      const idx = Math.floor(rand() * (dirty.length - 2 * half - 4)) + half;
+      const sign = rand() < 0.5 ? -1 : 1;
+      const a = amp * (0.4 + rand() * 1.6) * sign;
+      for (let k = -half; k <= half; k++) dirty[idx + k] += a * kernel[k + half] * 0.55;
+      dirty[idx] += a * 0.85;                       // the spike survives the codec
+      dirty[idx + 1] += a * 0.45;
+      positions.push(idx);
+    }
+    return { clean, dirty, positions };
+  })();
+
+  const DOSE = 0.715;                               // the dose the automatic mode picks on a crackly rip
+  const before = RSDSP.crackleDetect([rip.dirty], SR);
+  const floor = RSDSP.crackleDetect([rip.clean], SR);
+  H.ok(before.index > floor.index + 0.5, 'the lossy fixture reads as crackly, the clean one does not',
+    floor.index.toFixed(2) + ' → ' + before.index.toFixed(2));
+
+  const off = H.renderEx(Processor, [rip.dirty], MIN());
+  const on = H.renderEx(Processor, [rip.dirty], Object.assign({}, MIN(), { declick: DOSE }));
+  const cleanOff = H.renderEx(Processor, [rip.clean], MIN());
+  const cleanOn = H.renderEx(Processor, [rip.clean], Object.assign({}, MIN(), { declick: DOSE }));
+  H.ok(on.latency === 17 && off.latency === 0,
+    'the stage declares the half-millisecond look-ahead it needs (17 samples at 48 kHz)',
+    'engaged ' + on.latency + ', bypassed ' + off.latency);
+
+  const after = RSDSP.crackleDetect([on.out[0]], SR);
+  H.ok(after.index < before.index * 0.55, 'the smeared pops come down, not just the spike',
+    before.index.toFixed(2) + ' → ' + after.index.toFixed(2) + ' (' + before.spikes + ' → ' + after.spikes + ' spike frames)');
+
+  // …and does what is left still stand out? A click lives *above* the music, so
+  // measure each pop's residual in the band a click occupies (4–12 kHz) against
+  // the level of the same band in the file without pops — a broadband window
+  // would mostly measure the low-frequency fill the repair puts where the pop
+  // was, which is not what a listener hears as crackle.
+  const hfBand = (sig) => {
+    const [b0, b1, b2, a1, a2] = RSDSP.biquadHP(SR, 4000, 0.707);
+    const stage = new RSDSP.Biquad(); stage.setLowpass(SR, 12000, 0.707);
+    const out = new Float32Array(sig.length);
+    let z1 = 0, z2 = 0;
+    for (let i = 0; i < sig.length; i++) {
+      const raw = sig[i];
+      const x = Math.fround(b0 * raw + z1);
+      z1 = b1 * raw - a1 * x + z2;
+      z2 = b2 * raw - a2 * x;
+      out[i] = stage.process(x);
+    }
+    return out;
+  };
+  const popLevels = (out, latency, reference) => {
+    const residual = new Float32Array(out.length);
+    for (let i = 0; i + latency < out.length; i++) residual[i] = out[i + latency] - reference[i];
+    const rHF = hfBand(residual), cHF = hfBand(reference);
+    const W = Math.round(0.012 * SR);
+    const levels = rip.positions.map((p) => {
+      let e = 0, music = 0, n = 0;
+      for (let j = Math.max(0, p - W); j < Math.min(rHF.length, p + W); j++) {
+        e += rHF[j] * rHF[j]; music += cHF[j] * cHF[j]; n++;
+      }
+      return 10 * Math.log10((e / n) / (music / n + 1e-20) + 1e-20);
+    });
+    levels.sort((a, b) => b - a);
+    const nth = Math.max(1, Math.round(levels.length * 0.1));
+    return levels.slice(0, nth).reduce((acc, v) => acc + v, 0) / nth;
+  };
+  const cleanOut = cleanOff.out[0];          // the same file without the pops
+  const dryPops = popLevels(off.out[0], off.latency, cleanOut);
+  const worstPop = popLevels(on.out[0], on.latency, cleanOut);
+  console.log('    loudest tenth of the pops, relative to the music around them: '
+    + dryPops.toFixed(1) + ' dB as uploaded → ' + worstPop.toFixed(1) + ' dB repaired');
+  H.ok(worstPop < 0, 'even the loudest tenth of the pops ends up below the music',
+    worstPop.toFixed(1) + ' dB (was ' + dryPops.toFixed(1) + ' dB)');
+  H.ok(worstPop < dryPops - 7, 'and that is a real change, not a shift of the reference',
+    dryPops.toFixed(1) + ' → ' + worstPop.toFixed(1) + ' dB');
+
+  const rms = (sig) => { let a = 0; for (let i = 0; i < sig.length; i++) a += sig[i] * sig[i]; return Math.sqrt(a / sig.length); };
+  const cleanMove = 20 * Math.log10(rms(cleanOn.out[0]) / rms(cleanOff.out[0]));
+  H.ok(cleanMove > -0.1, 'a file without pops keeps its level', cleanMove.toFixed(3) + ' dB');
+
+  // The de-clicker's window is wide, so the risk is a drum kit: a snare raises
+  // the same crest statistic a pop does. Measured over the 2 ms after each hit.
+  const kit = (() => {
+    const seconds = 12, out = new Float32Array(SR * seconds), hits = [];
+    const rand = H.rng(4242);
+    const beat = 60 / 96;
+    for (let b = 0; b * beat < seconds; b++) {
+      const t = b * beat;
+      if (b % 2 === 0) {
+        const s = Math.round(t * SR);
+        for (let i = 0; i < Math.round(0.18 * SR); i++) {
+          const x = i / SR;
+          out[s + i] += Math.sin(2 * Math.PI * (55 + 40 * Math.exp(-x * 40)) * i / SR) * Math.exp(-x * 26) * 0.55;
+        }
+      } else {
+        const s = Math.round(t * SR);
+        for (let i = 0; i < Math.round(0.25 * SR); i++) {
+          const x = i / SR, env = Math.min(1, x / 0.0015) * Math.exp(-x * 22);
+          out[s + i] += (((rand() * 2) - 1) * 0.42 + Math.sin(2 * Math.PI * 190 * i / SR) * 0.22) * env;
+        }
+        hits.push(s);
+      }
+      const h = Math.round((t + beat / 2) * SR);
+      for (let i = 0; i < Math.round(0.045 * SR); i++) out[h + i] += ((rand() * 2) - 1) * Math.exp(-(i / SR) * 60) * 0.10;
+    }
+    let bed = H.mul(H.pink(SR, seconds, 0.28, 99), 1);
+    const env = H.songEnvelope(SR, seconds, 0.05);
+    for (let i = 0; i < bed.length; i++) bed[i] *= env[i];
+    bed = H.filter(RSDSP, bed, SR, 'lp', 7000, 0.707);
+    return { sig: H.normalize(H.mix([out, bed]), 0.85), hits };
+  })();
+  const kitOff = H.renderEx(Processor, [kit.sig], MIN());
+  const kitOn = H.renderEx(Processor, [kit.sig], Object.assign({}, MIN(), { declick: DOSE }));
+  let worstSnare = 0, touched = 0;
+  for (const h of kit.hits) {
+    let e = 0, n = 0, peak = 0;
+    for (let k = 0; k < Math.round(0.002 * SR); k++) {
+      const j = h + k;
+      if (j + kitOn.latency >= kitOn.out[0].length) break;
+      const d = kitOn.out[0][j + kitOn.latency] - kitOff.out[0][j];
+      e += d * d; n++;
+      const a = Math.abs(kitOff.out[0][j]); if (a > peak) peak = a;
+    }
+    const db = 20 * Math.log10(Math.sqrt(e / n) / (peak + 1e-12) + 1e-12);
+    if (db < worstSnare || worstSnare === 0) worstSnare = db;
+  }
+  for (let i = 0; i + kitOn.latency < kitOn.out[0].length; i++) {
+    if (Math.abs(kitOn.out[0][i + kitOn.latency] - kitOff.out[0][i]) > 0.002) touched++;
+  }
+  H.ok(worstSnare < -55, "a snare's attack is left alone (worst hit, 2 ms window)",
+    worstSnare.toFixed(1) + ' dB below the hit');
+  H.ok(touched < kit.sig.length * 0.08, 'and only a small part of the kit is touched at all',
+    (100 * touched / kit.sig.length).toFixed(2) + ' % of samples');
+}
+
 H.section('engine · dynamic de-resonator');
 {
   // A room rings: every drum hit excites a resonance that decays over ~60 ms.

@@ -62,12 +62,17 @@ const DEFAULT_PARAMS = {
 };
 
 /**
- * Render `input` through the worklet in 128-frame quanta.
+ * Render `input` through the worklet in 128-frame quanta, and report the
+ * latency the processor declares for those parameters (in samples). A stage
+ * with look-ahead (the de-clicker) delays the output while it is engaged, so a
+ * caller that intends to measure what the chain *changed* has to shift the dry
+ * side by `latency` first.
  * @param {object} Processor  class returned by loadProcessor()
  * @param {Float32Array[]} input
  * @param {object} params     flat parameter map
+ * @returns {{out: Float32Array[], latency: number}}
  */
-function render(Processor, input, params, blockSize) {
+function renderEx(Processor, input, params, blockSize) {
   const bs = blockSize || 128;
   const proc = new Processor({ processorOptions: { channels: input.length } });
   const frames = input[0].length;
@@ -81,7 +86,12 @@ function render(Processor, input, params, blockSize) {
     const outBlocks = out.map((c) => c.subarray(pos, pos + n));
     proc.process([inBlocks], [outBlocks], arrays);
   }
-  return out;
+  return { out, latency: proc.latency || 0 };
+}
+
+/** Render and return the output channels only. See renderEx for the latency. */
+function render(Processor, input, params, blockSize) {
+  return renderEx(Processor, input, params, blockSize).out;
 }
 
 /* ------------------------------------------------------------ signal makers */
@@ -319,6 +329,7 @@ function summarize() {
 }
 
 module.exports = {
+  renderEx,
   ROOT, loadProcessor, loadDsp, render, DEFAULT_PARAMS,
   tone, noise, pink, mix, mul, filter, rng, peak, songEnvelope, addCrackle, normalize,
   garageSim, cassetteSim, vinylSim, lowBitrateSim, comboSim,

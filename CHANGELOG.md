@@ -109,6 +109,26 @@ treatment: they get the treatment each of them measured.
   *because* of its crackle — a crackly record is the one case where full de-clicking is what the
   file needs, and the vinyl profile's ceiling for it rises from 0.75 to 0.85. Measured: the vinyl
   fixture's spike crest comes down 1.9 dB at the recommended strength.
+* **Crackle survived the de-clicker on anything that had been through a codec** — a vinyl rip
+  downloaded as a 128 kbit/s MP3, the round trip the beta report is full of. Two mistakes in one
+  stage. First, the amount scaled the *depth* of every repair, so at the automatic dose (0.715 on a
+  crackly record) each detected pop kept 29 % of its amplitude: the knob now moves the detector's
+  confidence threshold instead, and a pop that is detected is repaired. Second, and worse, the
+  repair was causal: an encoder spreads a three-sample pop over the 26 ms window it codes in, and
+  96 % of the pop's energy ends up within ±40 samples of the spike — two thirds of it *before* the
+  spike, where no causal repairer can reach. Replacing the waveform with the *ground truth* from the
+  peak onwards still measures a crackle index of 0.63–0.68 however long the window is; a causal
+  window that fades in leaves the smear behind *and* steps on the residual, which measured 1.00 —
+  the repair becoming the click. The stage now takes half a millisecond of look-ahead (0.35 ms:
+  17 samples at 48 kHz) and plans the repair window around the detection, 0.33 ms in front and 1 ms
+  behind. On a 24 s vinyl fixture with 216 injected pops through 128 kbit/s at the automatic dose,
+  the measured crackle index **1.000 → 0.232** (297 → 22 spike frames; the same music encoded
+  without the pops reads 0.062) where the old stage reached 0.665, and on a 96 BPM drum kit the
+  change in the 2 ms around a snare is **−84 dB** against −31 dB before — the wider window is also
+  the *gentler* one, because a repair that covers the whole pop no longer has to fade in on top of
+  it. The price is the delay: the master cross-fade delays its dry side with the stage, and the
+  processor reports the figure as `this.latency` (`H.renderEx` in the test harness hands it to the
+  suites).
 
 ## [1.4.0] — 2026-10-12
 

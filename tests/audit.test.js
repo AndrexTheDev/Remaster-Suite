@@ -849,17 +849,26 @@ section('audit · DSP robustness');
   for (let i = 0; identical && i < a1.length; i++) if (a1[i] !== a2[i]) identical = false;
   ok(identical, 'the engine is deterministic (bit-identical between renders)');
 
-  // zero latency: an impulse must come out where it went in
+  // latency: an impulse comes out where it went in plus the delay the
+  // processor *declares* for these parameters (the de-clicker's look-ahead —
+  // see DeClicker in the worklet). Nothing may come out before it goes in: the
+  // look-ahead is a delay, never a prediction.
   const imp = new Float32Array(SR);
   imp[2400] = 0.9;
-  const impOut = H.render(P, [imp], full)[0];
+  const impR = H.renderEx(P, [imp], full);
+  const impOut = impR.out[0];
   let firstNonZero = -1, firstBig = -1;
   for (let i = 0; i < impOut.length; i++) {
     if (firstNonZero === -1 && Math.abs(impOut[i]) > 1e-9) firstNonZero = i;
     if (firstBig === -1 && Math.abs(impOut[i]) > 0.05) firstBig = i;
   }
-  ok(firstNonZero >= 2400, 'nothing comes out before it goes in (zero latency)', 'first sample #' + firstNonZero);
-  ok(firstBig <= 2402, 'the impulse stays where it was (no delay)', 'sample #' + firstBig);
+  ok(firstNonZero >= 2400, 'nothing comes out before it goes in (the chain is causal)', 'first sample #' + firstNonZero);
+  ok(Math.abs(firstBig - (2400 + impR.latency)) <= 2,
+    'the impulse comes out at exactly the declared latency', 'sample #' + firstBig + ', declared ' + impR.latency);
+  const noClick = H.renderEx(P, [imp], Object.assign({}, H.DEFAULT_PARAMS, { power: 1 })).out[0];
+  let plainBig = -1;
+  for (let i = 0; i < noClick.length; i++) if (plainBig === -1 && Math.abs(noClick[i]) > 0.05) plainBig = i;
+  ok(plainBig >= 2399 && plainBig <= 2402, 'with the de-clicker off the chain has no latency at all', 'sample #' + plainBig);
 
   // sample rates: the filters must stay stable from 8 kHz to 96 kHz
   const rateProblems = [];
@@ -1107,7 +1116,11 @@ section('audit · documentation matches the product');
   // claims that must stay true
   ok(!/localStorage/.test(appSrc) && !/document\.cookie/.test(appSrc), 'the privacy claims still hold in code');
   ok(/8–16 kHz/.test(readme) && /30–60 Hz/.test(readme), 'the README states the two synthesis ranges');
-  ok(/zero latency/i.test(readme), 'the README claims zero latency (verified in the DSP section)');
+  // the latency claim has to match the DSP: the de-clicker's look-ahead is the
+  // one delay in the chain, and the README has to say so.
+  ok(/look-?ahead/i.test(readme) && /0\.35 ms/.test(readme),
+    'the README documents the de-clicker look-ahead and its 0.35 ms');
+  ok(!/has \*\*zero latency\*\*/.test(readme), 'and no longer claims the chain is latency-free');
 }
 
 const verify = stubVerify ? null : null;

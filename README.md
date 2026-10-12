@@ -202,7 +202,7 @@ and runs per sample, control-rate decimated for speed:
 | 2c | **Measured resonance notches** | the two strongest narrow peaks the analyser finds (150 Hz – 1.8 kHz, ≥ 3.2 dB above the local trend), each notched at its own frequency, depth and sharpness. A boxy room is a *constant* colouration, which the dynamic de-resonator below cannot see |
 | 3 | **Dynamic de-resonator** | 6 narrow bands (220 Hz … 3.1 kHz) watch their own envelope against a long-term average; anything ringing way above it gets pulled down. Steady tones pass, room ring does not. |
 | 4 | **De-hiss** | Linkwitz-Riley split, keyed on the *tilt* of the top end (4 kHz+ against the 1.45 kHz band, the same two bands and the same window the analyser measures), so it attenuates where the top end stops following the programme and leaves everything else alone: between the notes the same repair is worth 6 dB, over music less than 0.3 dB. The split itself is measured too (2.2–4 kHz, where this file's noise starts) |
-| 5 | **De-click** | low-pass prediction (4 kHz, 4th order) plus a fast/slow envelope ratio; impulses are replaced by the prediction, with a short decaying hold for the neighbours of the click |
+| 5 | **De-click** | low-pass prediction (4 kHz, 4th order) plus a fast/slow envelope ratio, and 0.35 ms of look-ahead: a detected impulse plans a repair window that reaches half a millisecond *in front of* the spike (a codec puts most of a pop's energy there) and 1 ms behind it, and the window is replaced by the prediction with tapered ends. The look-ahead is the stage's only latency — see below |
 | 5b | **De-esser** | a dynamic dip over 5.2–9.5 kHz, keyed on the fast/slow ratio of that band: a quiet "s" and a loud one are the same problem, and a recording without sibilance measures zero. It sits before the synthesisers, so the exciter and the air cannot rebuild what it just removed |
 | 6 | **Harmonic exciter** | 3 bands, each: band-pass → asymmetric saturation (even *and* odd harmonics) → band-pass → envelope gate. Synthesise the overtones that were never recorded. |
 | 7 | **Air synthesis 8–16 kHz** | takes the surviving 4.5–7.5 kHz band and generates 2nd/3rd order content above it, gated by the presence follower and limited to a fraction of the band it came from |
@@ -213,9 +213,14 @@ and runs per sample, control-rate decimated for speed:
 | 12 | **Mains hum notch** | three biquads, three hertz wide, at the measured mains frequency and its harmonics — dosed from the level the line stands above its own neighbourhood, and placed *after* every stage that can put low-frequency energy back. Bypassed completely when nothing was measured |
 | 13 | **Output** | 2 Hz DC guard (keeps the offset the saturation stages can add out of the export), auto level match, then a tanh soft-clip guard that saturates at −0.02 dBFS so a 16-bit export can never hit the rail |
 
-The dry/wet cross-fade happens at the very end: `out = dry + power · (wet − dry)`. Because the whole
-chain is minimum-phase IIR, it has **zero latency** — the A/B switch is sample-accurate, and the
-offline render (the file you save) is bit-identical to what you heard live.
+The dry/wet cross-fade happens at the very end: `out = dry + power · (wet − dry)`. The chain is
+minimum-phase IIR throughout, so it adds no delay of its own — with one exception: the **de-clicker**
+needs half a millisecond of look-ahead to repair the part of a codec-smeared pop that sits *before*
+the spike the detector fired on, and while that stage is engaged the output is 0.35 ms late (17
+samples at 48 kHz). The cross-fade delays its dry side by the same amount, so the A/B switch and the
+strength slider stay phase-coherent and sample-aligned: you hear the change and not the delay. With
+the de-clicker off — or its strength at 0 — the latency is exactly 0. The offline render (the file
+you save) is bit-identical to what you heard live either way.
 
 ### Offline render
 

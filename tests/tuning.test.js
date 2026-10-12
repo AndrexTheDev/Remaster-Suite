@@ -224,9 +224,14 @@ H.section('tuning · the repair never becomes the feature');
   const TOP = [6000, 16000];
   const rows = [];
   const measure = (name, params, sig) => {
-    const out = H.render(Processor, [sig], params)[0];
+    const { out, latency } = H.renderEx(Processor, [sig], params);
+    // The chain delays its output by `latency` samples while the de-clicker is
+    // engaged (its look-ahead — see DeClicker in the worklet). Compare like for
+    // like: without this shift the difference is the delay of the whole
+    // signal, not what the chain changed.
     const change = new Float32Array(out.length);
-    for (let i = 0; i < out.length; i++) change[i] = out[i] - sig[i];
+    for (let i = 0; i < latency; i++) change[i] = 0;
+    for (let i = latency; i < out.length; i++) change[i] = out[i] - sig[i - latency];
     const mid = DSP.bandLevel(DSP.spectrum([out], SR, { fftSize: 8192, maxFrames: 120 }), MID[0], MID[1]);
     const top = DSP.bandLevel(DSP.spectrum([change], SR, { fftSize: 8192, maxFrames: 120 }), TOP[0], TOP[1]);
     const below = mid - top;                       // how far the change sits under the music
