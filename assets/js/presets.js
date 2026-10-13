@@ -515,6 +515,19 @@
     // how much low end is missing (bassRoll = 34–58 Hz below the −3 dB/oct line)
     const subDeficitDb = clamp((m.bassRoll || 0) * 16, 0, 16);
     const subPresentDb = clamp(band(0), -12, 12);            // > 0 = the source already humps there
+    /* …and whether there is anything *down there* to work from. The
+     * sub-harmonic synthesiser tracks the fundamental through a low pass — it
+     * has to, or it would double a record's second harmonic instead of its
+     * fundamental — so on a file whose bottom octave is empty it has no source
+     * at all. Measured on a file high-passed at 200 Hz (`subHoleDb` −25.6): the
+     * synthesiser stayed silent (34–58 Hz −96.7 → −95.9 dBFS) while the tone
+     * curve's 60 Hz shelf wrote 3.5 dB into the same empty band and the
+     * corrective EQ cut the low mids by 2.5–3.4 dB — the region that carries
+     * that recording's bass came out 2.4 dB *further* below 300–900 than the
+     * untouched file. A hole (below −12 dB) is not a balance: nothing is dosed
+     * into the empty band, the synthesiser looks where the content actually
+     * starts, and the low-mid cuts stand down. */
+    const subHole = m.subHoleDb === undefined ? 1 : smoothstep(-26, -12, m.subHoleDb);
 
     // how much is *too much*
     const mudExcessDb = clamp((m.mudScore || 0) * 12, 0, 12);
@@ -645,7 +658,7 @@
     const dense = (m.dynamicRangeDb !== undefined && m.dynamicRangeDb < 12) ? 1 : 0;
 
     return {
-      topDeficitDb, codecDeficitDb, airDeficitDb, subDeficitDb, subPresentDb, wallAboveSib,
+      topDeficitDb, codecDeficitDb, airDeficitDb, subDeficitDb, subPresentDb, subHole, wallAboveSib,
       mudExcessDb, harshExcessDb, boxExcessDb,
       hissNeed, crackleNeed, clipNeed, clipShare, clipImplied, humNeed, headroom, dense,
       // normalised needs (0..1) used by the doses
@@ -805,6 +818,13 @@
       return Math.sign(g) * Math.max(0, Math.abs(g) - 1.5);
     });
     curve = smoothCurve(curve);
+    // …and with the bottom octave *empty* (see subHoleDb) the trend these bands
+    // are measured against has been dragged down by the hole itself: the
+    // 200–500 Hz region that then measures as a hump is where this recording's
+    // bass actually lives. Measured on a file high-passed at 200 Hz, taking that
+    // "hump" down by 2.5 dB at 200 Hz and 3.4 dB at 450 Hz put the 60–200 Hz
+    // region 2.4 dB further below the 300–900 Hz band than the untouched file.
+    const subHole = m.subHoleDb === undefined ? 1 : smoothstep(-26, -12, m.subHoleDb);
 
     // is the noise floor in this band known well enough to allow a boost?
     const conf = clamp((m.noiseConfidence || 0) * 1.5, 0, 1);
@@ -827,6 +847,8 @@
         }
         // above a codec cliff the content was *removed*
         if (m.brickwall > 0.25 && codecLoss(m) && f > m.cliffHz * 1.0) g = Math.min(g, 0.8);
+      } else if (g < 0 && f <= 320 && subHole < 0.5) {
+        g = 0;                                         // a hole is not a balance
       } else if (g < 0 && f <= 80) {
         // Taking the bottom away is the one correction that can remove what the
         // recording actually has, so it needs more evidence than the dead zone:
@@ -904,7 +926,7 @@
     }
 
     // extra shaping where the measurement was emphatic
-    a.bands[0] += 1.6 * D.needSub;
+    a.bands[0] += 1.6 * D.needSub * D.subHole;
     a.bands[3] -= 0.7 * D.needHarsh;
     a.bands[4] -= 1.2 * D.needHarsh;
     a.bands[5] += 1.0 * D.needAir * (1 - D.wallAboveSib);
@@ -920,6 +942,16 @@
      * nothing at all (the old law added it because the profile said so, which
      * is exactly what made cassette and vinyl rips sound pumped up). */
     a.sub = a.sub * smoothstep(0.15, 0.60, D.needSub);
+    /* …and it looks where the content actually starts. Its analysis band is a
+     * 95 Hz low pass by design — a record's fundamental is what lives down
+     * there, and looking higher would double the second harmonic instead — but
+     * on a file whose bottom octave is *empty* there is nothing to track at
+     * 95 Hz: measured on a file high-passed at 200 Hz, the synthesiser stayed
+     * silent (34–58 Hz −96.7 → −95.9 dBFS) while the tone curve wrote into the
+     * same empty band. With a hole measured, the corner moves up to where the
+     * bass band is, so the octave it derives is one the recording can actually
+     * carry (200 Hz → 100 Hz). */
+    a.subSrc = 95 + 145 * (1 - D.subHole);
     if (D.subPresentDb > 2.5) a.sub *= 0.4;             // already humps there
     if (m.correlation !== undefined && m.correlation < 0.25) a.sub *= 0.7;
     a.sub = clamp(a.sub * D.headroom, 0, cap.sub);
@@ -1209,6 +1241,7 @@
       band3: bands[3], band4: bands[4], band5: bands[5],
       reso: a.reso * amt,
       sub: a.sub * amt,
+      subSrc: num(clamp(a.subSrc === undefined ? 95 : a.subSrc, 60, 260), 95),
       subRatio: a.subRatio,
       exciter: a.exciter * amt,
       air: a.air * amt,

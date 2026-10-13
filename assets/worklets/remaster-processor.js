@@ -494,6 +494,7 @@ class SubSynth {
     this.lp2 = new Biquad(); this.lp2.setLowpass(sr, 95, 0.707);
     this.lp3 = new Biquad(); this.lp3.setLowpass(sr, 95, 1.31);
     this.outLP = new Biquad(); this.outLP.setLowpass(sr, 88, 0.707);
+    this.srcHz = 95;
     this.env = new EnvFollower(sr, 0.006, 0.150, SUB_DECIM);
     this.gate = new Ramp(SUB_DECIM, 0);
     this.phase = 0;
@@ -508,6 +509,25 @@ class SubSynth {
     this.env.v = 0; this.gate.reset(0); this.phase = 0; this.schmitt = 0;
   }
   setNoise(noiseLin) { this.gLo = Math.max(noiseLin * 2.5, 1e-6); }
+  /**
+   * Where to look for the fundamental. 95 Hz is the design corner: that is
+   * where a recording's own fundamental lives, and looking higher would double
+   * the second harmonic of a normal bass line. A recording whose bottom octave
+   * is *empty* has nothing there to track, so the corner moves up to the band
+   * that does carry the bass — its octave (200 Hz → 100 Hz) is then a note the
+   * recording can actually carry. Measured on a file high-passed at 200 Hz:
+   * at the fixed corner the synthesiser stayed silent (34–58 Hz −96.7 → −95.9
+   * dBFS); from 240 Hz it fills 60–200 Hz by 5.4 dB.
+   */
+  setSource(hz) {
+    const f = Math.max(60, Math.min(260, hz || 95));
+    if (Math.abs(f - this.srcHz) < 0.5) return;
+    this.srcHz = f;
+    this.lp1.setLowpass(this.sr, f, 0.54);
+    this.lp2.setLowpass(this.sr, f, 0.707);
+    this.lp3.setLowpass(this.sr, f, 1.31);
+    this.outLP.setLowpass(this.sr, f * 0.93, 0.707);
+  }
   /** @returns {number} sub-harmonic signal at one octave below the bass */
   tick(x, ratio) {
     const s = this.lp3.process(this.lp2.process(this.lp1.process(x)));
@@ -2055,6 +2075,7 @@ class ChannelChain {
     for (let i = 0; i < this.reso.length; i++) this.reso[i].depth = p.reso;
     this.excEven = 0.55 + p.warmth * 0.25;
     for (let i = 0; i < this.exc.length; i++) this.exc[i].setNoise(p.noiseLin, p.refLin);
+    this.sub.setSource(p.subSrc);
     this.air.setNoise(p.noiseLin, p.refLin);
     this.air.setSource(p.airF);
     this.airRoom = p.airRoom;

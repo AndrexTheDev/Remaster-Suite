@@ -1990,6 +1990,14 @@
       const veryHigh = bandMedian(spec, 12500, 16000);
 
       m.bassRoll = clamp((-3 * Math.log2(121 / 45) + bass - sub) / 16, 0, 1);
+      // How much of the bottom the *recording itself* has, against the band just
+      // above it: −25 dB is an empty octave (a file high-passed at 200 Hz reads
+      // −25.6), +5 dB is a normal programme's own downward slope (a flat pink
+      // bed reads +5.2, a vinyl sim +4.1) and a hummed or rumbling transfer sits
+      // around −3. It is what decides whether a sub-octave can be derived at all
+      // — the synthesiser can only double content that exists — and whether the
+      // low mids may be balanced against a trend that the hole has dragged down.
+      m.subHoleDb = bandMedian(spec, 34, 58) - bandMedian(spec, 80, 150);
       m.subDeficit = m.bassRoll;
       m.mudScore = clamp((-3 * Math.log2(1130 / 347) + lowMid - mid) / 12, 0, 1);
       m.harshness = clamp((-3 * Math.log2(2830 / 1130) + upperMid - mid - 2) / 10, 0, 1);

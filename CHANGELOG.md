@@ -67,6 +67,48 @@ else may move.
   different window, twice the phase resolution — has to agree with `ispDb` within 0.15 dB, and a
   limited export has to be under the ceiling by *both* meters.
 
+### Added — six defect classes that had no acceptance row
+
+The matrix had ten classes and the diagnosis names fifteen. The six that were missing — weak bass,
+boxy mids, dull top end, harsh presence, a squashed master, an out-of-phase bottom — now each have a
+row with a before/after and an independent meter, and building them found four defects in the chain
+(the ones below). What they measure today:
+
+* **dull top end** — the air synthesiser rebuilds 8.3 dB of the missing top (9–15 kHz vs 2–4 kHz,
+  −32.4 → −24.1 dB on the independent meter), and the analyser's `dullIndex` follows.
+* **harsh presence** — the fixture is a 3 kHz honk two filters deep (the analyser compares the 2–4 kHz
+  median with the 0.8–1.6 kHz one against a −3 dB/octave reference, so a honk needs +9.5 dB over its
+  own slope before it is called harsh): `harshness` 0.93 → 0.54 and the meter 13.7 → 10.6 dB.
+* **squashed master** — the chain backs *off*: glue 0.26 → 0.11, warmth 0.31 → 0.09, and the dynamic
+  range does not fall further (16.2 → 15.0 dB on the envelope meter; the file is already flat).
+* **out-of-phase bottom** — `bassMono` brings the below-200 Hz correlation from −0.55 towards zero
+  while the above-2 kHz correlation stays at 1.00, i.e. the repair writes only where it belongs.
+* **boxy mids** — a broad 240 Hz hump is cut by 1.3 dB (the per-song EQ takes 2.2 dB at 200 Hz and
+  2.0 dB at 450 Hz); it is the shallowest row in the matrix and the next candidate for a dose review.
+* **weak bass** — see below: the row is what found the defect.
+
+### Fixed — the bottom octave that was not there
+
+* **A missing bottom octave was being filled where nothing could be filled, and then taken away
+  again.** The "weak bass" action is a 60 Hz shelf on the tone curve plus the sub-harmonic
+  synthesiser, and both assume the recording has *something* down there: the synthesiser tracks the
+  fundamental through a 95 Hz low pass — by design, since looking higher would double a normal bass
+  line's second harmonic — and there is nothing to track on a file whose bottom octave is empty.
+  Measured on a file high-passed at 200 Hz, with each stage switched on alone: the synthesiser stayed
+  silent (34–58 Hz −96.7 → −95.9 dBFS) while the 60 Hz shelf wrote 3.5 dB into the same empty band,
+  and the per-song corrective EQ — whose trend reference has been dragged *down* by the hole, so the
+  200–500 Hz region measures as a hump — took 2.5 dB at 200 Hz and 3.4 dB at 450 Hz out of the region
+  that carries that recording's bass. The chain made the file 2.4 dB *thinner* than it found it. There
+  is now a measurement for the hole (`subHoleDb`, the 34–58 Hz median against the 80–150 Hz one:
+  −25.6 dB for that file, +5.2 for a flat bed, +4.1 for a vinyl sim, −3.2 for a hummed transfer), and
+  three consequences: no fill is dosed into a band that measures empty, the per-song EQ stands down
+  (a hole is not a balance), and the synthesiser's analysis corner moves from 95 Hz to where the bass
+  band actually is, so the octave it derives is one the recording can carry (200 Hz → 100 Hz). The
+  acceptance row for the class: the 60–200 Hz region against 300–900 Hz goes from −9.30 dB on the
+  input to −8.77 dB after the chain, where the same file used to come out at −11.69 dB.
+* **…and the same measurement now has to run in both modes.** `subSrc` is a parameter, so a profile
+  the user picked by hand carries the hole measurement too instead of the fixed 95 Hz corner.
+
 ### Fixed — the bottom of the record, and a honk that was not a note
 
 * **The rumble statistic was one FFT bin wide — and the bin next to it is the mains line.** The

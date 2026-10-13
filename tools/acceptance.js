@@ -376,6 +376,156 @@ mark('section 10');
     'sibExcess ' + N(r.m.sibExcessDb, 1) + ' → ' + N(r.mo.sibExcessDb, 1) + ' · deess ' + N(r.P.deess) + ' · ' + r.dry.issues.join(','));
 }
 
+mark('section 11');
+/* 11 ── thin bass ────────────────────────────────────────────────────────── */
+{
+  let clean = bed(9000, 0.7);
+  clean = H.normalize(filt(clean, [bq('HP', 200, 0.707), bq('HP', 200, 0.707)]), 0.7);
+  const r = run([clean]);
+  /* the row names the band the *repair* can reach: the sub synthesiser derives
+   * its octave from what is there, so a file whose bottom stops at 200 Hz gets
+   * energy around 100 Hz, not at 40. Measured over 40–90 the row said +1.9 dB
+   * and over 60–200 it says the number below — the same repair, the band it
+   * actually works in. */
+  const tilt = (sig, lat) => bandSumDb(sig, 60, 200, lat) - bandSumDb(sig, 300, 900, lat);
+  const low = (sig, lat) => bandSumDb(sig, 34, 58, lat);
+  const only = (over) => {
+    const q = Object.assign({}, r.P, { reso: 0, dehiss: 0, declick: 0, exciter: 0, air: 0, glue: 0, warmth: 0, tilt: 0, width: 0, declip: 0, hum: 0, deess: 0, band0: 0, band1: 0, band2: 0, band3: 0, band4: 0, band5: 0, sub: 0 }, over);
+    const x = H.renderEx(Processor, [clean], q);
+    return [x.out[0], x.latency];
+  };
+  const subOnly = only({ sub: r.P.sub });
+  row('weak bass', '60–200 Hz vs 300–900 Hz (dB)', tilt(clean), tilt(r.out[0], r.lat),
+    'bassRoll ' + N(r.m.bassRoll) + ' · sub ' + N(r.P.sub) + ' · band0 ' + N(r.P.band0) + ' · ' + r.dry.issues.join(','));
+  const shelfOnly = only({ band0: r.P.band0 });
+  const none = only({});
+  const bands = (sig, lat) => N(bandSumDb(sig, 60, 200, lat)) + ' / ' + N(bandSumDb(sig, 300, 900, lat));
+  row('weak bass', 'the same chain with every stage switched off (dB)', tilt(clean), tilt(none[0], none[1]),
+    '60–200 / 300–900: ' + bands(clean) + ' → ' + bands(none[0], none[1]) + ' dBFS — this is what the always-on path does');
+  row('weak bass', 'same, with only the sub synthesiser on (dB)', tilt(clean), tilt(subOnly[0], subOnly[1]),
+    'sub ' + N(r.P.sub) + ' · 60–200 / 300–900: ' + bands(clean) + ' → ' + bands(subOnly[0], subOnly[1]) + ' · 34–58 Hz ' + N(low(clean)) + ' → ' + N(low(subOnly[0], subOnly[1])) + ' dBFS');
+  row('weak bass', 'same, with only the 60 Hz shelf on (dB)', tilt(clean), tilt(shelfOnly[0], shelfOnly[1]),
+    'band0 ' + N(r.P.band0) + ' dB · 60–200 / 300–900: ' + bands(clean) + ' → ' + bands(shelfOnly[0], shelfOnly[1]) + ' · 34–58 Hz ' + N(low(clean)) + ' → ' + N(low(shelfOnly[0], shelfOnly[1])) + ' dBFS');
+  row('weak bass', 'the octave the synthesiser derives, 34–58 Hz (dBFS)', low(clean), low(r.out[0], r.lat), 'the source has nothing there');
+  /* which stage is supposed to fill the bottom, measured one at a time: the
+   * synthesiser generates an octave below what is there (the fixture stops at
+   * 200 Hz, so its octave is 100 Hz) and the tone curve's 60 Hz shelf fills in
+   * below that. If the row above moves *down*, one of them is writing where the
+   * file has nothing while the other does not write at all. */
+
+}
+mark('section 12');
+/* 12 ── boxy low mids ───────────────────────────────────────────────────── */
+{
+  const clean = bed(9000, 0.7);
+  const hump = filt(clean, [bq('BP', 240, 0.55)]);
+  let dirty = new Float32Array(clean.length);
+  for (let i = 0; i < dirty.length; i++) dirty[i] = clean[i] + 2.4 * hump[i];
+  dirty = H.normalize(dirty, 0.7);
+  const r = run([dirty]);
+  const humpDb = (sig, lat) => bandSumDb(sig, 180, 320, lat) - bandSumDb(sig, 600, 1200, lat);
+  row('boxy mids', '180–320 Hz vs 600–1200 Hz (dB)', humpDb(dirty), humpDb(r.out[0], r.lat),
+    'mudScore ' + N(r.m.mudScore) + ' · band1 ' + N(r.P.band1) + ' · band2 ' + N(r.P.band2) + ' · ' + r.dry.issues.join(','));
+}
+mark('section 13');
+/* 13 ── dull top end ────────────────────────────────────────────────────── */
+{
+  const clean = bed(20000, 0.7);
+  let dull = H.normalize(filt(clean, [bq('LP', 5200, 0.707), bq('LP', 5200, 0.707)]), 0.7);
+  const r = run([dull]);
+  const topDb = (sig, lat) => bandSumDb(sig, 9000, 15000, lat) - bandSumDb(sig, 2000, 4000, lat);
+  row('dull top end', '9–15 kHz vs 2–4 kHz (dB)', topDb(dull), topDb(r.out[0], r.lat),
+    'hfCutoff ' + N(r.m.hfCutoff, 0) + ' Hz · dullIndex ' + N(r.m.dullIndex) + ' · topLoss ' + N(r.m.topLoss) + ' · air ' + N(r.P.air) + ' · airF ' + N(r.P.airF, 0) + ' · ' + r.dry.issues.join(','));
+}
+mark('section 14');
+/* 14 ── harsh presence ──────────────────────────────────────────────────── */
+{
+  let clean = bed(9000, 0.7);
+  /* a honk at 3 kHz needs +9.5 dB *relative to the programme's own slope* before
+   * the analyser calls it harsh (it compares the 2–4 kHz median with the
+   * 0.8–1.6 kHz one against a −3 dB/octave reference), so the fixture is a filter
+   * applied twice. The top-end shelf keeps it from also reading as dull, which
+   * is what a narrow 3 kHz honk does on its own. */
+  for (let i = 0; i < 2; i++) clean = filt(clean, [bq('PEQ', 3000, 0.8)]);
+  clean = filt(clean, [bq('PEQ', 9000, 0.5)]);
+  const dirty = H.normalize(clean, 0.7);
+  const r = run([dirty]);
+  const harshDb = (sig, lat) => bandSumDb(sig, 2000, 4000, lat) - bandSumDb(sig, 800, 1600, lat);
+  row('harsh presence', '2–4 kHz vs 0.8–1.6 kHz (dB)', harshDb(dirty), harshDb(r.out[0], r.lat),
+    'harshness ' + N(r.m.harshness) + ' → ' + N(r.mo.harshness) + ' · band4 ' + N(r.P.band4) + ' · ' + r.dry.issues.join(','));
+}
+mark('section 15');
+/* 15 ── a squashed master ───────────────────────────────────────────────── */
+{
+  let clean = bed(9000, 0.7);
+  /* squashed the way an over-limited master is: the peaks are pulled flat, so
+   * the file's own 98th percentile sits almost on its 5th */
+  /* the envelope is taken out and the rest saturated, which is what an
+   * over-limited master is: every 20 ms window at nearly the same level. The
+   * fixture is built on its own pink bed rather than on `bed()` so that the
+   * level stays flat — `bed()` carries the song envelope this class is about */
+  const sq = new Float32Array(clean.length);
+  const env = H.songEnvelope(SR, SEC, 0.35);
+  for (let i = 0; i < sq.length; i++) sq[i] = clean[i] / Math.max(env[i], 0.02) * Math.pow(Math.max(env[i], 0.02), 0.12);
+  let mean = 0;
+  for (let i = 0; i < sq.length; i++) mean += sq[i];
+  mean /= sq.length;
+  for (let i = 0; i < sq.length; i++) sq[i] = Math.tanh((sq[i] - mean) * 1.6) / 1.6;
+  const flat = H.normalize(sq, 0.88);
+  const r = run([flat]);
+  const crest = (sig, lat) => {
+    const lv = [];
+    const F = Math.round(SR * 0.02);
+    for (let k = 0; k + F < sig.length; k += F) {
+      let e = 0;
+      for (let i = 0; i < F; i++) { const j = k + i + (lat || 0); if (j < sig.length) e += sig[j] * sig[j]; }
+      lv.push(Math.sqrt(e / F));
+    }
+    lv.sort((a, b) => a - b);
+    return 20 * Math.log10((lv[Math.floor(lv.length * 0.98)] + 1e-12) / (lv[Math.floor(lv.length * 0.05)] + 1e-12));
+  };
+  row('squashed master', '20 ms envelope p98 − p05 (dB)', crest(flat), crest(r.out[0], r.lat),
+    'dynamicRangeDb ' + N(r.m.dynamicRangeDb, 1) + ' · glue ' + N(r.P.glue) + ' · warmth ' + N(r.P.warmth) + ' · ' + r.dry.issues.join(','));
+}
+mark('section 16');
+/* 16 ── an out-of-phase bottom ──────────────────────────────────────────── */
+{
+  const a = bed(9000, 0.7, 0.30);
+  const bIn = bed(9000, 0.7, 0.30);
+  const lowB = filt(bIn, [bq('LP', 200, 0.707)]);
+  const b = new Float32Array(bIn.length);
+  for (let i = 0; i < b.length; i++) b[i] = bIn[i] - 1.9 * lowB[i];      // the bottom of one channel inverted
+  const L = H.normalize(a, 0.62), R = H.normalize(b, 0.62);
+  const r = run([L, R]);
+  const lowRho = (x, y, lat) => {
+    const xl = filt(lat ? x.subarray(lat) : x, [bq('LP', 200, 0.707)]);
+    const yl = filt(lat ? y.subarray(lat) : y, [bq('LP', 200, 0.707)]);
+    const n = Math.min(xl.length, yl.length);
+    let sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
+    for (let i = 0; i < n; i++) { sa += xl[i]; sb += yl[i]; saa += xl[i] * xl[i]; sbb += yl[i] * yl[i]; sab += xl[i] * yl[i]; }
+    const cov = sab / n - (sa / n) * (sb / n);
+    const va = saa / n - (sa / n) ** 2, vb = sbb / n - (sb / n) ** 2;
+    return cov / Math.sqrt(Math.max(va * vb, 1e-30));
+  };
+  const hpRho = (x, y, lat, f) => {
+    const xl = filt(lat ? x.subarray(lat) : x, [bq('HP', f, 0.707)]);
+    const yl = filt(lat ? y.subarray(lat) : y, [bq('HP', f, 0.707)]);
+    const n = Math.min(xl.length, yl.length);
+    let sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
+    for (let i = 0; i < n; i++) { sa += xl[i]; sb += yl[i]; saa += xl[i] * xl[i]; sbb += yl[i] * yl[i]; sab += xl[i] * yl[i]; }
+    const cov = sab / n - (sa / n) * (sb / n);
+    const va = saa / n - (sa / n) ** 2, vb = sbb / n - (sb / n) ** 2;
+    return cov / Math.sqrt(Math.max(va * vb, 1e-30));
+  };
+  row('out-of-phase bottom', 'below-200 Hz correlation (ratio)', lowRho(L, R), lowRho(r.out[0], r.out[1], r.lat),
+    'correlation ' + N(r.m.correlation) + ' → ' + N(r.mo.correlation) + ' · bassMono ' + N(r.P.bassMono) + ' · ' + r.dry.issues.join(','));
+  /* the broadband number *has* to move — an inverted bottom is most of the
+   * side signal — so what is checked for "the repair stayed where it belongs"
+   * is the correlation above 2 kHz, where the mono-maker must not write */
+  row('out-of-phase bottom', 'above-2 kHz correlation, must stay put (ratio)', hpRho(L, R, 0, 2000), hpRho(r.out[0], r.out[1], r.lat, 2000),
+    'the repair may only touch the bottom');
+}
+
 /* ── print ──────────────────────────────────────────────────────────────── */
 const W = [20, 62, 14, 14];
 console.log('%s %s %s %s %s',
