@@ -6,3 +6,6 @@ Thumbs.db
 
 # scratch probes and their work files (measurement toolkit, not shipped)
 scratch/
+
+# build output of the probes (measurement work files)
+tools/work/

@@ -434,6 +434,38 @@
     // result and has to be allowed to work harder.
     const ragged = clamp(m.hfRagged || 0, 0, 1);
     const srcShift = clamp((7000 - (m.cliffHz || 20000)) / 4500, 0, 1);
+    /**
+     * …and where the *hole* is, which decides which tool may fill it.
+     *
+     * A wall at 15.5 kHz removed 15.5–20 kHz; the 7 kHz shelf boosts 7–15 kHz.
+     * On this app's own codec fixture the law asked for +2.4 dB there — a band
+     * the encoder had *not* touched, and the band a sibilant "s" lives in — so
+     * the app's export came back diagnosed as `sibilance` (5–9 kHz measured
+     * +2.5 dB over its own trend, against +0.2 on the input). The restoration
+     * at 15 kHz and up is real and must stay; it just belongs to the
+     * synthesiser, which works above 8.2 kHz from whatever survived just below
+     * the cliff, not to a shelf that reaches down through the "s".
+     */
+    /**
+     * …and *which instrument* may fill the hole, which is decided by where the
+     * hole is. Measured with the toolkit's encoder on the acceptance bed (the
+     * decode against the pre-encode original, per band):
+     *
+     *   32 kbit/s · cliff  7254 Hz   6 kHz −1.4   8 kHz −3.1  12 kHz −6.7
+     *   48 kbit/s · cliff 10254 Hz   8 kHz −0.3  10 kHz −1.2  12 kHz −2.5
+     *   64 kbit/s · cliff 15533 Hz   8 kHz +0.2  12 kHz +0.2  14 kHz −0.1  16 kHz −0.8
+     *
+     * A wall at 7–10 kHz cut the band a 7 kHz shelf lifts: the shelf is the
+     * right instrument and stays. A wall at 15.5 kHz cut *nothing* below 14 kHz,
+     * so a shelf there is not restoring anything — it is a 2.4 dB lift across
+     * 7–15 kHz, the band an "s" lives in, and this app's own export then came
+     * back from a re-upload diagnosed `sibilance` (5–9 kHz measured +2.5 dB over
+     * the file's own trend against +0.2 on the input). Above 9.5–12 kHz the
+     * shelf stands down and the synthesiser — whose output starts at 8.2 kHz and
+     * is derived from the band that survived just below the cliff — does the
+     * restoration on its own.
+     */
+    const wallAboveSib = clamp(m.brickwall || 0, 0, 1) * smoothstep(9500, 12000, m.cliffHz || 0);
     const airRoom = clamp(0.5 + 0.40 * srcShift * (1 - ragged), 0.5, 0.90);
 
     // Automatic mode stays inside the published budget (never below 0.30);
@@ -556,7 +588,7 @@
     const dense = (m.dynamicRangeDb !== undefined && m.dynamicRangeDb < 12) ? 1 : 0;
 
     return {
-      topDeficitDb, codecDeficitDb, airDeficitDb, subDeficitDb, subPresentDb,
+      topDeficitDb, codecDeficitDb, airDeficitDb, subDeficitDb, subPresentDb, wallAboveSib,
       mudExcessDb, harshExcessDb, boxExcessDb,
       hissNeed, crackleNeed, clipNeed, clipShare, clipImplied, humNeed, headroom, dense,
       // normalised needs (0..1) used by the doses
@@ -793,7 +825,7 @@
       D.needMud,                                       // 450 Hz       (cut)
       Math.max(D.needHarsh, D.needReso * 0.6),         // 1.3 kHz      (cut)
       D.needTop,                                       // 3.2 kHz      (lift)
-      D.needAir,                                       // 7 kHz shelf  (lift)
+      D.needAir * (1 - D.wallAboveSib),                // 7 kHz shelf  (lift)
     ];
     for (let i = 0; i < 6; i++) a.bands[i] *= dose[i];
 
@@ -806,14 +838,19 @@
     for (let i = 0; i < 6; i++) {
       const ex = D.bandExcess[i];
       const beyond = Math.sign(ex) * Math.max(0, Math.abs(ex) - 1.5);
-      a.bands[i] -= clamp(beyond * 0.4, -2.5, 2.5);
+      // The top band's *lift* stands down where the wall is above the "s" band
+      // (see wallAboveSib — a shelf cannot fill a hole an octave above itself);
+      // its *cut* stays: that is the repair.
+      let adj = clamp(beyond * 0.4, -2.5, 2.5);
+      if (i === 5 && adj < 0) adj *= (1 - D.wallAboveSib);
+      a.bands[i] -= adj;
     }
 
     // extra shaping where the measurement was emphatic
     a.bands[0] += 1.6 * D.needSub;
     a.bands[3] -= 0.7 * D.needHarsh;
     a.bands[4] -= 1.2 * D.needHarsh;
-    a.bands[5] += 1.0 * D.needAir;
+    a.bands[5] += 1.0 * D.needAir * (1 - D.wallAboveSib);
 
     for (let i = 0; i < 6; i++) a.bands[i] = clamp(a.bands[i], -bandCap, bandCap);
 
@@ -882,7 +919,17 @@
     a.dehiss = hissEvidence
       ? clamp(a.dehiss * (0.5 + 0.5 * hissDose) + 0.25 * floorExtra * D.hissNeed, 0, cap.dehiss)
       : 0;
-    a.declick = clamp(a.declick * (0.5 + 0.5 * smoothstep(0.03, 0.40, D.crackleNeed)), 0, cap.declick);
+    // …and here the evidence has to be able to *overrule* the profile, because
+    // the profile is about the material and the measurement is about the defect.
+    // Measured: a drum recording with 9 pops/s was named `crackle` by the card
+    // (index 1.00) and then dosed 0.17 by the `garage` anchor — every pop stayed
+    // exactly where it was (index 1.00 → 1.00), a repair the app promised and
+    // did not make. A clean recording reads 0.02–0.13 on the same statistic, a
+    // worn one 0.99; from 0.55 up the anchor's modesty is overridden as far as
+    // the profile's own repair budget, and below 0.40 the dose stays the
+    // anchor's (scaled, as before, by how sure the reading is).
+    const crk = smoothstep(0.10, 0.55, D.crackleNeed);
+    a.declick = clamp(Math.max(a.declick * (0.5 + 0.5 * smoothstep(0.03, 0.40, D.crackleNeed)), cap.declick * 0.55 * crk), 0, cap.declick);
     // The de-clipper is the same kind of stage — it only touches the samples
     // its own detector flags as flat tops at the file's peak level — so the
     // dose is the evidence, mapped onto the profile's repair budget.
@@ -1364,7 +1411,14 @@
     return {
       id: d.id,
       chain: (d.chain || [{ id: d.id, w: 1 }]).map((c) => c.id),
-      issues: issues.slice(0, 3).map((i) => i.key),
+      // The card names what was found, in order of weight. Three was the old
+      // cap, and the toolkit's end-to-end loop is what caught it: a worn record
+      // that was also saved as a 128 kbit/s MP3 comes back with crackle, hiss,
+      // hum, rumble *and* a codec wall — five real findings — and the card named
+      // three of them, so the hum never appeared even though the chain was
+      // notching it. (The demand-based findings below are ordered with it, so
+      // this is a display cap only.)
+      issues: issues.slice(0, 5).map((i) => i.key),
       confidence: d.confidence, scores: d.scores,
     };
   }
