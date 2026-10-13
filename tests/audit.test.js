@@ -522,6 +522,49 @@ section('audit · several problems at once');
   ok(Presets.diagnose(own).issues.indexOf('codec') < 0,
     '…and the diagnosis does not name a codec that took nothing audible',
     Presets.diagnose(own).issues.join(', ') || 'none');
+  /* …and the *dose* has to agree with that name, or the chain brightens the file
+   * it has just called healthy. This is the whole point of pricing a wall by its
+   * position: a modern master delivered as a 320 kbit/s MP3 has lame's wall at
+   * 19.07 kHz and *nothing* missing — measured against the pre-encode original,
+   * every band 4–16 kHz within 0.4 dB. Reading that wall as the generic 12 dB of
+   * lost top end put +1.4 dB across 8–16 kHz on a file whose own card said
+   * "nothing wrong", which is the second-order requirement (a clean file has to
+   * survive the chain) broken by the first one. */
+  const modern = H.normalize(H.filter(DSP, H.pink(SR, 8, 0.42, 61), SR, 'hp', 30, 0.707), 0.8);
+  const modernM = DSP.measure([modern], SR);
+  const at320 = Object.assign({}, modernM, { cliffHz: 19066, cliffDb: 15.0, brickwall: 1.0, hfCutoff: 19000 });
+  const at64 = Object.assign({}, modernM, { cliffHz: 15533, cliffDb: 15.0, brickwall: 1.0, hfCutoff: 15500 });
+  const d320 = Presets.demand(at320, Presets.classify(at320));
+  const d64 = Presets.demand(at64, Presets.classify(at64));
+  ok(d320.needAir === 0 && d320.codecDeficitDb === 0,
+    'a wall above the top octave asks for no top-end restoration at all',
+    'needAir ' + d320.needAir.toFixed(2) + ', deficit ' + d320.codecDeficitDb.toFixed(2) + ' dB');
+  ok(d64.needAir > 0.5,
+    '…while a wall inside the top octave is still worth restoring from',
+    'needAir ' + d64.needAir.toFixed(2));
+  ok(Presets.buildParams('auto', at320, 0.7).air === 0,
+    '…so the profile asks for no air on it either',
+    Presets.buildParams('auto', at320, 0.7).air.toFixed(3));
+  {
+    // and the rendered band agrees: the chain's footprint on 8–16 kHz of that
+    // master has to stay inside the encoder's own 0.4 dB
+    const P2 = H.loadProcessor(SR);
+    const band = (sig) => {
+      const w = 2 * Math.PI * 10000 / SR, c = Math.cos(w), sn = Math.sin(w), al = sn / 1.0, a0 = 1 + al;
+      const b = [al / a0, 0, -al / a0, -2 * c / a0, (1 - al) / a0];
+      const y = DSP.applyBiquad(DSP.applyBiquad(DSP.applyBiquad(sig, [1, 0, 0, 0, 0]), b), b);
+      let e = 0;
+      for (let i = 0; i < y.length; i++) e += y[i] * y[i];
+      return 10 * Math.log10(e / y.length);
+    };
+    const full = Object.assign({}, H.DEFAULT_PARAMS, Presets.buildParams('auto', at320, 0.7));
+    const rendered = H.render(P2, [modern], full)[0];
+    const lat = 4096;                                   // past the chain's own settling
+    const drift = band(rendered.subarray(lat)) - band(modern.subarray(lat));
+    ok(Math.abs(drift) < 0.6,
+      '…and the rendered top end of a modern master stays where it was',
+      '10 kHz band ' + (drift >= 0 ? '+' : '') + drift.toFixed(2) + ' dB');
+  }
   const m128 = DSP.measure([H.lowBitrateSim(DSP, SR, 12)], SR);
   ok(Presets.classify(m128).id === 'lowbitrate' && Presets.diagnose(m128).issues.indexOf('codec') >= 0,
     'a wall inside the top octave is a low-bitrate file, whatever else is wrong with it',

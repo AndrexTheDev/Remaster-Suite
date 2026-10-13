@@ -407,7 +407,24 @@
     //  · topLoss  ✔ 6–12 kHz sits below the −3 dB/oct reference line
     //  · brickwall ✔ a codec cliff cut the top off, which is a known loss
     const topDeficitDb = clamp((m.topLoss || 0) * 22, 0, 22);
-    const codecDeficitDb = clamp((m.brickwall || 0) * 12, 0, 12);
+    /* …and the *cliff* is only a loss when it is inside the audible top. The
+     * file's own test for that already exists — `codecLoss` is what decides
+     * whether a cliff is evidence of a bitrate at all, and it asks whether the
+     * content ends below 17 kHz. The deficit has to ask the same question,
+     * because a wall is not a bitrate: 96–320 kbit/s all put the encoder's
+     * anti-alias filter at 19.1–19.4 kHz and remove *nothing* (measured: every
+     * band 4–16 kHz within 0.4 dB). Pricing that wall at the full 12 dB is how
+     * a healthy modern master — 320 kbit/s, topLoss 0.00, dullIndex 0.00 —
+     * came out of the chain +1.4 dB bright in 8–16 kHz, and how the harness's
+     * own low-bitrate sims (synthetic walls at 17.7/18.8 kHz, topLoss 0.25 and
+     * 0.09) got 10–12 dB of demand out of the wall alone. What is *genuinely*
+     * missing is measured either way, by `topLoss` and `dullIndex`, and those
+     * carry the demand for such a file on their own; the wall adds nothing to
+     * it. Below 17 kHz — a cliff that cut the band an "s" lives in — the wall
+     * is priced in full, exactly as before.
+     */
+    const cliffPrices = codecLoss(m) ? 1 : 0;
+    const codecDeficitDb = clamp((m.brickwall || 0) * 12 * cliffPrices, 0, 12);
     // the top octave is masked by everything below it, so a given dB deficit up
     // there is worth less than the same deficit in the 6–12 kHz region
     const airDeficitDb = clamp(Math.max(topDeficitDb * 1.15, codecDeficitDb, (m.dullIndex || 0) * 10 * 0.9), 0, 24);
@@ -593,7 +610,7 @@
       hissNeed, crackleNeed, clipNeed, clipShare, clipImplied, humNeed, headroom, dense,
       // normalised needs (0..1) used by the doses
       needTop: clamp(topDeficitDb / 18, 0, 1),
-      needAir: clamp(Math.max(airDeficitDb / 20, (m.brickwall || 0) * 0.9), 0, 1),
+      needAir: clamp(Math.max(airDeficitDb / 20, (m.brickwall || 0) * 0.9 * cliffPrices), 0, 1),
       deriveRoom,
       needSub: clamp(subDeficitDb / 12, 0, 1),
       humNeed, resoNeed: clamp((resoExcess - 2) / 8, 0, 1), resoExcess,
