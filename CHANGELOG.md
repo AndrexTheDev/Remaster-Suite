@@ -13,6 +13,33 @@ thresholds sat in the tone stages (the glue's and the warmth's), all of them wri
 full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
 else may move.
 
+### Fixed — a pop the ratio could not see
+
+* **The de-clicker under-repaired exactly the pops that arrive where the music is loud in the same
+  band.** Its detector asks one question — how far above its own recent average is this sample — and
+  a one-sample spike is diluted by that average: the same pop reads a ratio of 7 on a quiet bar and
+  2.3 on a bright one, while the knee that decides the repair depth sits at 2.2–2.7. Measured on the
+  new audit fixture (8 s of pink low-passed at 9 kHz, 9 pops per second, 150 of them 4 dB or more
+  over the bed): the median pop fell 22 dB and one pop sat **4.6 dB above the bed** — the loudest
+  thing left in the file, and the row that was failing. The detector now reads a second witness, the
+  *shape* of the deviation: over the last 2 ms the two polarities of the residual `x − LP4k(x)` are
+  occupied equally by the music's own HF (asymmetry ≈ 0) and very unequally by an impulse (≈ 1).
+  Measured: **0.85** median at the pops, **0.18** at a snare attack (a hit raises the *signal's*
+  envelope too, so its HF is part of it and not a spike on top of it), and 0.8 % of a plain bed of
+  the same material crossing 0.4. Two milliseconds is the window that separates the three — at 1 ms
+  the music crosses 0.4 five times as often, at 4 ms the pops' own reading falls back into the
+  noise's. A shape that is an impulse now asks for less of the ratio's confidence — a quarter of the
+  scale at full strength, half that at the automatic dose — and that is what closed the row: the
+  surviving pop falls to **−4.9 dB** over the bed, the loudest survivor in the block reads
+  **−33.0 dBFS** against its −50 dBFS line, and the median pop still falls 22 dB. The price,
+  measured on the same runs: the drum kit's touched fraction 3.2 % → **4.4 %** (the guard is 8 %)
+  and its worst snare window −66 → **−62 dB** (the guard is −55). A bare impulse used to come out
+  5.5 % intact; it now comes out **0.6 %** — which is the point of the stage, and it is why the
+  latency probe in `tests/audit.test.js` was moved: it used to rely on the de-clicker *failing* to
+  repair an impulse. The probe now times the delay with the stage engaged but turned down (where it
+  repairs nothing, measured for every dose from 0.02 to 0.10), asserts the delay to the sample, and
+  the full-dose case asserts the impulse is gone instead.
+
 ### Fixed
 
 * **The inter-sample peak was invisible below full scale.** The oversampling walk visited samples

@@ -6,7 +6,7 @@
  *   input ─┬───────────────────────────────────────────────┐ (dry)
  *          │                                               │
  *          ├─ DC guard ─ Static EQ bank (6 bands)           │
- *          ├─ Dynamic de-resonator (7 probing bands)       │
+ *          ├─ Dynamic de-resonator (6 probing bands)       │
  *          ├─ Harmonic exciter (3 bands, even + odd)       │
  *          ├─ Air synthesizer 8–16 kHz (+ de-esser)        │
  *          ├─ Sub-harmonic synthesizer 30–60 Hz            │
@@ -1352,6 +1352,30 @@ class DeClicker {
     this.pred2 = new Biquad(); this.pred2.setLowpass(sr, 4000, 0.707);
     this.fast = new EnvFollower(sr, 1 / sr, 0.0006, 1);   // instant attack: 1-sample spikes
     this.slow = new EnvFollower(sr, 0.004, 0.025, 1);
+    /* ── the *shape* of the deviation: the second witness ──────────────────
+     * The fast/slow ratio above answers "how far above its own recent average
+     * is this sample", and it under-reads exactly the pops that arrive where
+     * the music carries energy in the same band: a one-sample spike is diluted
+     * by the slow envelope's average, so the same pop reads ratio 7 in a quiet
+     * bar and 2.3 in a bright one. What it *looks like* there is the second
+     * witness, and it is the classic one: an impulse is a **unipolar**
+     * deviation of the sample from its own low-frequency continuation, while
+     * the music's own HF residual is zero-mean noise. Over the last couple of
+     * milliseconds the two polarities of the signed residual are occupied to
+     * the same depth for noise — `asym` near 0 — and to very different depths
+     * for a spike, so `asym` near 1 is a click and 0.2 is music. Measured on
+     * the audit fixture (pink low-passed at 9 kHz, pops at 9 per second): the
+     * settled pop reads 0.85 median, 0.66 at the tenth percentile; the same
+     * material without pops crosses 0.4 in 0.8 % of its samples; a snare
+     * attack, which raises the *signal's* envelope as well — its HF is part of
+     * the hit, not a spike on top of it — reads 0.18 median. Two milliseconds
+     * is the window that separates those three: at 1 ms the music's own noise
+     * crosses 0.4 four times as often (3.8 %), at 4 ms a second excursion
+     * inside the window cancels the first and the pops' own reading falls back
+     * into the noise's (measured). */
+    this.dHi = 0;
+    this.dLo = 0;
+    this.shapeRate = Math.exp(-1 / (sr * 0.002));
     // How much of this signal lives above 4 kHz *on average* — the reference the
     // level gate below measures a spike against (a one-second average of the slow
     // envelope, seeded from the first sample so the first second is right).
@@ -1370,6 +1394,7 @@ class DeClicker {
   reset() {
     this.dp1.reset(); this.dp2.reset(); this.pred.reset(); this.pred2.reset();
     this.fast.v = 0; this.slow.v = 0;
+    this.dHi = 0; this.dLo = 0;
     this.ring.fill(0); this.plan.fill(0); this.mark.fill(0);
     this.w = 0; this.inp = 0; this.dryOut = 0; this.prevIn = 0;
     this.ref = 0;
@@ -1391,6 +1416,13 @@ class DeClicker {
     const ad = d < 0 ? -d : d;
     const f = this.fast.tick(ad);
     const s = this.slow.tick(ad);
+    // …and its *shape*: the recent extremes of the signed residual, each on its
+    // own short release. For the music's own HF they are equal and opposite;
+    // for an impulse one of them is the spike and the other is only the noise
+    // around it (see the constructor for the measurements).
+    this.dHi = d > this.dHi ? d : this.dHi * this.shapeRate;
+    this.dLo = d < this.dLo ? d : this.dLo * this.shapeRate;
+    const asym = Math.abs(this.dHi + this.dLo) / (this.dHi - this.dLo + 1e-12);
     // a click is a *short* broadband burst: the fast envelope spikes far above
     // the slow one, while musical transients raise both together
     const ratio = f / (s + 1e-9);
@@ -1445,7 +1477,17 @@ class DeClicker {
     // both runs. A pop that survives at −9 dB is still a pop, so the knob moves
     // the *threshold* instead: a detected click is repaired, and a lower
     // setting asks the detector for more confidence before it touches anything.
-    const th = 1 - 0.5 * amount;
+    /* A shape that is an impulse asks for less of that confidence: the ratio
+     * under-reads a spike, so where `asym` says the deviation is one-sided the
+     * detector does not have to be as sure by the ratio alone — by a quarter of
+     * the scale at full strength, half that at the automatic dose, and nothing
+     * on the music's own symmetric HF (measured: the audit fixture's quietest
+     * pop reads ratio 2.3, i.e. 0.08 of the repair, and lands at −1.5…−4.4 dB
+     * over the bed once its shape is heard; the same law moves the drum kit's
+     * touched fraction from 3.2 % to 4.4 % and its worst snare window from
+     * −66 to −62 dB against the −55 dB guard). */
+    const th = 1 - 0.5 * amount
+      - 0.25 * amount * smoothstep(0.32, 0.52, asym);
     k = smoothstep(th, th + 0.30, k);
     // ── 2 · nothing is emitted unheard: the sample waits in the delay line ──
     const L = this.ring.length;
@@ -2260,6 +2302,10 @@ class RemasterProcessor extends AudioWorkletProcessor {
       k('power', 0),          // master intensity 0..1
       k('bypass', 0),         // 1 = pure dry (A/B switch)
       k('sub', 0),
+      // where the sub-harmonic synthesiser looks for the fundamental: 95 Hz for
+      // a recording whose bottom octave is there, up to 240 Hz for one whose
+      // bottom is empty (see SubSynth.setSource)
+      k('subSrc', 95, 60, 260),
       k('subRatio', 0.5, 0.34, 0.66),
       k('exciter', 0),
       k('air', 0),
