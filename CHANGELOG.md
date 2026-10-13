@@ -32,6 +32,22 @@ else may move.
   −20 dBFS, so the programme gate sat at a different level *relative to the music* and the same dose
   generated 44 dB less harmonic content. The cap scales with the file's peak.
 
+### Fixed — the true-peak claim
+
+* **The inter-sample peak was under-read by 0.5 dB on transient material, and the limiter shared the
+  error.** The estimator was a seven-tap windowed sinc in both the measurement (`ispDb`) and the
+  limiter (`ISP_TABLE`). Measured on a bright percussive master against two independent meters — a
+  32-tap interpolator in the test toolkit and ffmpeg's `ebur128` — the app reported −2.10 dBTP for an
+  export that both put at −1.60: 0.4 dB *above* the ceiling it had just been asked to hold, with the
+  limiter's gain derived from the same wrong number. Both places now build one 32-tap Hann-windowed
+  sinc at four phases; the three meters agree to 0.00–0.03 dB, and the ceiling lands at −2.10 dBTP on
+  tonal, squashed and percussive material alike. The limiter's look-ahead grew by the kernel's extra
+  reach (76 → 88 samples, 1.83 ms).
+* **A permanent check that does not use the app's own meter** (`tests/dsp.test.js`, *the true-peak
+  claim, measured by somebody else*): a 48-tap Blackman-windowed sinc at eight phases — more taps, a
+  different window, twice the phase resolution — has to agree with `ispDb` within 0.15 dB, and a
+  limited export has to be under the ceiling by *both* meters.
+
 ### Added
 
 * **`refDb` — the file's own peak, as a parameter.** The glue's threshold (−22 dBFS *at that peak*)

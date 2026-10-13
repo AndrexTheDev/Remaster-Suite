@@ -653,7 +653,10 @@ H.section('engine · true-peak limiter (the export ceiling)');
   for (const ceil of [-1, -2]) {
     const r = limit(ceil);
     at[ceil] = { r, isp: RSDSP.measure([r.out[0]], SR).ispDb, peak: H.peak(r.out[0]) };
-    H.ok(r.latency === 76, 'the stage reports its look-ahead (76 samples at 48 kHz: 1.5 ms plus the interpolator)',
+    // 72 samples of gain window (1.5 ms) + 16 samples of interpolator reach:
+    // the kernel is symmetric, so half of it is on the far side of the interval
+    // it judges (see ISP_TAPS).
+    H.ok(r.latency === 88, 'the stage reports its look-ahead (88 samples at 48 kHz: 1.5 ms plus the interpolator)',
       'ceiling ' + ceil + ' → ' + r.latency);
     H.ok(at[ceil].isp <= ceil + 0.15,
       'the file arrives under the ' + ceil + ' dBTP ceiling the limiter was given',
@@ -722,8 +725,8 @@ H.section('engine · true-peak limiter (the export ceiling)');
   for (let i = 0; i < full.out[0].length; i++) if (!isFinite(full.out[0][i])) nonFinite++;
   H.ok(nonFinite === 0, 'with every repair stage engaged the output is finite — every sample of delay is covered',
     nonFinite + ' non-finite samples, latency ' + full.latency);
-  H.ok(full.latency === 271 + 17 + 76, 'and the three look-aheads add up to one number the caller can trust',
-    String(full.latency) + ' samples (271 de-clip + 17 de-click + 76 limiter)');
+  H.ok(full.latency === 271 + 17 + 88, 'and the three look-aheads add up to one number the caller can trust',
+    String(full.latency) + ' samples (271 de-clip + 17 de-click + 88 limiter)');
   H.ok(RSDSP.measure([full.out[0]], SR).ispDb <= -2 + 0.15, 'the chain as a whole still lands under the ceiling',
     RSDSP.measure([full.out[0]], SR).ispDb.toFixed(2) + ' dBTP');
 }
@@ -770,6 +773,93 @@ H.section('engine · the repairs do not depend on the level');
   const residual = 10 * Math.log10(e / rr);
   H.ok(residual < -30, 'the two finished files are the same file 20 dB down',
     residual.toFixed(1) + ' dB of level-normalised residual (was −12.6 dB while the de-hisser reference was clamped)');
+}
+
+/* ═════════════════════════════════════════════════════════════════════════════
+ * engine · the true-peak claim, measured by somebody else
+ *
+ * The app promises the export holds −1 dBTP (or −2 when it is loud). "True
+ * peak" is a statement about what the waveform does *between* the samples, so
+ * checking it with the app's own interpolator would only prove that the app
+ * agrees with itself. This section carries its own meter — a 48-tap
+ * Blackman-windowed sinc at eight phases, i.e. more taps, a different window and
+ * twice the phase resolution of the one the app builds — and puts the two
+ * numbers side by side.
+ *
+ * Why it exists: the app's old estimator was a seven-tap sinc, and on a bright
+ * transient-heavy master it read 0.5 dB *low*. Measured against ffmpeg's
+ * ebur128 as well, the export came out at −1.60 dBTP while the app reported
+ * −2.10 — 0.4 dB above the ceiling it had just been told to hold, with the
+ * limiter's gain computed from the very same estimate. Both places now build the
+ * same 32-tap kernel; ffmpeg agrees with them to 0.00–0.03 dB on tonal, squashed
+ * and percussive material (see scratch/tp-check.js).
+ * ═══════════════════════════════════════════════════════════════════════════ */
+H.section('engine · the true-peak claim, measured by somebody else');
+{
+  /* an independent interpolator: 48 taps, Blackman window, eight phases */
+  const REF_TAPS = 48, REF_PH = 8;
+  const refTable = [];
+  for (let q = 1; q < REF_PH; q++) {
+    const taps = new Float64Array(REF_TAPS);
+    for (let n = 0; n < REF_TAPS; n++) {
+      const x = (n - (REF_TAPS / 2 - 1)) - q / REF_PH;
+      const sinc = x === 0 ? 1 : Math.sin(Math.PI * x) / (Math.PI * x);
+      const w = 0.42 - 0.5 * Math.cos(2 * Math.PI * (n + 0.5) / REF_TAPS)
+        + 0.08 * Math.cos(4 * Math.PI * (n + 0.5) / REF_TAPS);
+      taps[n] = sinc * w;
+    }
+    let sum = 0;
+    for (let n = 0; n < REF_TAPS; n++) sum += taps[n];
+    for (let n = 0; n < REF_TAPS; n++) taps[n] /= sum;
+    refTable.push(taps);
+  }
+  const refPeakDb = (sig) => {
+    const half = REF_TAPS / 2;
+    let pk = 0;
+    for (let i = half; i < sig.length - half; i++) {
+      const a = Math.abs(sig[i]);
+      if (a > pk) pk = a;
+      for (let q = 1; q < REF_PH; q++) {
+        const t = refTable[q - 1];
+        let v = 0;
+        for (let n = 0; n < REF_TAPS; n++) v += sig[i - half + 1 + n] * t[n];
+        const av = v < 0 ? -v : v;
+        if (av > pk) pk = av;
+      }
+    }
+    return 20 * Math.log10(Math.max(pk, 1e-9));
+  };
+
+  const rnd = H.rng(9);
+  let perc = H.filter(RSDSP, H.pink(SR, 6, 0.30, 5), SR, 'hp', 300, 0.7);
+  for (let t = 0; t < 6 * 8; t++) {                     // bright hits, 8 per second
+    const at = Math.floor((0.1 + t / 8) * SR);
+    const amp = 0.55 + 0.45 * rnd();
+    for (let i = 0; i < 900 && at + i < perc.length; i++) {
+      perc[at + i] += amp * Math.exp(-i / 120) * Math.sin(2 * Math.PI * (3200 + 5200 * i / 900) * (i / SR));
+    }
+  }
+  perc = H.normalize(perc, 0.99);
+
+  const m = RSDSP.measure([perc], SR);
+  H.ok(m.ispDb > m.peakDb + 0.02,
+    'a bright transient master really does peak between the samples',
+    'sample peak ' + m.peakDb.toFixed(2) + ' vs inter-sample ' + m.ispDb.toFixed(2) + ' dBFS');
+  H.ok(Math.abs(m.ispDb - refPeakDb(perc)) < 0.15,
+    'and the reading agrees with an independent interpolator',
+    m.ispDb.toFixed(2) + ' vs ' + refPeakDb(perc).toFixed(2) + ' dBFS');
+
+  const P = Object.assign({}, H.DEFAULT_PARAMS,
+    { power: 1, bypass: 0, tpCeil: -2, refDb: m.peakDb, noiseFloor: -80, hissFloor: -90 });
+  const limited = H.render(Processor, [perc], P)[0];
+  const lm = RSDSP.measure([limited], SR);
+  const ref = refPeakDb(limited);
+  H.ok(lm.ispDb <= -2 + 0.05 && ref <= -2 + 0.05,
+    '…so the ceiling is held on the hardest material, by both meters',
+    'app ' + lm.ispDb.toFixed(3) + ', independent ' + ref.toFixed(3) + ' dBTP against a −2 dBTP target');
+  H.ok(lm.ispDb <= m.ispDb - 0.5,
+    '…and the file that needed the limiter came down by the overshoot it had',
+    (m.ispDb - lm.ispDb).toFixed(2) + ' dB');
 }
 
 /* ═════════════════════════════════════════════════════════════════════════════

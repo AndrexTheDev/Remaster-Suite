@@ -1363,6 +1363,39 @@ class HumNotch {
  * the output is the input — a file that does not need a limiter must not get
  * one. `latency` reports the look-ahead only while it is engaged.
  */
+/* --------------------------------------------------------------------------
+ * Inter-sample peak ("true peak"): 4× oversampled, 32-tap Hann-windowed sinc.
+ *
+ * The limiter and the *measurement* (`ispStep` in dsp-utils.js, which reports
+ * `ispDb` and drives the diagnosis) build this table from the same numbers and
+ * judge the same intervals — a limiter that estimates the peak differently from
+ * the meter that reports it cannot be trusted about its own ceiling. The short
+ * seven-tap sinc that used to sit in both places read 0.5 dB *low* on bright
+ * transient material: measured against ffmpeg's ebur128 and against an
+ * independent 32-tap meter, the app reported −2.10 dBTP for an export both
+ * other meters put at −1.60 — 0.4 dB above the ceiling it had just been given.
+ * ----------------------------------------------------------------------- */
+const ISP_TAPS = 32;
+const ISP_PHASES = 4;
+const ISP_TABLE = (() => {
+  const N = ISP_TAPS;
+  const t = [];
+  for (let p = 1; p < ISP_PHASES; p++) {
+    const taps = new Float64Array(N);
+    for (let n = 0; n < N; n++) {
+      const x = (n - (N / 2 - 1)) - p / ISP_PHASES;
+      const sinc = x === 0 ? 1 : Math.sin(Math.PI * x) / (Math.PI * x);
+      const w = 0.5 - 0.5 * Math.cos(2 * Math.PI * (n + 0.5) / N);
+      taps[n] = sinc * w;
+    }
+    let sum = 0;
+    for (let n = 0; n < N; n++) sum += taps[n];
+    for (let n = 0; n < N; n++) taps[n] /= sum;
+    t.push(taps);
+  }
+  return t;
+})();
+
 class TruePeakLimiter {
   constructor(sr) {
     this.sr = sr;
@@ -1394,10 +1427,11 @@ class TruePeakLimiter {
   set(sr, nCh, ceilDb) {
     const on = ceilDb < -0.01;
     // 1.5 ms of look-ahead — the window the gain is minimised over — plus the
-    // four samples the interpolator needs to see *past* the sample it judges
+    // sixteen samples the interpolator needs to see *past* the interval it
+    // judges (ISP_TAPS/2; the kernel is symmetric, so half of it is future)
     const look = Math.max(8, Math.round(sr * 0.0015));
-    const delay = on ? look + 4 : 0;
-    const len = delay + 8;
+    const delay = on ? look + ISP_TAPS / 2 : 0;
+    const len = delay + ISP_TAPS + 8;
     if (delay !== this.delay || this.ring.length !== nCh) {
       this.ring = [];
       for (let c = 0; c < nCh; c++) this.ring.push(new Float32Array(len));
@@ -1410,10 +1444,13 @@ class TruePeakLimiter {
     this.delay = delay;
     this.len = len;
     this.look = look;
-    // a tenth of a decibel of margin below the target: the estimate below is
-    // the same one the app's own `ispDb` is built from, and the limiter's gain
-    // only ever smooths the waveform — so the margin is insurance, not slack
+    // A tenth of a decibel of margin below the target: the estimate below is the
+    // same one the app's own `ispDb` is built from, and the limiter's gain only
+    // ever smooths the waveform — so the margin is insurance, not slack. That
+    // pair of statements is only worth anything while the *estimate* is honest,
+    // which is what the 32-tap kernel is for (see ISP_TABLE).
     this.lim = Math.pow(10, (Math.min(0, ceilDb) - 0.1) / 20);
+    this.gate = this.lim * 0.5;      // an interval this far down cannot overshoot
     this.rel = 1 - Math.exp(-1 / (Math.max(1, sr) * 0.08));   // ~80 ms release
   }
 
@@ -1429,40 +1466,37 @@ class TruePeakLimiter {
     for (let i = 0; i < frames; i++) {
       const w = this.w;
       // ── 1 · the peak *between* the samples ────────────────────────────────
-      // The very estimator the measurement uses (dsp-utils `ispStep`): the same
-      // seven-tap windowed sinc, evaluated a quarter, a half and three quarters
-      // of the way across the interval. The interval judged here sits four
-      // samples behind the newest one, so all seven taps are history. Using a
-      // cheaper local curve instead (a Catmull-Rom through the neighbours, with
-      // the next sample extrapolated) was measured against this: it reported
-      // 0.23 dB *less* than the measurement found, i.e. the limiter left the
-      // file still over the ceiling, and it invented peaks on quiet material —
-      // a file 6 dB below the ceiling was being limited.
+      // The very estimator the measurement uses (dsp-utils `ispStep`): 32 taps
+      // of a Hann-windowed sinc at four phases, judging the interval sixteen
+      // samples behind the newest one — so all 32 taps are history, and every
+      // interval gets looked at exactly once. Using a cheaper local curve
+      // instead (a Catmull-Rom through the neighbours) was measured against
+      // this: it reported 0.23 dB *less* than the measurement found, i.e. the
+      // limiter left the file over the ceiling while claiming otherwise.
+      // The phases are only evaluated near the ceiling (the local 32-sample
+      // maximum is the cheap gate): an interval whose loudest sample is 6 dB
+      // below the ceiling cannot interpolate its way above it.
       let pk = 0;
+      const table = ISP_TABLE;
       for (let c = 0; c < n; c++) {
         const ring = this.ring[c];
         ring[w] = dst[c][i];
-        const base = (w - 4 + len) % len;
-        for (let d = 1; d <= 3; d++) {
-          const f = d / 4;
+        const base = (w - (ISP_TAPS - 1) + len) % len;
+        let m = 0;
+        for (let nn = 0; nn < ISP_TAPS; nn++) {
+          const av = ring[(base + nn) % len];
+          const a = av < 0 ? -av : av;
+          if (a > m) m = a;
+        }
+        if (m > pk) pk = m;
+        if (m < this.gate) continue;
+        for (let d = 1; d < ISP_PHASES; d++) {
+          const t = table[d - 1];
           let v = 0;
-          for (let k = -3; k <= 3; k++) {
-            const t = k - f;
-            let tap;
-            if (t === 0) tap = 1;
-            else {
-              const p = Math.PI * t;
-              const sinc = Math.sin(p) / p;
-              const win = t < 3 && t > -3 ? Math.sin(p / 3) / (p / 3) : 0;
-              tap = sinc * win;
-            }
-            v += ring[(base + k + len) % len] * tap;
-          }
+          for (let nn = 0; nn < ISP_TAPS; nn++) v += ring[(base + nn) % len] * t[nn];
           const av = v < 0 ? -v : v;
           if (av > pk) pk = av;
         }
-        const ab = ring[base] < 0 ? -ring[base] : ring[base];
-        if (ab > pk) pk = ab;
       }
       // ── 2 · the gain this interval needs … ────────────────────────────────
       const req = pk > lim ? lim / pk : 1;

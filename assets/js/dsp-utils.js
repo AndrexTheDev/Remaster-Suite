@@ -1572,6 +1572,50 @@
    * highest value found. It is an estimate (that is what it is called in the
    * UI), accurate to a few tenths of a dB, not a conformance-grade meter.
    */
+  /* --------------------------------------------------------------------------
+   * Inter-sample peak ("true peak"): 4× oversampled, 32-tap Hann-windowed sinc.
+   *
+   * The kernel is the *shared* definition of "what the waveform does between the
+   * samples": the limiter in the worklet builds the same table from the same
+   * numbers and judges the same intervals, because a limiter that measures the
+   * peak differently from the meter that reports it is a limiter that lies about
+   * its own ceiling.
+   *
+   * The short seven-tap sinc that used to sit here (and in the limiter) is not
+   * good enough on bright, transient-heavy material: measured against two
+   * independent interpolators (ffmpeg's ebur128 and a 32-tap meter in the test
+   * toolkit) it read 0.5 dB *low* on a percussion master — the app reported
+   * −2.10 dBTP for an export that both other meters put at −1.60, above the
+   * ceiling it had just been told to hold. 32 taps with a Hann window agree with
+   * ffmpeg to within 0.06 dB on tonal material and 0.09 dB on transients.
+   * ----------------------------------------------------------------------- */
+  const ISP_TAPS = 32;
+  const ISP_PHASES = 4;
+  let ISP_TABLE = null;
+  /** @returns {Float64Array[]} one 32-tap kernel per quarter-sample phase */
+  function ispTable() {
+    if (ISP_TABLE) return ISP_TABLE;
+    const N = ISP_TAPS;
+    const t = [];
+    for (let p = 1; p < ISP_PHASES; p++) {
+      const taps = new Float64Array(N);
+      for (let n = 0; n < N; n++) {
+        // distance from the interpolation point (which sits p/4 samples across
+        // the interval, so the newest tap has a quarter-sample of future in it)
+        const x = (n - (N / 2 - 1)) - p / ISP_PHASES;
+        const sinc = x === 0 ? 1 : Math.sin(Math.PI * x) / (Math.PI * x);
+        const w = 0.5 - 0.5 * Math.cos(2 * Math.PI * (n + 0.5) / N);
+        taps[n] = sinc * w;
+      }
+      let sum = 0;
+      for (let n = 0; n < N; n++) sum += taps[n];
+      for (let n = 0; n < N; n++) taps[n] /= sum;      // unity gain per phase
+      t.push(taps);
+    }
+    ISP_TABLE = t;
+    return t;
+  }
+
   function ispStep(channels) {
     const flat = { step: stepRange('isp', 0, 0, () => {}), value: () => -70 };
     if (!channels.length || !channels[0].length) return flat;
@@ -1592,29 +1636,30 @@
       for (let i = 0; i < ch.length; i++) { const a = ch[i] < 0 ? -ch[i] : ch[i]; if (a > pk) pk = a; }
     }
     const gate = pk * 0.5;
-    const tap = (t) => {
-      if (t === 0) return 1;
-      const p = Math.PI * t;
-      const s = Math.sin(p) / p;
-      const w = Math.abs(t) < 3 ? Math.sin(p / 3) / (p / 3) : 0;
-      return s * w;
-    };
+    const table = ispTable();
+    const half = ISP_TAPS / 2;                       // 16 samples of reach each way
     const step = stepRange('isp', total, total * 2, (from, to) => {
       for (let c = 0; c < channels.length; c++) {
         const ch = channels[c];
         const len = ch.length;
-        const a = Math.max(3, Math.max(from, starts[c]) - starts[c]);
-        const b = Math.min(len - 3, Math.min(to, starts[c] + len) - starts[c]);
+        const a = Math.max(half, Math.max(from, starts[c]) - starts[c]);
+        const b = Math.min(len - half, Math.min(to, starts[c] + len) - starts[c]);
         for (let i = a; i < b; i++) {
-          const cand = ch[i];
-          if (cand < gate && cand > -gate) continue;
-          for (let d = 1; d <= 3; d++) {
-            const f = d / 4;
+          // The gate is on the *neighbourhood*, not on the sample: the kernel
+          // reaches sixteen samples ahead, so an interval whose own sample is
+          // below the gate can still be the one that overshoots.
+          let m = 0;
+          for (let k = -half; k < half; k++) { const av = ch[i + k] < 0 ? -ch[i + k] : ch[i + k]; if (av > m) m = av; }
+          if (m < gate) continue;
+          for (let d = 1; d < ISP_PHASES; d++) {
+            const taps = table[d - 1];
             let v = 0;
-            for (let k = -3; k <= 3; k++) v += ch[i + k] * tap(k - f);
+            for (let n = 0; n < ISP_TAPS; n++) v += ch[i - half + 1 + n] * taps[n];
             const av = v < 0 ? -v : v;
             if (av > st.isp) st.isp = av;
           }
+          const ab = ch[i + 1] < 0 ? -ch[i + 1] : ch[i + 1];
+          if (ab > st.isp) st.isp = ab;
         }
       }
     });
