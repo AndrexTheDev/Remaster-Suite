@@ -612,11 +612,14 @@ section('audit · presets and parameters');
     const dflt = Number(m[2]);
     ranges[m[1]] = m[3] === undefined ? [Math.min(0, dflt), Math.max(1, dflt)] : [Number(m[3]), Number(m[4])];
   }
-  // 56 = the original 36 + the per-song stage: a sub-sonic corner, a de-esser,
+  // 57 = the original 36 + the per-song stage: a sub-sonic corner, a de-esser,
   // a mono-maker for out-of-phase bass, a glue timing, the de-hisser's crossover,
-  // twelve bands of corrective EQ, the de-clipper's dose and clip level — and the
-  // true-peak ceiling the export limiter holds the file to.
-  ok(declared.length === 56, 'the processor declares the whole per-song parameter set', String(declared.length));
+  // twelve bands of corrective EQ, the de-clipper's dose and clip level, the
+  // true-peak ceiling the export limiter holds the file to — and the file's own
+  // peak (`refDb`), which the stages that are *not* an absolute target read to
+  // place their thresholds relative to this recording (see `refLin` in the
+  // worklet and the level-invariance section in tests/dsp.test.js).
+  ok(declared.length === 57, 'the processor declares the whole per-song parameter set', String(declared.length));
   // A mains line that is not a pure sine. Real hum arrives with its harmonics,
   // and a recording with a 100 Hz buzz has to be notched there *because that was
   // measured* — this is the fixture that proves the harmonic notches are wired to
@@ -773,7 +776,10 @@ section('audit · presets and parameters');
     // amount before it ever compares a sample against it. `tpCeil` is the same
     // kind of thing at the other end of the chain: a *target*, expressed as the
     // dBTP the export must not exceed, where 0 means the limiter is off.
-    'glueTime', 'hissF', 'declipLevel', 'tpCeil'];
+    // `refDb` is the same kind again: the peak the measurement found, a
+    // *reference* for the glue's threshold and the warmth's drive. It is not an
+    // amount, and every stage that reads it is behind a zero amount.
+    'glueTime', 'hissF', 'declipLevel', 'tpCeil', 'refDb'];
   const stillActive = Object.keys(zero).filter((k) => ['bypass'].indexOf(k) === -1 && Math.abs(zero[k]) > 1e-9
     && RATES.indexOf(k) === -1);
   ok(stillActive.length === 0, 'at 0 % every module amount is exactly zero', stillActive.join(', '));

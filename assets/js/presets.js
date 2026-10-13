@@ -1030,7 +1030,7 @@
   /** What a parameter means when the measurement could not provide a value. */
   const NEUTRAL = {
     autoLevel: 1, noiseFloor: -70, hissFloor: -80, airRoom: 0.5, airF: 6000, subRatio: 0.5,
-    humHz: 50, boxF1: 120, boxF2: 240, boxQ1: 3, boxQ2: 3,
+    humHz: 50, boxF1: 120, boxF2: 240, boxQ1: 3, boxQ2: 3, refDb: 0,
     hissF: 3200, glueTime: 0.5, infraHP: 0,
   };
 
@@ -1090,6 +1090,11 @@
       declipLevel: num(clamp(a.declipLevel, -60, 0), -0.1),
       declick: repair(a.declick),
       tpCeil: num(a.tpCeil, 0),
+      // …and the file's own peak, so the stages that are neither a repair nor
+      // an absolute target (the glue, the analogue warmth) place their
+      // thresholds relative to *this recording* instead of full scale. See the
+      // `refDb` parameter in remaster-processor.js.
+      refDb: num(clamp(metrics.peakDb, -60, 12), 0),
       glue: a.glue * amt,
       warmth: a.warmth * amt,
       tilt: a.tilt * p,

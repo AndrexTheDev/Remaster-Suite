@@ -310,10 +310,17 @@ class ExciterBand {
   }
   reset() { this.pre.reset(); this.post.reset(); this.env.v = 0; this.sig = 0; this.prog = 0; }
   /** programme-presence gate: harmonics follow the music, never the noise */
-  setNoise(noiseLin) {
-    // harmonic generation follows the music. The reference is the measured
-    // noise floor but capped, so a noisy estimate can never mute the effect.
-    this.gLo = clamp(noiseLin * 1.5, 1e-6, 0.02);
+  setNoise(noiseLin, refLin) {
+    // Harmonic generation follows the music. The reference is the measured
+    // noise floor, and it is capped so a noisy estimate can never mute the
+    // effect — but the cap is *relative to the file's own peak* (see `refDb`).
+    // Absolute, a cap at 0.02 bites only on a loud file: on the vinyl fixture
+    // the reference came out 0.0214 at full scale and 0.002 14 at −20 dBFS, so
+    // the gate sat at a different level *relative to the music* and the same
+    // dose generated a measurably different amount of harmonics (−44 dB
+    // between the two renders). For a file at full scale `refLin` is 1 and the
+    // cap is exactly the old 0.02.
+    this.gLo = clamp(noiseLin * 1.5, 1e-6, 0.02 * refLin);
     this.gInv = 1 / Math.max(this.gLo * 5.0, 1e-9);
   }
   /** @returns {number} generated harmonic signal */
@@ -386,8 +393,10 @@ class AirSynth {
     this.deess.reset(); this.env.v = 0; this.dEnv.v = 0; this.dAvg.v = 0;
     this.dRamp.reset(1); this.prog = 0;
   }
-  setNoise(noiseLin) {
-    this.gLo = clamp(noiseLin * 1.5, 1e-6, 0.02);
+  setNoise(noiseLin, refLin) {
+    // …capped relative to the file's own peak for the same reason as the
+    // exciter's (see above): an absolute cap is a level-dependent policy.
+    this.gLo = clamp(noiseLin * 1.5, 1e-6, 0.02 * refLin);
     this.gInv = 1 / Math.max(this.gLo * 5.0, 1e-9);
   }
   /**
@@ -1220,9 +1229,22 @@ class GlueComp {
     this.rel = 0.180;
     this.env = new EnvFollower(sr, this.atk, this.rel, GLUE_DECIM);
     this.gain = new Ramp(GLUE_DECIM, 1);
-    this.thr = 0.079;          // ≈ −22 dBFS
+    this.thr = 0.079;          // ≈ −22 dBFS *at the file's own peak* (see setRef)
+    this.ref = 1;              // the file's peak as a scale factor, 1 = full scale
   }
   reset() { this.env.v = 0; this.gain.reset(1); }
+  /**
+   * Where "−22 dBFS" sits, for this file. The compressor is a piece of taste,
+   * not an absolute target: what it should do is grab the peaks that stand
+   * above the *programme's* own level, and how loud the upload happens to be
+   * says nothing about the programme. Measured on one fixture 20 dB down, the
+   * fixed threshold let the compressor do nothing at all (effect −45.8 dB at
+   * 0 dBFS, none at −20 dBFS) — the same slider, the same measurement, no
+   * compression. Scaling the threshold by the file's peak keeps the nominal
+   * behaviour (a file at full scale: the threshold is exactly the old 0.079)
+   * and makes the glue a function of the waveform.
+   */
+  setRef(refLin) { this.ref = clamp(refLin, 0.002, 4); }
   /**
    * Per-song timing. A drum-driven recording needs the compressor to let the
    * hit through (a slower attack) and to be back at unity before the next one
@@ -1243,7 +1265,8 @@ class GlueComp {
     if (amount <= 0.0001) return x;
     const ax = x < 0 ? -x : x;
     const e = this.env.tick(ax);
-    const gr = e > this.thr ? Math.sqrt(this.thr / e) : 1;
+    const thr = this.thr * this.ref;
+    const gr = e > thr ? Math.sqrt(thr / e) : 1;
     this.gain.set(1 - amount * (1 - gr));
     const g = this.gain.tick();
     const makeup = 1 + amount * (1 - gr) * 0.75;
@@ -1705,8 +1728,8 @@ class ChannelChain {
 
     for (let i = 0; i < this.reso.length; i++) this.reso[i].depth = p.reso;
     this.excEven = 0.55 + p.warmth * 0.25;
-    for (let i = 0; i < this.exc.length; i++) this.exc[i].setNoise(p.noiseLin);
-    this.air.setNoise(p.noiseLin);
+    for (let i = 0; i < this.exc.length; i++) this.exc[i].setNoise(p.noiseLin, p.refLin);
+    this.air.setNoise(p.noiseLin, p.refLin);
     this.air.setSource(p.airF);
     this.airRoom = p.airRoom;
     this.sub.setNoise(p.noiseLin);
@@ -1715,9 +1738,11 @@ class ChannelChain {
     // the de-hisser splits where *this* file's noise starts
     this.hiss.setXover(p.hissF);
     this.glue.setTime(p.glueTime);
+    this.glue.setRef(p.refLin);
     this.lowShelf.setLowShelf(this.sr, 700, 0.60, -p.tilt * 5.0);
     this.highShelf.setHighShelf(this.sr, 3200, 0.60, p.tilt * 5.0);
     this.warm = p.warmth;
+    this.refLin = p.refLin;
   }
 
   /** process one sample (dry level accumulation happens in the caller) */
@@ -1837,7 +1862,17 @@ class ChannelChain {
     // 9 ── tone tilt + analog warmth + DC guard
     y = this.highShelf.process(this.lowShelf.process(y));
     const w = this.warm;
-    if (w > 0.0001) y = y * (1 - w * 0.55) + ftanh(y * (1 + w * 1.8)) * w * 0.62;
+    if (w > 0.0001) {
+      // The drive is scaled to the file's own peak (see `refLin` and the refDb
+      // parameter): the same saturation curve, evaluated at the same *relative*
+      // level. A quadratic-ish nonlinearity adds its harmonics in proportion to
+      // the level it is fed, so without this a −20 dBFS copy of a master got
+      // 30 dB less analogue warmth than the master did (measured: effect
+      // −39.5 dB at 0 dBFS, −67.8 dB at −20 dBFS, same dose). A file that
+      // reaches full scale gets exactly what it got before.
+      const r = this.refLin;
+      y = y * (1 - w * 0.55) + ftanh((y / r) * (1 + w * 1.8)) * r * w * 0.62;
+    }
     y = this.dcOut.process(y);
 
     // 9b ── mains hum, and it belongs *here*: every stage above can create or
@@ -1915,6 +1950,11 @@ class RemasterProcessor extends AudioWorkletProcessor {
       k('glueTime', 0.5, 0, 1),         // 0 = fast/percussive-safe · 1 = slow/smooth
       k('hissF', 3200, 2000, 8000),     // de-hisser crossover, measured per file
       k('tpCeil', 0, -6, 0),            // true-peak ceiling in dBTP (0 = the stage is off)
+      // The file's own peak, in dBFS. Stages that are neither a repair nor an
+      // absolute target (the limiter) read it to place their thresholds
+      // relative to this recording instead of relative to full scale; the
+      // default 0 dBFS is exactly the old behaviour.
+      k('refDb', 0, -60, 12),
       k('eq0', 0, -9, 9),               // per-song corrective EQ · 50 Hz
       k('eq1', 0, -9, 9),               // · 80 Hz
       k('eq2', 0, -9, 9),               // · 125 Hz
@@ -1943,7 +1983,7 @@ class RemasterProcessor extends AudioWorkletProcessor {
       power: 0, bypass: 1, sub: 0, subRatio: 0.5, exciter: 0, air: 0, dehiss: 0,
       declip: 0, declipLevel: -0.1, declick: 0, reso: 0, glue: 0, warmth: 0, tilt: 0,
       hum: 0, hum2: 0, hum3: 0, humHz: 50, boxF1: 200, boxQ1: 3, boxG1: 0, boxF2: 400, boxQ2: 3, boxG2: 0,
-      width: 0, airRoom: 0.5, airF: 6000, hissTilt: 0, hissMax: 0,
+      width: 0, airRoom: 0.5, airF: 6000, hissTilt: 0, hissMax: 0, refDb: 0, refLin: 1,
       bands: [0, 0, 0, 0, 0, 0], noiseLin: 1e-4, hfNoiseLin: 1e-5, autoLevel: 1,
       infraHP: 0, deess: 0, bassMono: 0, glueTime: 0.5, hissF: 3200,
       ceq: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -2017,6 +2057,8 @@ class RemasterProcessor extends AudioWorkletProcessor {
     pr.glueTime = g('glueTime', 0.5);
     pr.hissF = g('hissF', 3200);
     pr.tpCeil = g('tpCeil', 0);
+    pr.refDb = g('refDb', 0);
+    pr.refLin = clamp(Math.pow(10, pr.refDb / 20), 0.002, 4);
     for (let b = 0; b < 12; b++) pr.ceq[b] = g('eq' + b, 0);
     pr.noiseLin = Math.pow(10, g('noiseFloor', -70) / 20);
     pr.hfNoiseLin = Math.pow(10, g('hissFloor', -80) / 20);

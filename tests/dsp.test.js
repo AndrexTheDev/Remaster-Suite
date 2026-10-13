@@ -772,6 +772,113 @@ H.section('engine · the repairs do not depend on the level');
     residual.toFixed(1) + ' dB of level-normalised residual (was −12.6 dB while the de-hisser reference was clamped)');
 }
 
+/* ═════════════════════════════════════════════════════════════════════════════
+ * engine · nothing in the app depends on how loud the file is
+ *
+ * The chain is built on one promise: what a recording sounds like does not
+ * change when you turn the fader down. The repairs are checked above; this is
+ * the other two halves of the app — the *analysis* that decides what to do, and
+ * the stages that are neither a repair nor an absolute target (the glue, the
+ * analogue warmth, the harmonic synthesisers).
+ *
+ * Three absolute constants were found this way, all of the same kind — a number
+ * that only makes sense for a file at full scale, sitting in the middle of a
+ * statistic that is supposed to describe the waveform:
+ *
+ *   · the inter-sample peak walk only visited samples above an absolute 0.5, so
+ *     a file 20 dB down reported "no inter-sample peak" (−240 dB) and the
+ *     analyser handed the sample peak on as the true peak;
+ *   · the flat-top detector's tolerance was an absolute 0.0025, so a quieter
+ *     copy of the *same* recording looked like a *more* clipped one — the
+ *     samples differ by 20 dB less, runs survive the tolerance longer, and the
+ *     implied overshoot (and with it the de-clip dose) followed the upload's
+ *     volume;
+ *   · the spectrum's floor was an absolute −120 dBFS, which clamped a quiet
+ *     file's top octave 20 dB early: the measured codec cliff of one fixture
+ *     moved 1 740 Hz and shrank from 18.5 dB to 13.4 dB between the two levels;
+ *   · the exciter's noise reference was capped at an absolute 0.02, which only
+ *     bites on a loud file: the same dose generated 44 dB less harmonic content
+ *     on a quiet copy of the vinyl fixture.
+ *
+ * The synthesis stages earn the same rule, with one documented exception: the
+ * true-peak limiter holds the export to an *absolute* ceiling (−1/−2 dBTP), and
+ * a limiter that followed the fader would be a broken limiter. Everything with
+ * a threshold that is a matter of taste reads `refDb` — the file's own peak —
+ * so the same slider means the same thing on a quiet transfer and a loud
+ * master. At full scale `refLin` is 1 and the thresholds are the numbers they
+ * always were.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+H.section('engine · the analysis and the synthesis do not depend on the level');
+{
+  const K = 0.1;                                        // −20 dB
+  const FIX = {
+    lowbitrate: H.lowBitrateSim(RSDSP, SR, 8),
+    vinyl: H.vinylSim(RSDSP, SR, 8),
+  };
+  /* Metrics that *are* a level: they must move by exactly 20 dB. Everything
+   * else has to be bit-identical. */
+  const LEVELS = ['peakDb', 'loudness', 'noiseFloorDb', 'hfNoiseFloorDb', 'musicLevelDb',
+    'hissRefDb', 'ispDb', 'dcOffsetDb', 'clipLevelDb', 'deriveDb'];
+  const drift = [];
+  for (const tag of Object.keys(FIX)) {
+    const loudSig = FIX[tag], quietSig = Float32Array.from(loudSig, (x) => x * K);
+    const a = RSDSP.measure([loudSig], SR), b = RSDSP.measure([quietSig], SR);
+    for (const k of Object.keys(a)) {
+      const x = a[k], y = b[k];
+      if (typeof x !== 'number' || typeof y !== 'number' || !isFinite(x) || !isFinite(y)) continue;
+      const want = LEVELS.indexOf(k) >= 0 ? x - 20 : x;
+      if (Math.abs(y - want) > 0.02) drift.push(tag + '.' + k + ' ' + x.toFixed(2) + '→' + y.toFixed(2));
+    }
+  }
+  H.ok(drift.length === 0, 'the analysis reads the same file at any level',
+    drift.slice(0, 3).join(', ') || Object.keys(FIX).length + ' fixtures, every metric');
+
+  const OFF = Object.assign({}, H.DEFAULT_PARAMS, {
+    power: 1, autoLevel: 1, tpCeil: 0, declip: 0, declick: 0, dehiss: 0, reso: 0,
+    hum: 0, hum2: 0, hum3: 0, sub: 0, exciter: 0, air: 0, glue: 0, warmth: 0, tilt: 0,
+    width: 0, deess: 0, infraHP: 0, bassMono: 0, boxG1: 0, boxG2: 0,
+    band0: 0, band1: 0, band2: 0, band3: 0, band4: 0, band5: 0,
+    eq0: 0, eq1: 0, eq2: 0, eq3: 0, eq4: 0, eq5: 0, eq6: 0, eq7: 0, eq8: 0, eq9: 0, eq10: 0, eq11: 0,
+  });
+  /* …and the file's own peak is a property of the *file*, like the noise floor:
+   * it has to follow the level, or a stage that reads it would be measuring the
+   * upload instead of the recording. */
+  const PER_FILE = ['noiseFloor', 'hissFloor', 'declipLevel', 'refDb'];
+  const worst = {};
+  for (const tag of Object.keys(FIX)) {
+    const loudSig = FIX[tag], quietSig = Float32Array.from(loudSig, (x) => x * K);
+    const A = RP.buildParams('auto', RSDSP.measure([loudSig], SR), 0.7);
+    const B = RP.buildParams('auto', RSDSP.measure([quietSig], SR), 0.7);
+    const refL = Object.assign({}, OFF), refQ = Object.assign({}, OFF);
+    for (const k of PER_FILE) { refL[k] = A[k]; refQ[k] = B[k]; }
+    for (const st of ['glue', 'warmth', 'exciter', 'air', 'band5']) {
+      if (!(A[st] > 0)) continue;
+      const oL = H.render(Processor, [loudSig], Object.assign({}, refL, { [st]: A[st] }))[0];
+      const oQ = H.render(Processor, [quietSig], Object.assign({}, refQ, { [st]: B[st] }))[0];
+      let e = 0, rr = 0;
+      for (let i = 0; i < oL.length; i++) { const d = oL[i] - oQ[i] / K; e += d * d; rr += oL[i] * oL[i]; }
+      const r = 10 * Math.log10(e / rr);
+      const key = tag + ' ' + st;
+      if (worst[st] === undefined || r > worst[st][1]) worst[st] = [key, r];
+    }
+  }
+  const bad = Object.keys(worst).filter((st) => worst[st][1] > -50);
+  H.ok(Object.keys(worst).length >= 3 && bad.length === 0,
+    'the stages that are neither a repair nor a target mean the same thing at any level',
+    bad.length ? bad.map((st) => worst[st][0] + ' ' + worst[st][1].toFixed(1) + ' dB').join(', ')
+      : Object.keys(worst).map((st) => st + ' ' + worst[st][1].toFixed(0)).join(' dB, ') + ' dB');
+
+  /* …and the one exception is documented as an exception: the limiter holds an
+   * absolute ceiling, so the same file 20 dB down comes out 20 dB down. */
+  const loudSig = FIX.lowbitrate, quietSig = Float32Array.from(loudSig, (x) => x * K);
+  const target = Object.assign({}, OFF, { tpCeil: -1, refDb: 0, noiseFloor: -80, hissFloor: -90 });
+  const pL = RSDSP.measure([H.render(Processor, [loudSig], target)[0]], SR);
+  const pQ = RSDSP.measure([H.render(Processor, [quietSig], target)[0]], SR);
+  H.ok(Math.abs((pQ.peakDb + 20) - pL.peakDb) < 0.5 || pQ.peakDb < -20,
+    'the true-peak ceiling is the one target that *does* depend on the absolute level',
+    'peak ' + pL.peakDb.toFixed(1) + ' vs ' + pQ.peakDb.toFixed(1) + ' dBFS');
+}
+
 H.section('engine · dynamic de-resonator');
 {
   // A room rings: every drum hit excites a resonance that decays over ~60 ms.

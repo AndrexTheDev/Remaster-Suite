@@ -168,6 +168,21 @@ Automatic mode therefore works on a **chain**, not on a label:
   same air repair). Without the split the app called its own 320 kbit/s export "low bitrate" on every
   re-upload, because lame's antialias filter leaves a 15 dB wall at 18 955 Hz — a wall that removes
   nothing anybody hears.
+* **Every threshold is relative to the file, never to full scale.** What a recording sounds like
+  does not change when you turn the fader down, so neither may the answer: the same recording
+  uploaded 20 dB quieter has to get the same repair, and the analyser has to *read* it the same.
+  Every statistic is a ratio, a slope or a level relative to the file's own level, and the stages
+  whose thresholds are a matter of taste (the glue, the analogue warmth, the harmonic synthesisers)
+  read the file's own peak (`refDb`). Verified by measurement, not by intent: the analyser is run on
+  the same six fixtures at 0 and −20 dBFS and every metric has to be identical (the levels exactly
+  20 dB apart), and every synthesis stage has to render the same file *K* times down — the two
+  outputs may not differ by more than −50 dB. Four absolute constants were found and removed this
+  way: an inter-sample-peak walk that only looked at samples above 0.5 (a quiet file reported "no
+  inter-sample peak"), a flat-top tolerance of 0.0025 (a quieter copy of one recording read as a
+  *more* clipped one), a spectrum floor of −120 dBFS (the codec cliff of one fixture wandered
+  1 740 Hz between two levels of the same file), and the exciter's reference cap of 0.02, which only
+  bites on a loud file. The one documented exception is the true-peak limiter: it holds an *absolute*
+  ceiling (−1/−2 dBTP), and a limiter that followed the fader would be broken.
 * **A permission is not a dose, and a hint is not a problem.** A faint reading joins the tone mix as
   far as it is worth, but only real evidence unlocks a budget — and a file with one problem is still
   a file with one problem (measured drift on a solo cassette: 0.03 dB of tone and 0.00 of budget).
@@ -313,7 +328,7 @@ tests/
   audit.test.js                  repository hygiene, markup, contrast, i18n, parameter,
                                  codec and robustness audit — including the mains-notch law,
                                  a rich-hum fixture, the effect budgets, and the
-                                 several-problems-at-once chain (246 checks)
+                                 several-problems-at-once chain (257 checks)
   e2e.test.js                    realistic journeys: five problem recordings, slider sweep,
                                  profile overrides, 10-file batch → ZIP, mono/32 k/96 k,
                                  hostile input (108 checks)

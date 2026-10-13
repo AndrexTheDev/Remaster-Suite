@@ -4,6 +4,45 @@ All notable changes to the Remaster Suite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are the ones shown in
 *About & credits*.
 
+## [Unreleased]
+
+**The level release.** The suite promised that a quieter upload gets the same repair — and the
+repairs did, but the rest of the app did not. Four absolute constants sat in the analysis (an
+inter-sample-peak gate, a flat-top tolerance, a spectrum floor, a synthesizer reference cap) and two
+thresholds sat in the tone stages (the glue's and the warmth's), all of them written for a file at
+full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
+else may move.
+
+### Fixed
+
+* **The inter-sample peak was invisible below full scale.** The oversampling walk visited samples
+  above an absolute 0.5, so a file 20 dB down reported −240 dB — "no inter-sample peak" — and the
+  analyser handed the sample peak on as the true peak. The gate is now relative to the file's own
+  peak; at full scale it is the same 0.5 it always was.
+* **The flat-top detector read a quieter copy as a *more* clipped one.** The tolerance for "these
+  samples are equal" was an absolute 0.0025, so a file 20 dB down had 20 dB more room for runs to
+  survive it: run lengths, the median run, the implied overshoot and the de-clip dose all followed
+  the upload's volume. Tolerance and silence gate are now relative to the file's peak.
+* **The spectrum floor was an absolute −120 dBFS.** On a quiet file that clamps the top octave 20 dB
+  early — measured on one fixture, the codec cliff moved from 17 402 Hz to 15 662 Hz and shrank from
+  18.5 dB to 13.4 dB. The floor is now that much below the file's own peak, which is the same number
+  for a master that reaches full scale.
+* **The exciter's and the air synthesiser's noise reference cap (0.02) bit only on loud files.**
+  Measured on the vinyl fixture, the reference came out 0.0214 at full scale and 0.002 14 at
+  −20 dBFS, so the programme gate sat at a different level *relative to the music* and the same dose
+  generated 44 dB less harmonic content. The cap scales with the file's peak.
+
+### Added
+
+* **`refDb` — the file's own peak, as a parameter.** The glue's threshold (−22 dBFS *at that peak*)
+  and the warmth's drive read it; at full scale both are exactly the numbers they were. Measured
+  before: with the fixed threshold the compressor did nothing at all on a file 20 dB down (effect
+  −45.8 dB at 0 dBFS, none at −20 dBFS) and the warmth produced 30 dB fewer harmonics.
+* **A permanent invariance test** (`tests/dsp.test.js`, *the analysis and the synthesis do not depend
+  on the level*): two fixtures measured at 0 and −20 dBFS have to produce identical metrics with the
+  levels exactly 20 dB apart, and every synthesis stage has to render the same file in both
+  directions — with the true-peak limiter asserted as the documented exception.
+
 ## [1.6.0] — 2026-10-12
 
 **The combination release.** The suite always dosed every stage from a measurement, but it still

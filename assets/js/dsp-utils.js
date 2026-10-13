@@ -90,13 +90,19 @@
     const frameRms = [];
     const re = new Float32Array(n), im = new Float32Array(n);
     let frames = 0;
+    let peak = 0;          // loudest sample actually analysed (see the floor below)
     const st = stepRange('spectrum', count, count * 610000, (from, to) => {
       for (let idx = from; idx < to && idx < count; idx++) {
         const off = offsets[idx] * o.hop;
         re.fill(0); im.fill(0);
         for (let c = 0; c < nCh; c++) {
           const s = channels[c];
-          for (let i = 0; i < n; i++) re[i] += (s[off + i] || 0) * win[i];
+          for (let i = 0; i < n; i++) {
+            const x = s[off + i] || 0;
+            re[i] += x * win[i];
+            const a = x < 0 ? -x : x;
+            if (a > peak) peak = a;
+          }
         }
         // frame loudness (mono sum)
         let ms = 0;
@@ -123,9 +129,19 @@
         const norm = 2 / (winSum * nCh);
         const out = new Float32Array(half + 1);
         const freq = new Float32Array(half + 1);
+        // The floor is a depth *below this file's own peak*, not an absolute
+        // −120 dBFS. An absolute floor clamps the whole spectrum of a quiet
+        // file 20 dB early: bins that sat at −105 dBFS land on the floor, the
+        // measured shape changes, and every number derived from the shape moves
+        // with it — measured on one fixture, the codec cliff wandered 1 740 Hz
+        // and shrank from 18.5 dB to 13.4 dB when the same file was measured
+        // 20 dB down (scratch/analysis-scale.js). For a file that reaches full
+        // scale the two floors are the same number, so nothing about a normal
+        // master changes.
+        const selfFloor = (peak > 1e-6 ? db(peak) : 0) + o.dbFloor;
         for (let k = 0; k <= half; k++) {
           const amp = Math.sqrt(acc[k] / Math.max(1, frames)) * norm;
-          out[k] = Math.max(o.dbFloor, db(amp));
+          out[k] = Math.max(selfFloor, db(amp));
           freq[k] = k * sr / n;
         }
         frameRms.sort((a, b) => a - b);
@@ -577,6 +593,19 @@
       flatRatio: 0, levelDb: -120, runCount: 0, runMedian: 0, overshootDb: 0, maxRun: 0, evidence: 0,
     }) });
     if (!nCh || !len) return idle();
+    // A flat top is a run of samples that are equal *to the file's own
+    // resolution*, so both the tolerance and the silence gate are relative to
+    // this file's peak — 0.25 % of it (≈ −52 dBc) is the same 0.0025 that used
+    // to be absolute, for a file that reaches full scale. Absolute, the
+    // detector reads a quieter copy of one recording as a *more* clipped one:
+    // consecutive samples differ by 20 dB less, so runs survive TOL longer and
+    // the run statistics, the implied overshoot and the de-clip dose all follow
+    // the upload's volume instead of the waveform (scratch/analysis-scale.js).
+    let pk = 0;
+    for (let c = 0; c < nCh; c++) {
+      const ch = channels[c];
+      for (let i = 0; i < ch.length; i++) { const a = ch[i] < 0 ? -ch[i] : ch[i]; if (a > pk) pk = a; }
+    }
     // 0.25 dB per bucket, 0 dBFS downwards: the top occupied bucket is the peak
     const NB = 256, BIN = 0.25, GATE = 1.4;              // 1.4 buckets = 0.35 dB
     const count = new Int32Array(NB);
@@ -586,7 +615,8 @@
     const impSum = new Float64Array(NB);
     const impN = new Int32Array(NB);
     let total = 0;
-    const TOL = 0.0025;
+    const TOL = 0.0025 * pk;
+    const SIL = 1e-5 * pk;
     for (let c = 0; c < nCh; c++) {
       const ch = channels[c];
       const st = { prev: 0, armed: false, len: 0, mag: 0, sign: 1, pos: 0,
@@ -633,7 +663,7 @@
         }
         st.prev = x;
         const ax = x < 0 ? -x : x;
-        if (ax > 1e-5) {
+        if (ax > SIL) {
           if (st.armed && x * st.sign > 0 && Math.abs(ax - st.mag) <= TOL) {
             st.len++;
             st.mag = ax;
@@ -1549,6 +1579,19 @@
     const starts = [];
     let total = 0;
     for (const ch of channels) { starts.push(total); total += ch.length; }
+    // The oversampling walk only has to visit samples near the peak — an
+    // inter-sample maximum can add a fraction of a dB over the sample it sits
+    // between, never 20 — but "near the peak" has to mean *this file's* peak.
+    // The absolute 0.5 that used to sit here is a full-scale-only gate: on the
+    // same file 20 dB down the inter-sample peak came back as "nothing" (−240
+    // dB) and the analyser reported the sample peak as the true peak. A
+    // statistic that cannot see a change is not a measurement.
+    let pk = 0;
+    for (let c = 0; c < channels.length; c++) {
+      const ch = channels[c];
+      for (let i = 0; i < ch.length; i++) { const a = ch[i] < 0 ? -ch[i] : ch[i]; if (a > pk) pk = a; }
+    }
+    const gate = pk * 0.5;
     const tap = (t) => {
       if (t === 0) return 1;
       const p = Math.PI * t;
@@ -1564,7 +1607,7 @@
         const b = Math.min(len - 3, Math.min(to, starts[c] + len) - starts[c]);
         for (let i = a; i < b; i++) {
           const cand = ch[i];
-          if (cand < 0.5 && cand > -0.5) continue;
+          if (cand < gate && cand > -gate) continue;
           for (let d = 1; d <= 3; d++) {
             const f = d / 4;
             let v = 0;
