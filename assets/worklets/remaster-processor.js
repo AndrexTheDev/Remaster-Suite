@@ -1337,6 +1337,15 @@ class DeClicker {
     // envelope, seeded from the first sample so the first second is right).
     this.ref = 0;
     this.refRate = 1 - Math.exp(-1 / (sr * 1.0));
+    // The detector's own warm-up, in samples (see tick). Both envelopes start
+    // at zero, so their *ratio* starts at infinity and the detector would call
+    // the first samples of every file a click; and even seeded, the fast
+    // envelope's 0.6 ms attack against the slow one's 4 ms attack holds the
+    // ratio above the threshold for the first ten milliseconds. So the stage
+    // *listens* for its first samples and repairs nothing in them.
+    this.warm = Math.max(32, Math.round(sr * 0.00133));
+    this.warmLeft = this.warm;
+    this.seedMax = 0;
   }
   reset() {
     this.dp1.reset(); this.dp2.reset(); this.pred.reset(); this.pred2.reset();
@@ -1344,6 +1353,8 @@ class DeClicker {
     this.ring.fill(0); this.plan.fill(0); this.mark.fill(0);
     this.w = 0; this.inp = 0; this.dryOut = 0; this.prevIn = 0;
     this.ref = 0;
+    this.warmLeft = this.warm;
+    this.seedMax = 0;
   }
   /** How much of the sample `o` samples away from a click is repaired. */
   shape(o) {
@@ -1364,6 +1375,32 @@ class DeClicker {
     // the slow one, while musical transients raise both together
     const ratio = f / (s + 1e-9);
     let k = clamp((ratio - 1.25) / 1.5, 0, 1);
+    /* ── the detector's own warm-up ─────────────────────────────────────────
+     * A ratio of two envelopes that are both on their way up from zero is not
+     * the ratio of this statistic, and this is where it showed: at the first
+     * sample `f / (s + 1e-9)` is 1e9, the detector called it a click, and the
+     * repair replaced the head of the file with the low-pass prediction of a
+     * signal that had not arrived yet — which is silence. The two feed each
+     * other (`this.inp` is fed from the *repaired* output) and the file lost
+     * its first ~256 samples: measured on a plain pink bed, the chain's output
+     * was exactly 0.000 for the first 256 samples, and only the dry/wet
+     * crossfade of the master power kept that from being heard — which is
+     * itself the head-of-render bug this warm-up was found beside. Seeding the
+     * envelopes from the first residual is not enough: the fast envelope's
+     * 0.6 ms attack against the slow one's 4 ms holds the ratio at 3–8 for the
+     * next ten milliseconds (measured), i.e. a pop-sized confidence on quiet
+     * music. So the first 1.3 ms is spent *listening*: the largest residual in
+     * that window – by then the 4 kHz filters have long settled – becomes the
+     * starting point of both envelopes, and the ratio starts at 1 where the
+     * file's own HF activity sits. A pop after that window is still a spike
+     * against that seed, and the cost is stated: an event inside the first
+     * 1.3 ms is not repaired. */
+    if (this.warmLeft > 0) {
+      this.warmLeft--;
+      if (ad > this.seedMax) this.seedMax = ad;
+      if (this.warmLeft === 0) { this.fast.v = this.seedMax; this.slow.v = this.seedMax; this.ref = this.seedMax; }
+      k = 0;
+    }
     // How sure the detector is that there was anything *there* to repair. This
     // gate has to be relative to the file, not to a fixed number: a transfer
     // digitised at −24 dBFS is the same record as one at −3, and an absolute
@@ -2297,6 +2334,7 @@ class RemasterProcessor extends AudioWorkletProcessor {
     this.sideLP = new Biquad();
     this.sideLP.setLowpass(this.sr, 120, 0.707);
     this.powerSm = 0;
+    this.powerInit = false;      // the first block adopts the target (see process)
     this.forceBypass = !!opts.bypass;
     this._ensureChannels(opts.channels || 2);
     this.port.onmessage = (ev) => {
@@ -2306,6 +2344,7 @@ class RemasterProcessor extends AudioWorkletProcessor {
         this.sideHP.reset();
         this.sideLP.reset();
         this.powerSm = 0;
+        this.powerInit = false;
       }
     };
   }
@@ -2393,9 +2432,21 @@ class RemasterProcessor extends AudioWorkletProcessor {
     const targetPower = (this.forceBypass || pr.bypass > 0.5) ? 0 : clamp(pr.power, 0, 1);
 
     // block-rate smoothing of the master power (≈18 ms) → click-free A/B and
-    // click-free slider moves; computed once per block so stereo stays coherent
+    // click-free slider moves; computed once per block so stereo stays coherent.
+    //
+    // The *first* block adopts the target instead of ramping to it. Starting the
+    // smoother at zero meant every fresh render — playback and, worse, the
+    // export — began as a dry/wet crossfade and was only fully processed after
+    // ~50 ms, so the head of the file kept a quarter to a third of whatever the
+    // chain had just repaired. Measured on the toolkit's worn fixture, the pop at
+    // sample 193 (4 ms in) came out of the de-clicker at exactly 0.000 — the
+    // detector had it at k = 1.000 — and the rendered file still carried 25 % of
+    // its 1.30 spike, with 35 % left of the pop at sample 852. Both are inside
+    // the ramp. The smoothing exists for a *change* of the knob, and a render
+    // that starts at the requested setting has not changed anything.
     const pc = Math.exp(-frames / (this.sr * 0.018));
-    this.powerSm = targetPower + pc * (this.powerSm - targetPower);
+    this.powerSm = this.powerInit ? targetPower + pc * (this.powerSm - targetPower) : targetPower;
+    this.powerInit = true;
     const pw = this.powerSm;
 
     const autoLevel = pr.autoLevel > 0.5 && pw > 0.001;

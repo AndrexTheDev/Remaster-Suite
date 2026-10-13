@@ -861,6 +861,50 @@ section('audit · presets and parameters');
     ok(idxAfter < 0.3, '…and the statistic the diagnosis acts on says so',
       'crackleIndex ' + fmt(m2.crackleIndex) + ' → ' + fmt(idxAfter));
   }
+  /* …and the repair has to hold wherever the pop sits in the file. It did not:
+   * the master-power smoother started at zero and ramped to its target over
+   * ~18 ms, so the first ~50 ms of every render — and of every *export* — was a
+   * dry/wet crossfade and kept a quarter to a third of what the chain had just
+   * repaired. Measured on the worn fixture, the pop at sample 193 (4 ms in) left
+   * the de-clicker at exactly 0.000 with the detector at k = 1.000, and the
+   * rendered file still carried 25 % of its 1.30 spike. The smoother exists for
+   * a *change* of the knob; a render that starts at the requested setting has
+   * not changed anything, so its first block adopts the target. Two identical
+   * pops, one in the first 5 ms and one four seconds in, are the test.
+   *
+   * Underneath it sat a second one, in the de-clicker itself: both envelopes of
+   * its detector start at zero, so their ratio starts at infinity and the first
+   * samples of every file were "clicks" — the repair replaced them with the
+   * low-pass prediction of a signal that had not arrived yet, i.e. silence, and
+   * the chain emitted exact zeros for its first 256 samples. The stage now
+   * spends its first 1.3 ms listening (see the worklet) and seeds its statistic
+   * from what it hears there. Both pops here come out *below* the bed's own
+   * 7 kHz level; the head one is the check on the whole story.
+   */
+  {
+    const SEC3 = 6;
+    const flat = H.normalize(H.filter(DSP, H.pink(48000, SEC3, 0.35, 77), 48000, 'lp', 9000, 0.55), 0.25);
+    const pops = [200, 4 * 48000];
+    const withPops = Float32Array.from(flat);
+    for (const p of pops) { withPops[p] += 0.9; withPops[p + 1] += 0.9 * 0.55; }
+    const r3 = H.renderEx(H.loadProcessor(48000), [withPops], Object.assign({}, H.DEFAULT_PARAMS, { declick: 0.71 }));
+    const w3 = 2 * Math.PI * 7000 / 48000, c3 = Math.cos(w3), s3 = Math.sin(w3), a3 = s3 / (2 * 0.9), n3 = 1 + a3;
+    const bp3 = [a3 / n3, 0, -a3 / n3, -2 * c3 / n3, (1 - a3) / n3];
+    const lvl3 = (sig, at, lat) => {
+      const b = DSP.applyBiquad(sig.subarray(lat || 0), bp3);
+      let e = 0, n = 0;
+      for (let k = -16; k <= 48; k++) { const j = at + k; if (j >= 0 && j < b.length) { e += b[j] * b[j]; n++; } }
+      return 20 * Math.log10(Math.sqrt(e / Math.max(n, 1)) + 1e-12);
+    };
+    const excessIn = (p) => lvl3(withPops, p, 0) - lvl3(flat, p, 0);
+    const excessOut = (p) => lvl3(r3.out[0], p, r3.latency) - lvl3(flat, p, 0);
+    const f3 = (v) => v.toFixed(1);
+    ok(Math.min(excessIn(pops[0]), excessIn(pops[1])) > 8, 'both test pops are loud against the bed',
+      f3(excessIn(pops[0])) + ' / ' + f3(excessIn(pops[1])) + ' dB over it');
+    ok(excessOut(pops[0]) < 0 && excessOut(pops[1]) < 0,
+      'a pop in the first 5 ms is repaired like one four seconds in',
+      f3(excessOut(pops[0])) + ' vs ' + f3(excessOut(pops[1])) + ' dB over the bed left');
+  }
   ok(Presets.buildParams('auto', stereoM, 0.8).width > 0.05,
     'a narrow stereo image asks for width', Presets.buildParams('auto', stereoM, 0.8).width.toFixed(2));
   ok(Presets.buildParams('auto', DSP.measure([sims.garage, sims.garage], 48000), 0.8).width === 0,

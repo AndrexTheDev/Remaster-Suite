@@ -32,6 +32,25 @@ else may move.
   −20 dBFS, so the programme gate sat at a different level *relative to the music* and the same dose
   generated 44 dB less harmonic content. The cap scales with the file's peak.
 
+* **Every render began with a quarter of the unprocessed signal in it.** The master-power
+  smoother started at zero and ramped to its target over ~18 ms, so the first ~50 ms of every
+  render — and of every *export* — was a dry/wet crossfade, and it carried a quarter to a third
+  of whatever the chain had just repaired. Measured on the worn-record fixture, the de-clicker
+  took the pop at sample 193 (4 ms in) out completely (detector at k = 1.000, output 0.000) and
+  the rendered file still had 25 % of its 1.30 spike in it, which is why the app's own 320 kbit/s
+  export was still diagnosed `crackle` on a re-upload. The smoother exists for a *change* of the
+  knob: the first block now adopts the target, and the re-upload card of that recording reads
+  `hiss, codec` instead of `crackle, hiss, codec`.
+* **The de-clicker swallowed the first five milliseconds of every file.** Both envelopes of its
+  detector start at zero, so at the first sample `fast / (slow + 1e-9)` is 1e9 — the detector
+  called it a click, and the repair replaced the head of the file with the low-pass prediction
+  of a signal that had not arrived yet, which is silence. The two feed each other (`inp` comes
+  from the *repaired* output), so on a plain pink bed the chain's output was exactly 0.000 for
+  its first 256 samples. Seeding the envelopes from the first residual is not enough — the fast
+  envelope's 0.6 ms attack against the slow one's 4 ms holds the ratio at 3–8 for another ten
+  milliseconds — so the stage now spends its first 1.3 ms listening, seeds its statistic from
+  the largest residual in that window, and then has a valid ratio from sample 64 on. An event
+  inside the first 1.3 ms is not repaired; that is the stated cost.
 ### Fixed — the true-peak claim
 
 * **The inter-sample peak was under-read by 0.5 dB on transient material, and the limiter shared the
