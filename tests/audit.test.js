@@ -1227,6 +1227,67 @@ section('audit · the mains notch');
     + num(humM.humScore) + ' → ' + num(humOutM.humScore));
 }
 
+/* The bottom of the record, and the one way this measurement used to go wrong.
+ * The rumble statistic compares the quiet frames' energy below 45 Hz with a
+ * band above them, and it has to be measured with *filters* rather than with the
+ * spectrum of the 43 ms frames: those frames are 23 Hz wide, so their whole
+ * "20-45 Hz band" is one bin, and the bin next to it is the mains line at 50 Hz.
+ * Measured, that decided the answer — on the garage fixture below, whose bed is
+ * high-passed at 150 Hz and therefore has no bottom end at all, that one bin read
+ * 12.5 dB of "infra excess" (the mains line leaking into it), and a plain vinyl
+ * sim with hum and crackle read +3.7 dB. With the filters, the mains notched out
+ * of every band and the ratio taken frame by frame, the same two fixtures read
+ * -26.0 and -14.0 dB, while everything with real below-45 Hz energy reads 7.4 and
+ * up (the acceptance rumble fixture 7.4, the worn fixture with a rumble under it
+ * 15.4, rumble alone 16.6). Both measurements are kept in the analysis and this
+ * test checks both: the reported number has to separate the two populations, and
+ * the 43 ms-frame one has to keep showing the artifact that made it unusable, so
+ * that the reason for the extra pass stays in the code as a measurement rather
+ * than as a comment.
+ */
+section('audit · the bottom of the record');
+{
+  const SR = 48000, SEC = 12;
+  const num = (v) => (typeof v === 'number' && isFinite(v) ? v.toFixed(1) : String(v));
+  const shelf = (x, f, g) => {
+    const w = 2 * Math.PI * f / SR, A = Math.pow(10, g / 40), c = Math.cos(w), sn = Math.sin(w), al = sn / (2 * 0.707);
+    const b0 = A * ((A + 1) - (A - 1) * c + 2 * Math.sqrt(A) * al), b1 = 2 * A * ((A - 1) - (A + 1) * c), b2 = A * ((A + 1) - (A - 1) * c - 2 * Math.sqrt(A) * al);
+    const a0 = (A + 1) + (A - 1) * c + 2 * Math.sqrt(A) * al, a1 = -2 * ((A - 1) + (A + 1) * c), a2 = (A + 1) + (A - 1) * c - 2 * Math.sqrt(A) * al;
+    return DSP.applyBiquad(x, [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0]);
+  };
+  const lp2 = (x, f) => { const w = 2 * Math.PI * f / SR, c = Math.cos(w), sn = Math.sin(w), al = sn / (2 * 0.707), n = 1 + al;
+    return DSP.applyBiquad(x, [(1 - c) / 2 / n, (1 - c) / n, (1 - c) / 2 / n, -2 * c / n, (1 - al) / n]); };
+  const hp2 = (x, f) => { const w = 2 * Math.PI * f / SR, c = Math.cos(w), sn = Math.sin(w), al = sn / (2 * 0.707), n = 1 + al;
+    return DSP.applyBiquad(x, [(1 + c) / 2 / n, -(1 + c) / n, (1 + c) / 2 / n, -2 * c / n, (1 - al) / n]); };
+  let bed = lp2(H.pink(SR, SEC, 0.40, 31), 9000);
+  const env = H.songEnvelope(SR, SEC, 0.30);
+  for (let i = 0; i < bed.length; i++) bed[i] *= env[i];
+  bed = H.normalize(bed, 0.62);
+  const bassy = H.normalize(shelf(bed, 150, 10), 0.62);
+  let rumble = H.normalize(lp2(lp2(H.noise(SR, SEC, 0.12, 7), 35), 35), 0.12);
+  const rattly = H.normalize(H.mix([bed, rumble]), 0.62);
+  const garage = H.garageSim(DSP, SR, SEC);
+  const vinyl = H.vinylSim(DSP, SR, SEC);
+  const look = (sig) => {
+    const m = DSP.measure([sig], SR);
+    const P = Presets.buildParams(Presets.classify(m).id, m, 0.7);
+    return { db: m.infraExcessDb, hz: P.infraHP || 0, frames: m.infraBandsMean };
+  };
+  const clean = [['a flat bed', look(bed)], ['the same bed with a +10 dB shelf below 150 Hz', look(bassy)],
+    ['a garage recording whose bed is high-passed at 150 Hz', look(garage)], ['a plain vinyl sim', look(vinyl)]];
+  ok(clean.every(([, r]) => r.db < 5.5), 'no clean recording is read as a rumble',
+    clean.map(([tag, r]) => tag + ' ' + num(r.db) + ' dB').join(' · '));
+  ok(clean.every(([, r]) => r.hz === 0), '…and none of them asks for the sub-sonic guard',
+    clean.map(([, r]) => num(r.hz)).join(' / ') + ' Hz');
+  const rattle = look(rattly);
+  ok(rattle.db > 8 && rattle.hz > 18, 'while a recording with a rumble under it still arms the guard',
+    num(rattle.db) + ' dB → guard ' + num(rattle.hz) + ' Hz');
+  ok(clean[2][1].frames[0] - clean[2][1].frames[2] > 8 && clean[2][1].db < 0,
+    'the 43 ms frames still show why this needs a measurement of its own',
+    'on the garage recording those bands read ' + num(clean[2][1].frames[0] - clean[2][1].frames[2])
+    + ' dB of "excess" against the reported ' + num(clean[2][1].db) + ' dB');
+}
+
 section('audit · codecs');
 {
   const SR = 48000;

@@ -951,16 +951,53 @@
       // cannot reorder them.
       const pa = new Biquad(), pb = new Biquad();
       pa.setHighpass(sr, 200, 0.707); pb.setHighpass(sr, 200, 0.707);
-      filters.push({ a, b, ma, mb, pa, pb });
+      // ── the bands the bottom of the record is measured in ────────────────
+      // Two poles each way would be enough for a band *energy* — except at the
+      // one place that matters: a 2-pole low pass at 45 Hz is only 2 dB down at
+      // 50 Hz, so the mains line sits inside the "20-45 Hz" band at nearly full
+      // level. Measured, that is not a detail: on a garage fixture that is
+      // high-passed at 150 Hz and has no bottom end at all, the 50 Hz line made
+      // the band read 6.2 dB of "infra excess", and with the line notched out it
+      // reads -16.4 dB. So every band carries a narrow notch (Q 40, −60 dB — 1.2
+      // Hz wide, half a decibel at 45 Hz) on the mains frequency of *both* grids
+      // and on every harmonic of theirs that falls inside the band.
+      // The margin is the point: a 2-pole high pass at 90 Hz passes the 50 Hz
+      // line 10 dB down and a 2-pole low pass at 45 Hz passes it 4 dB down, so
+      // the harmonics that have to go are the ones *outside* the band as well as
+      // inside it. Half an octave of margin either side, and every mains
+      // harmonic that lands in it gets a 1.2 Hz notch.
+      const mkNotches = (f1, f2) => {
+        const out = [];
+        for (const mains of [50, 60]) {
+          for (let h = 1; h * mains <= f2 * 1.5; h++) {
+            const f = h * mains;
+            if (f >= f1 / 1.5) { const n = new Biquad(); n.setNotch(sr, f, 20); out.push(n); }
+          }
+        }
+        return out;
+      };
+      const kk = mkNotches(20, 45), ll = mkNotches(45, 90), rr = mkNotches(90, 203);
+      const ka = new Biquad(), kb = new Biquad();     // 20-45 Hz
+      ka.setHighpass(sr, 20, 0.707); kb.setLowpass(sr, 45, 0.707);
+      const la = new Biquad(), lb = new Biquad();     // 45-90 Hz
+      la.setHighpass(sr, 45, 0.707); lb.setLowpass(sr, 90, 0.707);
+      const ra = new Biquad(), rb = new Biquad();     // 90-203 Hz
+      ra.setHighpass(sr, 90, 0.707); rb.setLowpass(sr, 203, 0.707);
+      filters.push({ a, b, ma, mb, pa, pb, ka, kb, la, lb, ra, rb, kk, ll, rr });
       frames.push({ raw: new Float64Array(total), hf: new Float64Array(total), mid: new Float64Array(total),
-        prog: new Float64Array(total) });
+        prog: new Float64Array(total), low: new Float64Array(total), bass: new Float64Array(total),
+        ref: new Float64Array(total) });
       rings.push({ raw: new Float32Array(fftSize), hf: new Float32Array(fftSize), mid: new Float32Array(fftSize),
-        prog: new Float32Array(fftSize), i: 0, sr: 0, sh: 0, sm: 0, sp: 0 });
+        prog: new Float32Array(fftSize), low: new Float32Array(fftSize), bass: new Float32Array(fftSize),
+        ref: new Float32Array(fftSize), i: 0, sr: 0, sh: 0, sm: 0, sp: 0, sl: 0, sb: 0, sf: 0 });
     }
     const frameRms = new Float32Array(total);
     const hfFrame = new Float32Array(total);
     const midFrame = new Float32Array(total);
     const progFrame = new Float32Array(total);
+    const lowFrame = new Float32Array(total);      // 20-45 Hz
+    const bassFrame = new Float32Array(total);     // 45-90 Hz
+    const refFrame = new Float32Array(total);      // 90-203 Hz
 
     // The filtering pass *is* the frame measurement. It used to keep the whole
     // filtered signal in memory only to read it back three samples at a time —
@@ -974,11 +1011,21 @@
         const hf = f.b.process(f.a.process(v));
         const md = f.mb.process(f.ma.process(v));
         const pg = f.pb.process(f.pa.process(v));
+        let vl = f.kb.process(f.ka.process(v));
+        for (let q = 0; q < f.kk.length; q++) vl = f.kk[q].process(vl);
+        let vb = f.lb.process(f.la.process(v));
+        for (let q = 0; q < f.ll.length; q++) vb = f.ll[q].process(vb);
+        let vf = f.rb.process(f.ra.process(v));
+        for (let q = 0; q < f.rr.length; q++) vf = f.rr[q].process(vf);
         const qr = v * v, qh = hf * hf, qm = md * md, qp = pg * pg;
+        const ql = vl * vl, qb = vb * vb, qf = vf * vf;
         r.sr += qr - r.raw[r.i]; r.raw[r.i] = qr;
         r.sh += qh - r.hf[r.i]; r.hf[r.i] = qh;
         r.sm += qm - r.mid[r.i]; r.mid[r.i] = qm;
         r.sp += qp - r.prog[r.i]; r.prog[r.i] = qp;
+        r.sl += ql - r.low[r.i]; r.low[r.i] = ql;
+        r.sb += qb - r.bass[r.i]; r.bass[r.i] = qb;
+        r.sf += qf - r.ref[r.i]; r.ref[r.i] = qf;
         r.i++;
         if (r.i >= fftSize) r.i = 0;
         const end = i + 1 - fftSize;
@@ -987,21 +1034,26 @@
           if (fr < total) {
             frames[c].raw[fr] = r.sr; frames[c].hf[fr] = r.sh; frames[c].mid[fr] = r.sm;
             frames[c].prog[fr] = r.sp;
+            frames[c].low[fr] = r.sl; frames[c].bass[fr] = r.sb; frames[c].ref[fr] = r.sf;
           }
         }
       });
 
     const stepFrames = stepRange('noise-frames', 1, 60000, () => {
       for (let fr = 0; fr < total; fr++) {
-        let ms = 0, hs = 0, bs = 0, ps = 0;
+        let ms = 0, hs = 0, bs = 0, ps = 0, ls = 0, ks = 0, fs = 0;
         for (let c = 0; c < nCh; c++) {
           ms += frames[c].raw[fr]; hs += frames[c].hf[fr]; bs += frames[c].mid[fr];
-          ps += frames[c].prog[fr];
+          ps += frames[c].prog[fr]; ls += frames[c].low[fr]; ks += frames[c].bass[fr];
+          fs += frames[c].ref[fr];
         }
         frameRms[fr] = Math.sqrt(ms / (fftSize * nCh));
         hfFrame[fr] = Math.sqrt(hs / (fftSize * nCh));
         midFrame[fr] = Math.sqrt(bs / (fftSize * nCh));
         progFrame[fr] = Math.sqrt(ps / (fftSize * nCh));
+        lowFrame[fr] = Math.sqrt(ls / (fftSize * nCh));
+        bassFrame[fr] = Math.sqrt(ks / (fftSize * nCh));
+        refFrame[fr] = Math.sqrt(fs / (fftSize * nCh));
       }
     });
 
@@ -1068,7 +1120,9 @@
       value() {
         const spec = new Float32Array(half + 1);
         const nUsed = Math.max(1, used);
-        for (let k = 0; k <= half; k++) spec[k] = Math.max(acc[k] / nUsed, 1e-20);
+        for (let k = 0; k <= half; k++) {
+          spec[k] = Math.max(acc[k] / nUsed, 1e-20);
+        }
         const bandSum = (f1, f2) => {
           let sum = 0;
           for (let k = 0; k <= half; k++) {
@@ -1162,14 +1216,22 @@
          * sub-bass leaves with the music; turntable rumble (and a desk fan, and
          * a building) is still there when the band stops playing.
          */
-        // The two bands have to be *relatively* the same width and both have to
-        // be summed, not averaged: the noise floor is pink, so its power per
-        // hertz falls with frequency and an average over a narrow low band is
-        // always "above" an average over a wide high one. Equal relative width
-        // plus a sum is what makes the number read ≈0 dB for a clean recording
-        // and turn positive only when something really sits below 45 Hz. The
-        // mains region is left out on purpose — a 50 Hz hum is a notch, not a
-        // reason to take the bottom off the record.
+        // The comparison is between the quietest frames' 20-45 Hz energy and
+        // their 90-203 Hz energy, as *band energies from filters* rather than as
+        // sums of FFT bins. It is deliberately a near reference: a record's
+        // spectrum is only approximately 1/f between the two bands, so every
+        // octave of distance turns the recording's own low-frequency tilt into
+        // "energy below 45 Hz" — measured, a clean full-band bed with an ordinary
+        // +10 dB shelf below 150 Hz reads 12.1 dB of excess against a 311-700 Hz
+        // reference and 4.6 against 90-203. The mains harmonics are outside both
+        // bands, so hum cannot leak into this number at all.
+        //
+        // `infraBandsMean` keeps the same three bands as sums over the 43 ms
+        // frames' spectrum — one bin wide at the bottom, right next to the mains
+        // line. The tests use it to document why the measurement has a life of
+        // its own: on a fixture that is high-passed at 150 Hz and has no bottom
+        // end at all, that number reads 12.5 dB of "excess", and on a plain vinyl
+        // sim with hum it reads -0.6.
         const bandSumArr = (v, f1, f2) => {
           let sum = 0;
           for (let k = 1; k <= half; k++) {
@@ -1178,7 +1240,35 @@
           }
           return 10 * Math.log10(Math.max(sum, 1e-20));
         };
-        const infraExcessDb = bandSumArr(spec, 20, 45) - bandSumArr(spec, 311, 700);
+        const infraBandsMean = [[20, 45], [45, 90], [90, 203], [203, 450]].map(([a2, b2]) => bandSumArr(spec, a2, b2));
+        const quietFrames = [];
+        for (let fr = 0; fr < total; fr++) {
+          if (stats.useAll || progFrame[fr] <= stats.quietLimit) quietFrames.push(fr);
+        }
+        const medOver = (arr) => {
+          if (!quietFrames.length) return 0;
+          const c = quietFrames.map((fr) => arr[fr]).sort((x, y) => x - y);
+          return c[Math.floor(c.length / 2)];
+        };
+        const infraBands = [db(Math.max(medOver(lowFrame), 1e-12)), db(Math.max(medOver(bassFrame), 1e-12)),
+          db(Math.max(medOver(refFrame), 1e-12))];
+        // The excess is the median of the *per-frame* ratio, not the ratio of the
+        // medians: a crackle pop is a two-sample step, which is a broadband
+        // event — it lifts all three bands in the frames it lands in, and those
+        // frames are in the quiet set (measured on the garage fixture, 2.5 pops
+        // a second moved the ratio-of-medians by +6 dB, i.e. straight into the
+        // rumble decision, while the pops themselves are already handled by the
+        // de-clicker). A ratio taken frame by frame sees a pop as "louder
+        // everywhere" and a rumble as "louder only below 45 Hz", which is the
+        // question that is actually being asked.
+        const ratios = [];
+        for (let fr = 0; fr < total; fr++) {
+          if (!(stats.useAll || progFrame[fr] <= stats.quietLimit)) continue;
+          if (!(lowFrame[fr] > 0 && refFrame[fr] > 0)) continue;
+          ratios.push(db(lowFrame[fr]) - db(refFrame[fr]));
+        }
+        ratios.sort((x, y) => x - y);
+        const infraExcessDb = ratios.length ? ratios[Math.floor(ratios.length / 2)] : 0;
         // how much the *noise* floor itself moves between quiet passages: a
         // hiss that pumps is a different repair (slower release) from one that
         // sits still, and a recording whose floor moves a lot cannot be trusted
@@ -1194,7 +1284,7 @@
         return { spec, floorDb, hfFloorDb, midFloorDb, lowFloorDb, noiseSlope, flatness, rumble,
           bbDynDb, hfDynDb, hissDeficitDb, hfFollowDb, hfQuietRmsDb,
           musicTiltDb, hissTiltDb, hissTiltStepDb,
-          noiseBandDb, infraExcessDb, hfQuietSpreadDb,
+          noiseBandDb, infraExcessDb, infraBands, infraBandsMean, hfQuietSpreadDb,
           crackleIndex: 0, crestP98Db: 0, crestGlobalDb: 0, musicDb: db(stats.p98),
           quietLevelDb: db(stats.quietLimit), quietCount: stats.quietCount, total,
           confidence: clamp((frameRange - 5) / 12, 0, 1) * clamp(stats.quietCount / 4, 0, 1),
@@ -1868,7 +1958,9 @@
         stereo: sb.value(),                       // correlation per band + balance
         dc: core.dcOffset(),                      // offset and whether it drifts
         noiseBandDb: na.noiseBandDb || [],        // noise floor per EQ band
-        infraExcessDb: na.infraExcessDb || 0,     // quiet-frame 20–38 Hz vs 90–170 Hz
+        infraExcessDb: na.infraExcessDb || 0,     // quiet-frame 20–45 Hz vs 90–203 Hz
+        infraBands: na.infraBands || null,
+        infraBandsMean: na.infraBandsMean || null,
         noiseSpreadDb: na.hfQuietSpreadDb || 0,   // does the hiss floor pump?
         eqCenters: EQ_CENTERS.slice(),
         // tonal descriptors (dB relative ratios)
@@ -2336,6 +2428,14 @@
       const w = TWO_PI * clamp(f, 5, sr * 0.49) / sr;
       const c = Math.cos(w), s = Math.sin(w), al = s / (2 * (q || 0.707)), a0 = 1 + al;
       this.b0 = al / a0; this.b1 = 0; this.b2 = -al / a0;
+      this.a1 = -2 * c / a0; this.a2 = (1 - al) / a0;
+      return this;
+    }
+    /** RBJ notch: a bell of `−60 dB` at its centre is what the band paths use. */
+    setNotch(sr, f, q) {
+      const w = TWO_PI * clamp(f, 5, sr * 0.49) / sr;
+      const c = Math.cos(w), s = Math.sin(w), al = s / (2 * (q || 0.707)), a0 = 1 + al;
+      this.b0 = 1 / a0; this.b1 = -2 * c / a0; this.b2 = 1 / a0;
       this.a1 = -2 * c / a0; this.a2 = (1 - al) / a0;
       return this;
     }

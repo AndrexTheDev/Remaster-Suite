@@ -586,8 +586,15 @@
     //   · the mains score — a 50/60 Hz line leaks into the band *below* it at
     //     any sane FFT resolution, and a hum is a notch, not a reason to take
     //     the bottom off the record.
+    // The knee sits where the panel in `infraExcessDb` says the two populations
+    // separate. Clean material — a flat bed, the same bed with +6 and +10 dB
+    // shelves below 150 Hz, a plain vinyl sim, the garage sim whose bed is
+    // high-passed at 150 Hz — reads 1.0, 2.2, 3.2, −11.8 and −24.2 dB. Material
+    // with real below-45 Hz energy reads 6.4 (the acceptance rumble fixture),
+    // 15.2 (the worn fixture with a rumble under it) and 16.0 (rumble alone).
+    // The knee therefore opens just above the loudest clean reading.
     const infraDb = clamp(m.infraExcessDb || 0, 0, 26);
-    const infraNeed = smoothstep(9, 20, infraDb) * smoothstep(0.12, 0.45, conf)
+    const infraNeed = smoothstep(4.5, 11, infraDb) * smoothstep(0.12, 0.45, conf)
       * (1 - 0.5 * clamp(m.humScore || 0, 0, 1));
 
     // An out-of-phase bottom: the channels are correlated in the mids but
