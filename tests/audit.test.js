@@ -1309,6 +1309,27 @@ section('audit · the bottom of the record');
     'the 43 ms frames still show why this needs a measurement of its own',
     'on the garage recording those bands read ' + num(clean[2][1].frames[0] - clean[2][1].frames[2])
     + ' dB of "excess" against the reported ' + num(clean[2][1].db) + ' dB');
+  /* …and the same rumble under a record that *humms*, which is not a detail: the
+   * statistic compares the 20-45 Hz band with the 90-203 Hz one, and a mains
+   * line sits in the neighbourhood of both. Measured on these fixtures, the
+   * reference band's own chain passes a *50 Hz* fundamental at -10.6 dB, and the
+   * margin below a band used to be half an octave — which is 60 Hz for that
+   * band, so a 60 Hz grid's line was notched out of it and a 50 Hz grid's walked
+   * in: the same record read +16.6 dB without its hum and +7.6 dB with it, and
+   * on the loop's own recording the card went from "rumble" to "no rumble", so
+   * the chain was asked for a 0 Hz guard and the turntable's bottom end came out
+   * untouched. Both halves of that are asserted here: the hum must not hide the
+   * rumble, and the hum alone must not be read as one. */
+  const hum = (sig) => H.normalize(H.mix([sig, H.tone(50, SR, SEC, 0.030), H.tone(150, SR, SEC, 0.010)]), 0.62);
+  const hummed = look(hum(rattly));
+  const humOnly = look(hum(bed));
+  ok(hummed.db > 8 && Math.abs(hummed.db - rattle.db) < 2.5,
+    'a mains line does not hide the rumble underneath it',
+    'the same record with 50 + 150 Hz reads ' + num(hummed.db) + ' dB against ' + num(rattle.db)
+    + ' without it → guard ' + num(hummed.hz) + ' Hz');
+  ok(humOnly.db < rattle.db - 8 && humOnly.hz < 19,
+    'while a line on its own is not read as a rumble',
+    'a flat bed with the same hum reads ' + num(humOnly.db) + ' dB → guard ' + num(humOnly.hz) + ' Hz');
 }
 
 /* What the de-clicker is *for*: on material with real pops, the pops have to

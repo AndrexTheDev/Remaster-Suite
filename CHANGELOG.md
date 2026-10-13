@@ -31,7 +31,9 @@ else may move.
   upload that carries it reads −12.8 → **+5.8 dB** (18.5 Hz), and the two cases that must not move
   do not: a plain bed still reads +1.5 dB → `infraHP 0`, and the newer-song scenario stays
   healthy → healthy. On the loop's own rumble row the chain now takes the record's bottom end
-  **down 3.6 dB** against its control instead of the 3 dB it appeared to add.
+  **down 3.6 dB** against its control instead of the 3 dB it appeared to add. Two rows in the audit
+  hold both halves of it: the same record with 50 + 150 Hz reads 16.3 dB against 16.5 without it
+  (guard 22.4 Hz), and a flat bed with the same hum reads 5.0 dB → 0 Hz.
 
 ### Fixed — a pop the ratio could not see
 
