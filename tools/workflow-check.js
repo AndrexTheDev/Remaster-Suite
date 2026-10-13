@@ -179,9 +179,9 @@ function run(sc) {
   const humExcess = (sig, lat) => {
     const N = Math.round(SR), x = sig.subarray(lat || 0);
     const segs = Math.floor(x.length / N);
-    if (segs < 3) return 0;
-    const bin = (f) => {
-      const vals = [];
+    if (segs < 3) return { e: 0, fs: -120 };
+    const perSeg = (f) => {
+      const rel = [], rms = [], abs = [];
       for (let s = 0; s < segs; s++) {
         const st = s * N;
         let sum = 0, re = 0, im = 0;
@@ -190,22 +190,37 @@ function run(sc) {
           const w = v * (0.5 - 0.5 * Math.cos(2 * Math.PI * i / N));
           re += w * Math.cos(2 * Math.PI * f * i / SR); im += w * Math.sin(2 * Math.PI * f * i / SR);
         }
-        vals.push((4 * Math.sqrt(re * re + im * im) / N) / Math.sqrt(sum / N));
+        const r = Math.sqrt(sum / N);
+        const a = 4 * Math.sqrt(re * re + im * im) / N;
+        rms.push(r); abs.push(a);
+        rel.push(a / Math.max(r, 1e-9));
       }
-      vals.sort((a, b) => a - b);
-      return 20 * Math.log10(vals[Math.floor(vals.length / 2)]);
+      const pick = (a) => { const c = a.slice().sort((u, v) => u - v); return c[Math.floor(c.length / 2)]; };
+      return { rel: 20 * Math.log10(Math.max(pick(rel), 1e-9)), fs: 20 * Math.log10(Math.max(pick(abs), 1e-12)) };
     };
-    // per line, and the *median* of the per-segment dB — not the mean over
+    const b = {};
+    for (const f of [45, 50, 55, 145, 150, 155]) b[f] = perSeg(f);
+    // per line, and the *median* of the per-segment ratio — not the mean over
     // segments: this fixture's music swings 20 dB with its own envelope, so a
     // mean reports whichever passage happened to be quiet in it. Measured, the
     // same signal read 9.1 dB with a mean and 2.4 dB with the median, and only
-    // the second agrees with the app's own reading of the same export. An
-    // independent meter is only independent if it is *also* not wrong.
-    const e50 = bin(50) - Math.max(bin(45), bin(55));
-    const e150 = bin(150) - Math.max(bin(145), bin(155));
-    return Math.max(e50, e150);
+    // the second agrees with the app's own reading of that export. An independent
+    // meter is only independent if it is also not wrong.
+    const e50 = b[50].rel - Math.max(b[45].rel, b[55].rel);
+    const e150 = b[150].rel - Math.max(b[145].rel, b[155].rel);
+    // …and the *absolute* level of the line travels with it: an excess is only a
+    // hum if there is something there to hear. A modern master's own bass note at
+    // 50 Hz reads a couple of dB of "excess" and is a bass note, not a line — the
+    // level says which, and the source's own value says whether anything was
+    // added.
+    return { e: Math.max(e50, e150), fs: Math.max(b[50].fs, b[150].fs) };
   };
-  row('hum: 50/150 Hz vs ±5 Hz', humExcess(upload), humExcess(re, out.latency), 'dB', humExcess(ctrl));
+  {
+    const hIn = humExcess(upload), hOut = humExcess(re, out.latency), hCtl = humExcess(ctrl);
+    row('hum: 50/150 Hz vs ±5 Hz', hIn.e, hOut.e, 'dB',
+      F(hCtl.e) + ' re-encoded · the line itself sits at ' + F(hIn.fs) + ' dBFS, source '
+      + F(humExcess(source).fs) + ' dBFS');
+  }
   // hiss: ≥4 kHz in the quietest third of the bed
   const F2 = Math.round(SR * 0.02), frames = Math.floor(bed.length / F2), lv = [];
   for (let k = 0; k < frames; k++) lv.push(rms(bed, k * F2, (k + 1) * F2));
