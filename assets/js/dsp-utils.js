@@ -586,6 +586,79 @@
    * a clipped master has 0.02 % (light) to 0.5 %+ (hard) of its samples in flat
    * runs at the peak level, 1–2 dB of peak missing.
    */
+  /* --------------------------------------------------------------------------
+   * Sibilance, measured where it actually happens.
+   *
+   * The existing `sibExcessDb` takes the *median* of the 5–9.2 kHz band against
+   * the trend its 2.4–4 kHz region predicts. That is the right question for a
+   * recording whose top end is uniformly too hot, and the wrong one for the way
+   * sibilance really arrives: a singer's "s" occupies 5–15 % of the file, so a
+   * median over the whole song barely moves. Measured on a fixture with 120 ms
+   * "s" bursts 8 dB above the trend, `sibExcessDb` read 1.1 dB — below the 2.5 dB
+   * where the de-esser starts — and the stage never engaged (see
+   * scratch/acceptance.js: the sibilance row was the only defect left unrepaired).
+   *
+   * This walk asks the other question: in the *loudest* moments of the file, how
+   * far above the file's own typical balance does the top end sit? It filters two
+   * bands per 10 ms frame, takes the ratio, and reports how far the p95 of that
+   * ratio stands above its median — gated to frames where the reference band has
+   * real level, so a quiet frame (where both bands are noise) cannot answer.
+   * ----------------------------------------------------------------------- */
+  function sibStep(channels, sr) {
+    const idle = () => ({ step: stepRange('sib', 0, 0, () => {}), value: () => ({ sibPeakDb: 0, sibFrames: 0 }) });
+    if (!channels.length || !channels[0].length) return idle();
+    const F = Math.max(64, Math.round(sr * 0.01));        // 10 ms
+    const nCh = channels.length;
+    const per = channels.map((ch) => Math.floor(ch.length / F));
+    let units = 0;
+    for (const k of per) units += k;
+    const hi = channels.map(() => { const b = new Biquad(); b.setBandpass(sr, 7000, 0.9); return b; });
+    const lo = channels.map(() => { const b = new Biquad(); b.setBandpass(sr, 2600, 0.9); return b; });
+    const ratios = [], refs = [];
+    const step = stepRange('sib', units, units * F * 3, (from, to) => {
+      let base = 0;
+      for (let c = 0; c < nCh; c++) {
+        const end = base + per[c];
+        if (from < end && to > base) {
+          const ch = channels[c];
+          const a = Math.max(from, base) - base;
+          const b = Math.min(to, end) - base;
+          for (let w = a; w < b; w++) {
+            const off = w * F;
+            let he = 0, le = 0;
+            for (let i = off; i < off + F; i++) {
+              const x = ch[i];
+              const h = hi[c].process(x);
+              const l = lo[c].process(x);
+              he += h * h; le += l * l;
+            }
+            const hr = Math.sqrt(he / F), lr = Math.sqrt(le / F);
+            if (lr > 1e-6) { ratios.push(20 * Math.log10(hr / lr)); refs.push(lr); }
+          }
+        }
+        base = end;
+      }
+    });
+    return {
+      step,
+      value() {
+        if (ratios.length < 8) return { sibPeakDb: 0, sibFrames: ratios.length };
+        /* the reference band has to be *doing something*: frames where the voice
+         * is silent say nothing about sibilance, and in them both bands are just
+         * the file's noise floor. Threshold at a quarter of the band's own p75. */
+        const rs = refs.slice().sort((a, b) => a - b);
+        const gate = 0.25 * rs[Math.floor(rs.length * 0.75)];
+        const kept = [];
+        for (let i = 0; i < ratios.length; i++) if (refs[i] > gate) kept.push(ratios[i]);
+        if (kept.length < 8) return { sibPeakDb: 0, sibFrames: kept.length };
+        kept.sort((a, b) => a - b);
+        const p50 = kept[Math.floor(kept.length * 0.5)];
+        const p95 = kept[Math.min(kept.length - 1, Math.floor(kept.length * 0.95))];
+        return { sibPeakDb: Math.max(0, p95 - p50), sibFrames: kept.length };
+      },
+    };
+  }
+
   function flatTopStep(channels, sr) {
     const nCh = channels.length;
     const len = nCh && channels[0] ? channels[0].length : 0;
@@ -867,14 +940,27 @@
       // bands, so what is measured here is what can be subtracted there.
       const ma = new Biquad(), mb = new Biquad();
       ma.setBandpass(sr, HISS_MID_HZ, HISS_MID_Q); mb.setBandpass(sr, HISS_MID_HZ, HISS_MID_Q);
-      filters.push({ a, b, ma, mb });
-      frames.push({ raw: new Float64Array(total), hf: new Float64Array(total), mid: new Float64Array(total) });
+      // …and a fourth follower for the *programme* band. "Which frames carry no
+      // music" must not be asked of the full-band RMS, because a loud stationary
+      // noise owns that number. Measured on a bed with sub-35 Hz rumble at 9 dB
+      // of excess: the 8 % quietest frames by RMS carried 13 dB more programme
+      // than the frames this band picks, and the rumble reading fell from +36 to
+      // +9 dB *exactly as the rumble got louder* — the app stopped seeing the
+      // defect it was looking at. A 200 Hz high-pass is enough: rumble and hum
+      // live below it, hiss lifts every frame by the same amount and therefore
+      // cannot reorder them.
+      const pa = new Biquad(), pb = new Biquad();
+      pa.setHighpass(sr, 200, 0.707); pb.setHighpass(sr, 200, 0.707);
+      filters.push({ a, b, ma, mb, pa, pb });
+      frames.push({ raw: new Float64Array(total), hf: new Float64Array(total), mid: new Float64Array(total),
+        prog: new Float64Array(total) });
       rings.push({ raw: new Float32Array(fftSize), hf: new Float32Array(fftSize), mid: new Float32Array(fftSize),
-        i: 0, sr: 0, sh: 0, sm: 0 });
+        prog: new Float32Array(fftSize), i: 0, sr: 0, sh: 0, sm: 0, sp: 0 });
     }
     const frameRms = new Float32Array(total);
     const hfFrame = new Float32Array(total);
     const midFrame = new Float32Array(total);
+    const progFrame = new Float32Array(total);
 
     // The filtering pass *is* the frame measurement. It used to keep the whole
     // filtered signal in memory only to read it back three samples at a time —
@@ -887,10 +973,12 @@
         const v = ch[i];
         const hf = f.b.process(f.a.process(v));
         const md = f.mb.process(f.ma.process(v));
-        const qr = v * v, qh = hf * hf, qm = md * md;
+        const pg = f.pb.process(f.pa.process(v));
+        const qr = v * v, qh = hf * hf, qm = md * md, qp = pg * pg;
         r.sr += qr - r.raw[r.i]; r.raw[r.i] = qr;
         r.sh += qh - r.hf[r.i]; r.hf[r.i] = qh;
         r.sm += qm - r.mid[r.i]; r.mid[r.i] = qm;
+        r.sp += qp - r.prog[r.i]; r.prog[r.i] = qp;
         r.i++;
         if (r.i >= fftSize) r.i = 0;
         const end = i + 1 - fftSize;
@@ -898,45 +986,54 @@
           const fr = end / hop;
           if (fr < total) {
             frames[c].raw[fr] = r.sr; frames[c].hf[fr] = r.sh; frames[c].mid[fr] = r.sm;
+            frames[c].prog[fr] = r.sp;
           }
         }
       });
 
     const stepFrames = stepRange('noise-frames', 1, 60000, () => {
       for (let fr = 0; fr < total; fr++) {
-        let ms = 0, hs = 0, bs = 0;
+        let ms = 0, hs = 0, bs = 0, ps = 0;
         for (let c = 0; c < nCh; c++) {
           ms += frames[c].raw[fr]; hs += frames[c].hf[fr]; bs += frames[c].mid[fr];
+          ps += frames[c].prog[fr];
         }
         frameRms[fr] = Math.sqrt(ms / (fftSize * nCh));
         hfFrame[fr] = Math.sqrt(hs / (fftSize * nCh));
         midFrame[fr] = Math.sqrt(bs / (fftSize * nCh));
+        progFrame[fr] = Math.sqrt(ps / (fftSize * nCh));
       }
     });
 
     // the distribution is read between the two loops, exactly as before
     const stats = { p02: 0, p05: 0, p20: 0, p50: 0, p70: 0, p90: 0, p98: 0, hfP02: 0, hfP98: 0,
-      quietLimit: 0, quietCount: 0, useAll: true, visit: null };
+      quietLimit: 0, progP70: 0, quietCount: 0, useAll: true, visit: null };
     const stepStats = stepRange('noise-stats', 1, 60000, () => {});
     stepStats.before = () => {
       const sorted = Float32Array.from(frameRms).sort();
       const sortedHf = Float32Array.from(hfFrame).sort();
+      const sortedProg = Float32Array.from(progFrame).sort();
       const pct = (p) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.floor(sorted.length * p)))];
       const pctHf = (p) => sortedHf[Math.min(sortedHf.length - 1, Math.max(0, Math.floor(sortedHf.length * p)))];
+      const pctProg = (p) => sortedProg[Math.min(sortedProg.length - 1, Math.max(0, Math.floor(sortedProg.length * p)))];
       stats.p02 = pct(0.02); stats.p05 = pct(0.05); stats.p20 = pct(0.20); stats.p50 = pct(0.50);
       stats.p90 = pct(0.90); stats.p98 = pct(0.98);
       stats.hfP02 = pctHf(0.02); stats.hfP98 = pctHf(0.98);
       stats.p70 = pct(0.70);
-      stats.quietLimit = Math.max(pct(0.08), 1e-8);
+      // "quiet" is a statement about the programme: the 8 % of frames with the
+      // least in the programme band are the frames without music in them, which
+      // is the only place a noise floor can be read (see the follower above).
+      stats.quietLimit = Math.max(pctProg(0.08), 1e-8);
+      stats.progP70 = pctProg(0.70);
       let quietCount = 0;
-      for (let fr = 0; fr < total; fr++) if (frameRms[fr] <= stats.quietLimit) quietCount++;
+      for (let fr = 0; fr < total; fr++) if (progFrame[fr] <= stats.quietLimit) quietCount++;
       stats.quietCount = quietCount;
       stats.useAll = quietCount < 4;
       // the frames the accumulation below will actually visit (≤ 400) — known
       // up front so the progress bar is weighted by real work, not by the file
       const visit = [];
       for (let fr = 0; fr < total && visit.length < 400; fr++) {
-        if (!stats.useAll && frameRms[fr] > stats.quietLimit) continue;
+        if (!stats.useAll && progFrame[fr] > stats.quietLimit) continue;
         visit.push(fr);
       }
       stats.visit = visit;
@@ -1026,8 +1123,8 @@
         for (let fr = 0; fr < total; fr++) {
           if (!(midFrame[fr] > 1e-9 && hfFrame[fr] > 1e-9)) continue;
           const t = db(hfFrame[fr] / midFrame[fr]);
-          if (frameRms[fr] >= stats.p70) loudT.push(t);
-          else if (frameRms[fr] <= stats.quietLimit) quietT.push(t);
+          if (progFrame[fr] >= stats.progP70) loudT.push(t);
+          else if (progFrame[fr] <= stats.quietLimit) quietT.push(t);
         }
         const med = (arr) => {
           if (!arr.length) return 0;
@@ -1040,7 +1137,7 @@
         // the same quantity the worklet's sliding window produces, so the
         // threshold the repair is gated by is a number both sides agree on.
         const hfQuiet = [];
-        for (let fr = 0; fr < total; fr++) if (frameRms[fr] <= stats.quietLimit) hfQuiet.push(hfFrame[fr]);
+        for (let fr = 0; fr < total; fr++) if (progFrame[fr] <= stats.quietLimit) hfQuiet.push(hfFrame[fr]);
         const hfQuietRmsDb = (stats.useAll || hfQuiet.length < 4) ? db(stats.hfP02 + 1e-12) : db(med(hfQuiet));
         const hissTiltStepDb = (loudT.length >= 3 && quietT.length >= 3)
           ? clamp(hissTiltDb - musicTiltDb, 0, 24) : 0;
@@ -1081,13 +1178,13 @@
           }
           return 10 * Math.log10(Math.max(sum, 1e-20));
         };
-        const infraExcessDb = bandSumArr(spec, 20, 45) - bandSumArr(spec, 120, 270);
+        const infraExcessDb = bandSumArr(spec, 20, 45) - bandSumArr(spec, 311, 700);
         // how much the *noise* floor itself moves between quiet passages: a
         // hiss that pumps is a different repair (slower release) from one that
         // sits still, and a recording whose floor moves a lot cannot be trusted
         // as much (the confidence above already carries part of that)
         const quietHf = [];
-        for (let fr = 0; fr < total; fr++) if (frameRms[fr] <= stats.quietLimit) quietHf.push(hfFrame[fr]);
+        for (let fr = 0; fr < total; fr++) if (progFrame[fr] <= stats.quietLimit) quietHf.push(hfFrame[fr]);
         const quietHfSorted = quietHf.slice().sort((p, q) => p - q);
         const qp = (p) => (quietHfSorted.length ? quietHfSorted[Math.min(quietHfSorted.length - 1, Math.floor(quietHfSorted.length * p))] : 0);
         const hfQuietSpreadDb = quietHfSorted.length >= 8 ? clamp(db(qp(0.90) + 1e-12) - db(qp(0.10) + 1e-12), 0, 40) : 0;
@@ -1685,6 +1782,7 @@
     // percussive the recording is, and how far the reconstructed waveform is
     // likely to leave full scale between the samples.
     const sb = stereoBandsStep(channels, sr);
+    const sib = sibStep(channels, sr);
     const isp = ispStep(channels);
     // the crest reference is a strided walk over the same file: it rides in the
     // final step instead of costing a pass of its own
@@ -1697,7 +1795,7 @@
       }
     });
     const steps = [
-      core.step, sp.step, cor.step, crk.step, flatTop.step, sb.step,
+      core.step, sp.step, cor.step, crk.step, flatTop.step, sb.step, sib.step,
       core.steps[0], core.steps[1], core.steps[2], core.steps[3],
       nt.steps[0], nt.steps[1], nt.steps[2], nt.steps[3], humExact, isp.step, fin,
     ];
@@ -1890,6 +1988,9 @@
        * does not (that is a tilt, and the tilt term handles it).
        */
       m.sibExcessDb = bandMedian(spec, 5000, 9200) - (bandMedian(spec, 2400, 4000) - 3 * Math.log2(7100 / 3200));
+      /* …and the same question asked per frame, which is the only way the answer
+       * is about a singer's "s" and not about the song's average (see sibStep) */
+      m.sibPeakDb = sib.value().sibPeakDb;
       /**
        * Where the hiss begins: the lowest band in which the *music* is less
        * than 14 dB above the measured noise floor. The de-hisser's crossover

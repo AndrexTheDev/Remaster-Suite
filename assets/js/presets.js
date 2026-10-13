@@ -497,8 +497,23 @@
     // Sibilance: the 5–9 kHz band above the trend the file's own mids predict.
     // 2.5 dB is the dead zone (that is an "s" being present), 8 dB is a
     // problem; a de-esser is a *repair*, so it needs evidence, not a hunch.
-    const sibDb = clamp(m.sibExcessDb || 0, 0, 16);
-    const sibNeed = smoothstep(2.5, 8, sibDb);
+    // Sibilance arrives in bursts: a singer's "s" occupies a few percent of the
+    // file, so a statistic averaged over the whole song barely moves for the
+    // defect it is supposed to find. Two measurements answer it now: the old
+    // median-based `sibExcessDb` (the right question for a top end that is
+    // *uniformly* too hot) and `sibPeakDb`, the per-frame scan of how far the
+    // loudest 5–9 kHz moments sit above the file's own typical balance — which
+    // is the right question for intermittent sibilance. Measured: clean
+    // recordings read 0.7–1.0 dB on the scan, a vocal with 120 ms "s" bursts
+    // 8 dB above its trend reads 2.2–4.9. Without it the de-esser never
+    // engaged on such a file (dose 0.00) and the only defect in the acceptance
+    // matrix that went unrepaired was this one.
+    const sibDb = clamp(Math.max(m.sibExcessDb || 0, m.sibPeakDb || 0), 0, 16);
+    // Threshold and slope are its own: the per-frame scan reads 0.7–1.0 dB on a
+    // clean recording and 2.2–4.9 dB on one with real "s" bursts, so the window
+    // starts above the noise and reaches full correction inside the range the
+    // defect actually occupies.
+    const sibNeed = smoothstep(1.4, 4.2, sibDb);
 
     // Sub-sonic rumble, measured where only rumble can be: in the quiet
     // passages. Two guards, because this is the one measurement a *clean*
@@ -978,7 +993,10 @@
     // out what a turntable (or a desk, or a passing lorry) put in without
     // touching the bass above it. A "repair" that reaches into 40 Hz would be
     // taking the record's bottom away, which is the opposite of remastering.
-    a.infraHP = D.infraNeed > 0.02 ? clamp(18 + 12 * D.infraNeed, 0, 30) : 0;
+    // The corner is the knee of a 4-section cascade (see the worklet): it stays
+    // clear of the bass guitar's low E at the top of its range, because the
+    // steepness — not the corner — is what spends the removal.
+    a.infraHP = D.infraNeed > 0.02 ? clamp(18 + 6 * D.infraNeed, 0, 24) : 0;
 
     // 9b · sibilance → the dynamic de-esser amount (up to the cap at full need)
     a.deess = clamp(0.85 * D.sibNeed * D.headroom, 0, 0.85);
