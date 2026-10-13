@@ -13,6 +13,26 @@ thresholds sat in the tone stages (the glue's and the warmth's), all of them wri
 full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
 else may move.
 
+### Fixed — a line that hid the bottom of the record
+
+* **A 50 Hz mains line walked straight into the reference band of the rumble measurement, and a
+  60 Hz one did not.** The statistic compares a quiet passage's 20–45 Hz energy with its 90–203 Hz
+  energy, and it notches every mains harmonic out of both bands — but the margin below a band was
+  half an octave, and half an octave below 90 Hz is 60 Hz. So on a 60 Hz grid the fundamental was
+  notched; on a 50 Hz grid it was not, and it needed to be: the band's own two-pole high pass at
+  90 Hz passes 50 Hz at **−10.6 dB** (measured on the band's own chain: −10.6 dB as shipped, −10.7
+  with no notch at all, −220 dB with one), which is 25 dB above the floor of a quiet passage.
+  Measured on the same record, layer by layer: **+8.5 dB** of infra excess with rumble and hiss,
+  **−12.0 dB** with the hum added, the reference band up 22 dB while the 20–45 Hz band did not move.
+  The consequence was not cosmetic — the wound fixture's crackle-and-rumble record measured −12.8 dB,
+  so the card said "no rumble", the chain was asked for `infraHP 0`, and the turntable's bottom end
+  came out of the chain untouched while the card named hum. The margin below a band never goes under
+  the mains fundamental now: the same fixture reads **+7.0 dB** and asks **19.5 Hz**, the 128 kbit/s
+  upload that carries it reads −12.8 → **+5.8 dB** (18.5 Hz), and the two cases that must not move
+  do not: a plain bed still reads +1.5 dB → `infraHP 0`, and the newer-song scenario stays
+  healthy → healthy. On the loop's own rumble row the chain now takes the record's bottom end
+  **down 3.6 dB** against its control instead of the 3 dB it appeared to add.
+
 ### Fixed — a pop the ratio could not see
 
 * **The de-clicker under-repaired exactly the pops that arrive where the music is loud in the same

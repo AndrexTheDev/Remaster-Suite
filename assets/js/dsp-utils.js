@@ -965,13 +965,26 @@
       // line 10 dB down and a 2-pole low pass at 45 Hz passes it 4 dB down, so
       // the harmonics that have to go are the ones *outside* the band as well as
       // inside it. Half an octave of margin either side, and every mains
-      // harmonic that lands in it gets a 1.2 Hz notch.
+      // harmonic that lands in it gets a notch (Q 20, 2.5 Hz wide at 50 Hz).
+      //
+      // …but half an octave is not a margin against a 2-pole roll-off: half an
+      // octave below 90 Hz is 60 Hz, so the *60 Hz* grid's fundamental was
+      // notched out of the 90-203 Hz reference band and the *50 Hz* grid's was
+      // not — and a 2-pole high pass at 90 Hz passes 50 Hz at only -10.6 dB
+      // (measured on the band's own chain: -10.6 with the shipped notch list,
+      // -10.7 with no notches at all, -220 with a notch at 50). On the workflow
+      // fixture that is not a detail: the same record measured +8.5 dB of
+      // infra excess without its hum and -12.0 dB with it, because the 0.030
+      // line leaked straight into the reference band and lifted it 22 dB while
+      // the 20-45 Hz band did not move. The margin below a band never goes
+      // under the mains fundamental itself.
       const mkNotches = (f1, f2) => {
         const out = [];
+        const lo = Math.min(f1, 50) / 1.5;
         for (const mains of [50, 60]) {
           for (let h = 1; h * mains <= f2 * 1.5; h++) {
             const f = h * mains;
-            if (f >= f1 / 1.5) { const n = new Biquad(); n.setNotch(sr, f, 20); out.push(n); }
+            if (f >= lo) { const n = new Biquad(); n.setNotch(sr, f, 20); out.push(n); }
           }
         }
         return out;

@@ -32,11 +32,22 @@ const rms = (a, from, to) => {
   for (let i = from === undefined ? 0 : from; i < (to === undefined ? a.length : to); i++) { e += a[i] * a[i]; n++; }
   return Math.sqrt(e / Math.max(1, n));
 };
-const goertzel = (sig, f) => {
-  const w = 2 * Math.PI * f / SR;
-  let re = 0, im = 0;
-  for (let i = 0; i < sig.length; i++) { re += sig[i] * Math.cos(w * i); im += sig[i] * Math.sin(w * i); }
-  return 2 * Math.sqrt(re * re + im * im) / sig.length;
+/* A band, through a window, per frame — the shape every row here uses.  A
+ * *single* DFT bin is the one estimate that cannot be used for a noise-like
+ * signal: the bin is one realisation of a noise process, so its variance is
+ * ~100 % and two measurements of the same file differ by decibels. */
+const hann = (N) => { const w = new Float64Array(N); for (let i = 0; i < N; i++) w[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / N); return w; };
+const bandE = (seg, w, f1, f2) => {
+  let e = 0;
+  for (let f = f1; f <= f2; f += 1) {
+    let re = 0, im = 0;
+    for (let i = 0; i < seg.length; i++) {
+      const v = seg[i] * w[i];
+      re += v * Math.cos(2 * Math.PI * f * i / SR); im += v * Math.sin(2 * Math.PI * f * i / SR);
+    }
+    e += re * re + im * im;
+  }
+  return e;
 };
 
 /* ── the material ───────────────────────────────────────────────────────── *
@@ -265,12 +276,33 @@ function run(sc) {
     return 10 * Math.log10(e / Math.max(1, n));
   };
   row('hiss: ≥4 kHz in the quiet', quietHf(upload), quietHf(re, out.latency), 'dBFS', quietHf(ctrl));
-  // rumble: below 35 Hz against the bass band
+  /* rumble: 18-32 Hz against the bass band, as the *median of the per-frame
+   * ratios* of two windowed bands. It used to be three unwindowed single-bin
+   * DFTs (18, 25, 32 Hz) against one at 100 Hz over the whole file, and that
+   * meter cannot carry the row: on this fixture the same signal's 3 s chunks of
+   * that number span 11.3 dB and its half-second frames run from +6.2 to +15.2,
+   * so a 3 dB move between two files is inside the meter's own noise. Measured
+   * both ways on the same pair of files: single bins +3.0 dB, windowed band
+   * medians +1.2 dB, and an independent 2-pole-band RMS ratio (15-45 Hz against
+   * 100 Hz) +0.1 dB — the row was reading its own variance, and part of the
+   * "+3 dB" was the hum repair the card had just done (the 50 Hz line sits in
+   * the 40-60 Hz neighbourhood of the reference). The number is referenced to
+   * the *control* as every other row is, and the frames are printed so the
+   * reading can be judged. */
   const rumbleDb = (sig, lat) => {
-    const x = sig.subarray(lat || 0);
-    return 10 * Math.log10((goertzel(x, 18) ** 2 + goertzel(x, 25) ** 2 + goertzel(x, 32) ** 2) / (goertzel(x, 100) ** 2 + 1e-20));
+    const x = sig.subarray(lat || 0), N = Math.round(SR * 0.5), segs = Math.floor(x.length / N);
+    if (segs < 3) return 0;
+    const w = hann(N), rel = [];
+    for (let s = 0; s < segs; s++) {
+      const seg = x.subarray(s * N, (s + 1) * N);
+      const lo = bandE(seg, w, 17, 33), mid = bandE(seg, w, 95, 105);
+      if (lo > 0 && mid > 0) rel.push(10 * Math.log10(lo / mid));
+    }
+    rel.sort((a, b) => a - b);
+    return rel.length ? rel[Math.floor(rel.length / 2)] : 0;
   };
-  row('rumble: 18–32 Hz vs 100 Hz', rumbleDb(upload), rumbleDb(re, out.latency), 'dB', rumbleDb(ctrl));
+  row('rumble: 18–32 Hz vs 100 Hz', rumbleDb(upload), rumbleDb(re, out.latency), 'dB', rumbleDb(ctrl),
+    'medians of ' + Math.floor(upload.length / Math.round(SR * 0.5)) + ' half-second windowed frames');
   /* The codec's own loss: the decode against the signal that went *into* the
    * encoder (not against the bed — in this band the fixture is mostly hiss, and a
    * row measured against the bed would be reading the de-hisser, not the codec). */
