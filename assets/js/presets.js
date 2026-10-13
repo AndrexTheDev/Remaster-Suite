@@ -557,7 +557,21 @@
     // 8 dB above its trend reads 2.2–4.9. Without it the de-esser never
     // engaged on such a file (dose 0.00) and the only defect in the acceptance
     // matrix that went unrepaired was this one.
-    const sibDb = clamp(Math.max(m.sibExcessDb || 0, m.sibPeakDb || 0), 0, 16);
+    /* …and only the *scan* may arm the stage, because the stage is a burst
+     * detector too: 10 ms windows, 140 ms hold, ducking the 7 kHz band while a
+     * burst lasts. The median statistic cannot arm it — a steady tilt raises the
+     * 5–9 kHz band and the trend above it by the same amount, and the de-esser
+     * has nothing to duck because nothing is a burst. This app's own top-end
+     * shelf is exactly such a steady tilt: a 64 kbit/s file came back from its
+     * own 320 kbit/s export with `sibExcessDb` 0.23 → 1.66 and `sibPeakDb`
+     * 0.95 → 1.06 (the bursts are untouched, as they should be), and under a
+     * manual profile — which lifts the same shelf harder — the export was then
+     * diagnosed `sibilance` and the chain ducked the band it had just lifted:
+     * the de-esser armed by its own tone stage. A *clearly measured* tilt
+     * (≥ 2 dB) may still add to the dose, up to the size of the correction
+     * itself, so a file that is both bursty and uniformly bright is treated
+     * harder; it can never *become* the evidence. */
+    const sibDb = clamp((m.sibPeakDb || 0) + 2 * smoothstep(2, 8, m.sibExcessDb || 0), 0, 16);
     // Threshold and slope are its own: the per-frame scan reads 0.7–1.0 dB on a
     // clean recording and 2.2–4.9 dB on one with real "s" bursts, so the window
     // starts above the noise and reaches full correction inside the range the

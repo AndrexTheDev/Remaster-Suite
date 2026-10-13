@@ -762,6 +762,30 @@ section('audit · presets and parameters');
     Presets.buildParams('auto', DSP.measure([sibilant], 48000), 0.8).deess.toFixed(2));
   ok(Presets.buildParams('auto', DSP.measure([sims.garage], 48000), 0.8).deess < 0.05,
     'a recording with no sibilance does not', Presets.buildParams('auto', DSP.measure([sims.garage], 48000), 0.8).deess.toFixed(2));
+  /* …and the *kind* of evidence matters, not just the amount. A steady tilt of
+   * the 5–9 kHz band is invisible to the burst scan (which is a p95−p50 and
+   * therefore blind to anything that raises the whole band) but very visible to
+   * the median statistic — and the de-esser is a burst detector, so it must stay
+   * shut. This is not hypothetical: the chain's own 7 kHz shelf is exactly such a
+   * tilt, and on a manual profile the app's own export came back diagnosed
+   * `sibilance` (sibExcess 0.23 → 3.68 with the bursts unchanged at 1.06). */
+  {
+    const flat = H.normalize(H.filter(DSP, H.pink(48000, 8, 0.42, 84), 48000, 'hp', 30, 0.707), 0.6);
+    const A = Math.pow(10, 6 / 40), w = 2 * Math.PI * 7000 / 48000, c = Math.cos(w), sn = Math.sin(w), al = sn / (2 * 0.8);
+    const a0 = 1 + al / A;
+    const shelf = DSP.applyBiquad(flat, [(1 + al * A) / a0, -2 * c / a0, (1 - al * A) / a0, -2 * c / a0, (1 - al / A) / a0]);
+    const tilted = H.normalize(shelf, 0.7);
+    const tm = DSP.measure([tilted], 48000);
+    // measured across the sweep: excess −0.17/1.45/2.39/3.60/4.72 dB for a
+    // 0/2.5/4/6/8 dB tilt, burst 0.94/0.91/0.89/0.86/0.83 dB — the scan is
+    // blind to a tilt by construction
+    ok((tm.sibExcessDb || 0) > 3 && (tm.sibPeakDb || 0) < 2,
+      'a steady +6 dB tilt in the "s" band is visible to the median, not to the burst scan',
+      'excess ' + tm.sibExcessDb.toFixed(2) + ' dB, burst ' + tm.sibPeakDb.toFixed(2) + ' dB');
+    ok(Presets.buildParams('auto', tm, 0.7).deess < 0.05,
+      '…and a steady tilt does not arm the de-esser',
+      Presets.buildParams('auto', tm, 0.7).deess.toFixed(3));
+  }
   ok(Presets.buildParams('auto', stereoM, 0.8).width > 0.05,
     'a narrow stereo image asks for width', Presets.buildParams('auto', stereoM, 0.8).width.toFixed(2));
   ok(Presets.buildParams('auto', DSP.measure([sims.garage, sims.garage], 48000), 0.8).width === 0,
