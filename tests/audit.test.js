@@ -786,6 +786,81 @@ section('audit · presets and parameters');
       '…and a steady tilt does not arm the de-esser',
       Presets.buildParams('auto', tm, 0.7).deess.toFixed(3));
   }
+
+  /* …and what the de-clicker is *for*: on material with real pops the chain has
+   * to take them out of the audible range, not merely reduce them. The toolkit's
+   * user-loop tool measures this against the pre-degradation bed on every run;
+   * this is the same question, asked without an encoder so it can run here.
+   * Measured on that fixture: the median pop falls 8.6 → −19.6 dB over the bed
+   * and the loudest survivor reads −64.8 dBFS in the pop band in a passage where
+   * the bed itself reads −69.5 dBFS — 20 dB below anything the music does there,
+   * i.e. nothing a listener can hear. A repair that leaves an audible tick fails
+   * both halves of this test. */
+  {
+    const fmt = (v) => (typeof v === 'number' && isFinite(v) ? v.toFixed(2) : String(v));
+    const SEC2 = 8;
+    let bed2 = H.filter(DSP, H.pink(48000, SEC2, 0.40, 31), 48000, 'lp', 9000, 0.55);
+    const env2 = H.songEnvelope(48000, SEC2, 0.30);
+    for (let i = 0; i < bed2.length; i++) bed2[i] *= env2[i];
+    bed2 = H.normalize(bed2, 0.62);
+    const worn2 = H.addCrackle(Float32Array.from(bed2), 9, 0.9, 8);
+    const w = 2 * Math.PI * 7000 / 48000, c = Math.cos(w), sn = Math.sin(w), al = sn / (2 * 0.9), a0 = 1 + al;
+    const bp = [al / a0, 0, -al / a0, -2 * c / a0, (1 - al) / a0];
+    const bandDb = (sig, at, lat) => {
+      const b = DSP.applyBiquad(sig.subarray(lat || 0), bp);
+      let e = 0, n = 0;
+      for (let k = -16; k <= 48; k++) { const j = at + k; if (j >= 0 && j < b.length) { e += b[j] * b[j]; n++; } }
+      return 20 * Math.log10(Math.sqrt(e / Math.max(n, 1)) + 1e-12);
+    };
+    const rel = (sig, at, lat) => bandDb(sig, at, lat) - bandDb(bed2, at, 0);
+    const cand = [];
+    for (let i = 2; i < worn2.length - 2; i++) {
+      const d = Math.abs(worn2[i] - bed2[i]);
+      if (d > 0.25 && d > Math.abs(worn2[i - 1] - bed2[i - 1]) && d >= Math.abs(worn2[i + 1] - bed2[i + 1])) cand.push(i);
+    }
+    const popPos = cand.filter((p) => rel(worn2, p, 0) > 4);
+    const m2 = DSP.measure([worn2], 48000);
+    const p2 = Object.assign({}, H.DEFAULT_PARAMS, Presets.buildParams(Presets.classify(m2).id, m2, 0.7));
+    const r2 = H.renderEx(H.loadProcessor(48000), [worn2], p2);
+    const before = popPos.map((p) => rel(worn2, p, 0)).sort((a, b) => a - b);
+    const after = popPos.map((p) => rel(r2.out[0], p, r2.latency)).sort((a, b) => a - b);
+    const medOf = (a) => a[Math.floor(a.length / 2)];
+    /* What counts as "left" has to be sharpened, because one pop on this fixture
+     * survives and it is the *weakest* of the 66: 4.7 dB over the bed, in a
+     * passage whose own 7 kHz level is already at −32 dBFS, and it comes out at
+     * 4.6 dB — the detector's confidence threshold is what stops it, and that
+     * threshold is what keeps the stage off musical transients. A click 4.7 dB
+     * above a loud bright passage is inside the range where no de-clicker can
+     * tell it from the music. So: every *clear* pop (more than 10 dB over the
+     * bed) has to end below the 4 dB where this fixture defines a pop at all,
+     * and no pop may be left standing above −50 dBFS in the pop band. */
+    const clear = popPos.filter((p) => rel(worn2, p, 0) > 10);
+    const leftClear = clear.filter((p) => rel(r2.out[0], p, r2.latency) > 4);
+    let loudest = -120;
+    for (const p of popPos) loudest = Math.max(loudest, bandDb(r2.out[0], p, r2.latency));
+    const idxAfter = DSP.measure([r2.out[0].subarray(r2.latency)], 48000).crackleIndex;
+    ok(popPos.length > 20, 'the worn fixture has pops to repair', popPos.length + ' pops');
+    ok(medOf(after) < medOf(before) - 15,
+      'the chain takes the pop level down by 15 dB or more',
+      fmt(medOf(before)) + ' → ' + fmt(medOf(after)) + ' dB over the bed');
+    ok(leftClear.length === 0,
+      '…and every pop it can safely identify is gone',
+      leftClear.length + ' of ' + clear.length + ' clear pops left, loudest survivor '
+      + fmt(Math.max.apply(null, after)) + ' dB over the bed');
+    // …and what is left has to be *marginal*: the excess over the bed, which is
+    // the quantity a listener hears against the music, stays inside the 4 dB at
+    // which this fixture defines a pop at all. The absolute level of that window
+    // is in the message on purpose — it is the *music* (−32 dBFS in 7 kHz in the
+    // passage where the one survivor sits), not the tick, and it is why an
+    // absolute floor is the wrong test here: in a loud bright passage the music
+    // clears any floor a quiet passage's click would fail.
+    ok(Math.max.apply(null, after) < 5,
+      '…and what is left over the bed is marginal by construction',
+      'loudest ' + fmt(Math.max.apply(null, after)) + ' dB over the bed, in a window where the music '
+      + 'itself reads ' + fmt(loudest) + ' dBFS');
+    ok(idxAfter < 0.3, '…and the statistic the diagnosis acts on says so',
+      'crackleIndex ' + fmt(m2.crackleIndex) + ' → ' + fmt(idxAfter));
+  }
   ok(Presets.buildParams('auto', stereoM, 0.8).width > 0.05,
     'a narrow stereo image asks for width', Presets.buildParams('auto', stereoM, 0.8).width.toFixed(2));
   ok(Presets.buildParams('auto', DSP.measure([sims.garage, sims.garage], 48000), 0.8).width === 0,

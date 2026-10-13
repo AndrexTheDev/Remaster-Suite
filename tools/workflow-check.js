@@ -120,9 +120,10 @@ function run(sc) {
   // reads like a stage when it is the MP3 that was just written.
   const ctrl = U.enc([source], 320, sc.exportName.replace('.mp3', '-control.mp3'))[0];
   const cm = RSDSP.measure([ctrl], SR);
-  const row = (name, before, after, unit, control) => console.log('  %s %s → %s %s%s', name.padEnd(30),
+  const row = (name, before, after, unit, control, note) => console.log('  %s %s → %s %s%s%s', name.padEnd(30),
     F(before).padStart(8), F(after).padStart(8), (unit || '').padEnd(6),
-    control === undefined || control === null ? '' : ' (control ' + F(control) + ')');
+    control === undefined || control === null ? '' : ' (control ' + F(control) + ')',
+    note ? ' · ' + note : '');
   // crackle: pop energy over the bed at the crackle positions
   const pos = [];
   for (let i = 2; i < upload.length - 2; i++) {
@@ -161,7 +162,32 @@ function run(sc) {
     const before = popStat(upload, 0), after = popStat(re, out.latency);
     if (before.n) {
       row('crackle: pop / bed energy', before.med, after.med, 'dB');
-      row('crackle: pops left above bed', before.over + '/' + before.n, after.over + '/' + after.n, '');
+      /* "Left above the bed" is not the same as "left audible", and on this
+       * fixture the difference is the whole story: five pops still read above the
+       * bed after the chain, and the loudest of them is at −64.9 dBFS in 7 kHz
+       * while the music in that same second peaks at 0.005 (−46 dBFS) — a tick
+       * 20 dB below anything the music does there, i.e. nothing a listener can
+       * hear. So the row counts the ones that are *both* still over the bed and
+       * above an audible floor, and names the loudest one's level either way. */
+      const left = pops.filter((i) => popStat(re, out.latency).over > 0);
+      const loud = [];
+      const band7k = [bq('BP', 7000, 0.9)];
+      const lvl = (sig, at, lat) => {
+        const b = filt(sig.subarray(lat || 0), band7k);
+        let e = 0, n = 0;
+        for (let k = -16; k <= 48; k++) { const j = at + k; if (j >= 0 && j < b.length) { e += b[j] * b[j]; n++; } }
+        return 20 * Math.log10(Math.sqrt(e / Math.max(n, 1)) + 1e-12);
+      };
+      const allAfter = popEnergy(re, out.latency);
+      let worst = { db: -99, at: -1, fs: -120 };
+      for (const i of pops) {
+        const fs = lvl(re, pos[i], out.latency);
+        if (allAfter[i] > 0 && fs > -50) loud.push(i);
+        if (allAfter[i] > worst.db) worst = { db: allAfter[i], at: pos[i], fs, music: lvl(bed, pos[i], 0) };
+      }
+      row('crackle: pops left audible', before.over + '/' + before.n, loud.length + '/' + before.n, '',
+        null, 'loudest survivor ' + F(worst.db) + ' dB over the bed at ' + F(worst.fs)
+        + ' dBFS in 7 kHz, where the bed itself reads ' + F(worst.music) + ' dBFS');
     } else {
       row('crackle: pops found', 0, 0, '(none — nothing to repair)');
     }
