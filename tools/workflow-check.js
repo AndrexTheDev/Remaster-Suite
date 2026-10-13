@@ -168,11 +168,44 @@ function run(sc) {
   }
   row('crackle: analyser index', m.crackleIndex, mOut.crackleIndex, '', cm.crackleIndex);
   // hum: the mains lines against their neighbours
-  const humDb = (sig, lat) => {
-    const x = sig.subarray(lat || 0);
-    return 20 * Math.log10((goertzel(x, 50) + goertzel(x, 150)) / (goertzel(x, 113) + 1e-20));
+  /* The line has to be compared with its *own* neighbourhood, not with a wide
+   * band: a turntable's rumble at 30 Hz and the music's own bass sit 15 dB below
+   * the mains line at 50 Hz, and measuring the line against a median over
+   * 26–186 Hz (or against a single 113 Hz bin) reads 35 dB of "hum" on a file
+   * whose line is 14 dB above the floor it actually has to beat. A mains line is
+   * narrow: ±5 Hz is what the app compares it with, and this meter does the same
+   * with its own Hann-windowed 1 s DFT, so the two can be checked against each
+   * other without sharing any code. */
+  const humExcess = (sig, lat) => {
+    const N = Math.round(SR), x = sig.subarray(lat || 0);
+    const segs = Math.floor(x.length / N);
+    if (segs < 3) return 0;
+    const bin = (f) => {
+      const vals = [];
+      for (let s = 0; s < segs; s++) {
+        const st = s * N;
+        let sum = 0, re = 0, im = 0;
+        for (let i = 0; i < N; i++) {
+          const v = x[st + i]; sum += v * v;
+          const w = v * (0.5 - 0.5 * Math.cos(2 * Math.PI * i / N));
+          re += w * Math.cos(2 * Math.PI * f * i / SR); im += w * Math.sin(2 * Math.PI * f * i / SR);
+        }
+        vals.push((4 * Math.sqrt(re * re + im * im) / N) / Math.sqrt(sum / N));
+      }
+      vals.sort((a, b) => a - b);
+      return 20 * Math.log10(vals[Math.floor(vals.length / 2)]);
+    };
+    // per line, and the *median* of the per-segment dB — not the mean over
+    // segments: this fixture's music swings 20 dB with its own envelope, so a
+    // mean reports whichever passage happened to be quiet in it. Measured, the
+    // same signal read 9.1 dB with a mean and 2.4 dB with the median, and only
+    // the second agrees with the app's own reading of the same export. An
+    // independent meter is only independent if it is *also* not wrong.
+    const e50 = bin(50) - Math.max(bin(45), bin(55));
+    const e150 = bin(150) - Math.max(bin(145), bin(155));
+    return Math.max(e50, e150);
   };
-  row('hum: 50 + 150 Hz vs 113 Hz', humDb(upload), humDb(re, out.latency), 'dB', humDb(ctrl));
+  row('hum: 50/150 Hz vs ±5 Hz', humExcess(upload), humExcess(re, out.latency), 'dB', humExcess(ctrl));
   // hiss: ≥4 kHz in the quietest third of the bed
   const F2 = Math.round(SR * 0.02), frames = Math.floor(bed.length / F2), lv = [];
   for (let k = 0; k < frames; k++) lv.push(rms(bed, k * F2, (k + 1) * F2));

@@ -1089,6 +1089,23 @@ section('audit · the mains notch');
   ok(line(undosed, 50) > line(off, 50) - 0.6 && line(undosed, 100) > line(off, 100) - 0.6,
     'and at zero dose the notch is out of the signal path entirely',
     num(line(off, 50)) + ' → ' + num(line(undosed, 50)) + ' dB');
+
+  /* …and the loop has to close: the statistic the *diagnosis* acts on has to
+   * come down on the chain's own output. A repair whose indicator still reads
+   * full is a repair the app cannot confirm, and a repair the app believes it
+   * made but did not is how this round started. The whole chain runs here, not
+   * the bare notch — mains hum is exactly periodic, so any later stage that
+   * re-creates it (a sub-octave synthesiser, a tone shelf reaching into 50 Hz,
+   * a compressor's intermodulation) shows up as a statistic that does not move.
+   */
+  const humM = DSP.measure([rich], 48000);
+  const humParams = Object.assign({}, H.DEFAULT_PARAMS,
+    Presets.buildParams(Presets.classify(humM).id, humM, 0.8));
+  const humOutM = DSP.measure([H.render(P, [rich], humParams)[0]], 48000);
+  ok(humM.humPeakDb > 4 && humOutM.humPeakDb < humM.humPeakDb - 6 && humOutM.humScore < 0.2,
+    'the whole chain takes the mains line out, measured by the statistic the diagnosis uses',
+    'peak ' + num(humM.humPeakDb) + ' → ' + num(humOutM.humPeakDb) + ' dB, score '
+    + num(humM.humScore) + ' → ' + num(humOutM.humScore));
 }
 
 section('audit · codecs');
