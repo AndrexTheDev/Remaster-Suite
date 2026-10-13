@@ -1288,6 +1288,72 @@ section('audit · the bottom of the record');
     + ' dB of "excess" against the reported ' + num(clean[2][1].db) + ' dB');
 }
 
+/* A room ring is a *filter* around a frequency; a sustained note is a single
+ * partial. The resonance scan only asks whether a bin stands ≥ 3 dB above its
+ * own smoothed neighbourhood, and a note stands 50–100 dB above it: measured
+ * with the app's own scan, a 997 Hz sine reports 96.4 dB of "excess" and a
+ * 220 Hz sine 52.9 dB. The automatic chain then notched the note by up to its
+ * ceiling — at Q 6 that notch is 166 Hz wide at 997 Hz — and called it boxiness.
+ * The scan now also requires the peak to be a colouration (a few dB, not tens),
+ * and this section holds both halves of that down: the note is not reported, and
+ * the ring that *is* reported is removed rather than halved. The second half is
+ * measured twice — with the app's statistic and with an independent one — and
+ * the depth the chain asks for is checked in both a mode that was picked by hand
+ * and in automatic mode, because the picked profiles used to run the resonance
+ * notch at 0 dB (their ceiling table had no `box` key at all, and `undefined × n`
+ * is NaN, which `num()` turns into 0).
+ */
+section('audit · a room, not a note');
+{
+  const SR = 48000, SEC = 12;
+  const num = (v, d) => (typeof v === 'number' && isFinite(v) ? v.toFixed(d === undefined ? 1 : d) : String(v));
+  const rms = (a) => { let e = 0; for (let i = 0; i < a.length; i++) e += a[i] * a[i]; return Math.sqrt(e / Math.max(1, a.length)); };
+  const peak = (f, q, g) => {
+    const A = Math.pow(10, g / 40), w = 2 * Math.PI * f / SR, c = Math.cos(w), sn = Math.sin(w), al = sn / (2 * q);
+    const b0 = 1 + al * A, b2 = 1 - al * A, a0 = 1 + al / A, a2 = 1 - al / A;
+    return [b0 / a0, -2 * c / a0, b2 / a0, -2 * c / a0, a2 / a0];
+  };
+  const bp = (f, q) => {
+    const w = 2 * Math.PI * f / SR, c = Math.cos(w), sn = Math.sin(w), al = sn / (2 * q), a0 = 1 + al;
+    return [al / a0, 0, -al / a0, -2 * c / a0, (1 - al) / a0];
+  };
+  const lp = (f, q) => {
+    const w = 2 * Math.PI * f / SR, c = Math.cos(w), sn = Math.sin(w), al = sn / (2 * q), a0 = 1 + al;
+    return [(1 - c) / 2 / a0, (1 - c) / a0, (1 - c) / 2 / a0, -2 * c / a0, (1 - al) / a0];
+  };
+  let clean = DSP.applyBiquad(H.pink(SR, SEC, 0.40, 31), lp(6000, 0.707));
+  const ring = DSP.applyBiquad(clean, peak(220, 4, 12));
+  let ringBed = new Float32Array(clean.length);
+  for (let i = 0; i < ringBed.length; i++) ringBed[i] = clean[i] + 1.5 * ring[i];
+  ringBed = H.normalize(ringBed, 0.7);
+  const sine = H.normalize(H.tone(997, SR, SEC, 0.5), 0.7);
+  const mRing = DSP.measure([ringBed], SR);
+  const mSine = DSP.measure([sine], SR);
+  ok((mSine.resonances || []).length === 0, 'a sustained note is not a resonance',
+    (mSine.resonances || []).map((r) => r.hz.toFixed(0) + ' Hz ' + r.excessDb.toFixed(0) + ' dB').join(', ') || 'none reported');
+  ok((mRing.resonances || []).length === 1 && mRing.resonances[0].excessDb > 3,
+    'while a room ring around 220 Hz is', 'reported ' + num(mRing.resoExcessDb) + ' dB at ' + num(mRing.resoHz, 0) + ' Hz');
+  const P = Presets.buildParams('auto', mRing, 0.7);
+  const V = Presets.buildParams('vinyl', mRing, 0.7);
+  ok(P.boxG1 < -3.4, 'and the automatic chain notches as deep as the ring it measured',
+    num(P.boxG1) + ' dB at ' + num(P.boxF1, 0) + ' Hz Q ' + num(P.boxQ1));
+  ok(V.boxG1 === P.boxG1 && V.boxF1 === P.boxF1, 'a profile the user picked by hand notches it just the same',
+    'vinyl ' + num(V.boxG1) + ' dB vs auto ' + num(P.boxG1) + ' dB');
+  /* independent meter: the ring against its two neighbouring third-octaves */
+  const excess = (sig, lat) => {
+    const a = rms(DSP.applyBiquad(sig.subarray(lat || 0), bp(220, 4)));
+    const b = rms(DSP.applyBiquad(sig.subarray(lat || 0), bp(110, 2))) + rms(DSP.applyBiquad(sig.subarray(lat || 0), bp(440, 2)));
+    return 10 * Math.log10(a / (0.5 * b + 1e-20));
+  };
+  const r = H.renderEx(H.loadProcessor(SR), [ringBed], P);
+  const wet = excess(r.out[0], r.latency);
+  const floor = excess(clean);
+  ok(excess(ringBed) - floor > 1.5, 'the fixture really is boxy', num(excess(ringBed) - floor) + ' dB over the bed it was built from');
+  ok(wet < floor + 0.4, 'and after the chain it is back at the bed (independent meter)',
+    num(wet) + ' dB vs the clean bed ' + num(floor) + ' dB, source ' + num(excess(ringBed)) + ' dB');
+  const mo = DSP.measure(r.out, SR);
+  ok((mo.resoExcessDb || 0) < 1, 'the analyser agrees the resonance is gone', 'resoExcess ' + num(mo.resoExcessDb) + ' dB');
+}
 section('audit · codecs');
 {
   const SR = 48000;

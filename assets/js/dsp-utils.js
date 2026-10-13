@@ -1617,6 +1617,16 @@
       if (!cnt) continue;
       const ex = spec.db[k] - sum / cnt;
       if (ex < 3) continue;
+      // …and it has to be a *colouration*, not a note. A room ring sits a few dB
+      // above its own trend — the card calls anything over 3 dB boxy and
+      // saturates at 9 — while a sustained partial has nothing around it at all:
+      // measured, a 997 Hz sine reads 96 dB of "excess" against its trend and a
+      // 220 Hz sine 53 dB, and the notch that fits a resonance would take 8 dB
+      // out of the note (at 997 Hz the clamped Q 6 makes that notch 166 Hz
+      // wide). A mains harmonic is the same kind of peak and has its own,
+      // precise notch. 24 dB is three times the point where "boxy" saturates,
+      // so a genuinely awful room still passes.
+      if (ex > 24) continue;
       // …and it has to be *narrow*: a broad rise is not a resonance
       const off = Math.max(2, Math.round(f * 0.30 / binHz));
       const drop = spec.db[k] - Math.max(spec.db[Math.min(spec.n - 1, k + off)], spec.db[Math.max(0, k - off)]);

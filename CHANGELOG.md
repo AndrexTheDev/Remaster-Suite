@@ -67,6 +67,49 @@ else may move.
   different window, twice the phase resolution — has to agree with `ispDb` within 0.15 dB, and a
   limited export has to be under the ceiling by *both* meters.
 
+### Fixed — the bottom of the record, and a honk that was not a note
+
+* **The rumble statistic was one FFT bin wide — and the bin next to it is the mains line.** The
+  comparison below 45 Hz against a reference band above it took both numbers from the spectrum of
+  the 43 ms analysis frames. Those frames are 23 Hz wide, so the whole "20–45 Hz band" was a single
+  bin, and on a recording whose bed is high-passed at 150 Hz — nothing below the music at all — that
+  one bin read 12.5 dB of *excess* (the 50 Hz line leaking into it), while a plain vinyl sim with
+  hum and crackle read +3.7 dB. Both are above the threshold that arms the sub-sonic guard, so the
+  guard was taking the bottom off recordings it should have left alone. The measurement is now made
+  with filters per sample — three 2-pole pairs (20–45, 45–90, 90–203 Hz), each carrying its own
+  notches on the mains line and its harmonics, because a 2-pole high pass at 90 Hz still passes
+  50 Hz 10 dB down — and the ratio is taken frame by frame and reduced with a median, since one
+  crackle pop lifts all three bands inside a single frame. The reported figure now separates what it
+  has to separate: a flat bed 1.4 dB, the same bed with +6 and +10 dB shelves below 150 Hz 2.7 and
+  3.7, a bottom-less garage recording −26.0, a plain vinyl sim −14.0 — against 7.4 for the
+  acceptance rumble fixture, 15.4 for the worn record with a rumble under it and 16.6 for rumble
+  alone. The knee moved with the scale (4.5–11 dB) and the 43 ms-frame version stays in the
+  analysis as the documented artifact.
+* **A sustained note was reported as a room resonance and notched.** The scan asks whether a bin
+  stands ≥ 3 dB above its own smoothed neighbourhood — and a note stands 50–100 dB above it:
+  measured with the app's own scan, a 997 Hz sine reports 96.4 dB of "excess", a 220 Hz sine
+  52.9 dB, and both pass the narrowness test with Q 6. The depth that fits a colouration was then
+  cut out of the note (at 997 Hz, Q 6 is a 166 Hz-wide notch). A resonance is a few dB above its
+  trend — the card calls anything over 3 dB boxy and saturates at 9 — so the scan now also requires
+  the peak to be a colouration rather than a partial (≤ 24 dB, three times saturation), which also
+  stops it from double-notching a mains harmonic that has its own, precise notch.
+* **The measured resonance was cut by a third of what was measured.** The dose was 0.55 × the
+  reported excess, capped at 3.5 dB, and the cap was what bound: on a +12 dB Q-4 ring over a bed
+  the scan reports 5.5 dB and the chain cut 3.0, which left the ring at +1.0 dB above the bed with
+  an independent meter (the bed's own reading is −1.2 dB). The scan reports a *narrow peak* while
+  the ring it names is wider, and the Q it reports (6, clamped) is narrower than the ring as well,
+  so the cut has to match the ring rather than the peak: 1.45 × the measured excess, ceiling 8 dB.
+  Measured: the ring now comes out at −1.28 dB against the clean bed's −1.24 — removed, not
+  halved — while the sibling third-octaves at 110 and 440 Hz move by 0.3 dB over the whole 0…9 dB
+  range. The automatic statistic agrees: `resoExcess` 3.8 → 0.0 dB (was 3.3).
+* **A profile the user picked by hand did not notch a measured resonance at all.** The manual
+  ceiling table listed only the colour and synthesis parameters; `box`, `width`, `airRoom` and `hum`
+  were absent, and a missing ceiling is not a no-op — `clamp(x, 0, undefined)` returns `x` and
+  `undefined * n` is NaN, which `num()` turns into 0. Measured before: with a fixture whose
+  resonance the scan had just reported as 5.5 dB at 217 Hz, `buildParams('vinyl', …)` asked for
+  `boxG1 = 0` — the picked profiles ran the resonance notch, the stereo width and the hum ceiling
+  entirely off. The repair ceilings are now inherited from the automatic table.
+
 ### Added
 
 * **`refDb` — the file's own peak, as a parameter.** The glue's threshold (−22 dBFS *at that peak*)

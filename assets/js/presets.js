@@ -58,7 +58,16 @@
     // where something was measured: hum is notched by the measured mains level,
     // boxiness by the measured resonance, width by the measured image.
     hum: 0.85,         // mains notches (−36 dB at the fundamental at 0.85)
-    box: 3.5,          // dB taken out of the strongest measured resonance
+    // dB taken out of the strongest measured resonance. This was 3.5 — a third
+    // of an octave of safety against a mis-placed notch — and it turned out to
+    // be the binding constraint rather than the measurement: on a +12 dB Q-4
+    // ring over a bed, the scan reports 5.5 dB of excess, and 3.5 dB of cut left
+    // the ring half audible above the same bed (independent meter, every depth
+    // from 0 to 9 dB). What a shallow cut was buying is now bought by the
+    // *measurement*: the peak has to sit ≥ 3 dB above its own local trend, at
+    // Q ≥ 3, inside 150–1800 Hz, and it is read from the quiet-frame spectrum —
+    // sound that is there when the music is not.
+    box: 8,
     width: 0.55,       // stereo width restoration (≈ +3.4 dB of side signal)
     airRoom: 0.95,     // how much top end the synthesiser may rebuild
     eq: 6,             // dB the per-song corrective EQ may move a band in auto
@@ -74,11 +83,21 @@
    * worklet's own caps still hold). This is where the profiles stay audibly
    * different from each other instead of all converging on the same gentle
    * result. */
-  const MANUAL = {
+  const MANUAL = Object.assign({}, CEILING, {
     reso: 0.80, sub: 0.80, exciter: 0.70, air: 0.80,
     dehiss: 0.95, declip: 0.95, declick: 0.95, glue: 0.55, warmth: 0.65, tilt: 0.50,
     eq: 9,             // a profile the user picked may correct more of the shape
-  };
+    // The repair ceilings are *inherited* rather than repeated: the mains
+    // notches, the measured resonance, the stereo width and the air ceiling are
+    // dosed by their measurement in both modes, and a manual profile spends more
+    // of the colour and the synthesis, not of a repair. They have to be present
+    // in this table at all, which they were not — `clamp(x, 0, undefined)`
+    // returns x, and `undefined * n` is NaN, so the picked profiles silently ran
+    // the resonance notch at 0 dB (on a fixture with a measured 5.5 dB ring) and
+    // the width stage at NaN, i.e. off, while the hum ceiling was not applied
+    // either. Measured with `RP.buildParams('vinyl', m, 0.7)` before the fix:
+    // boxG1 = 0 at a frequency the scan had just reported.
+  });
 
   /* -------------------------------------------------------------------------
    * Ceilings (100 % power) per profile
@@ -1047,7 +1066,15 @@
     for (let i = 0; i < boxes.length; i++) {
       const r = boxes[i];
       const dose = smoothstep(3.2, 5.2, r.excessDb) * D.headroom;
-      const depth = Math.min(cap.box, 0.55 * r.excessDb) * dose;
+      // The scan reports a *narrow peak* against its local trend — that is how
+      // it finds a resonance at all — while the ring it names is wider than that
+      // peak, and the Q it reports under-reads the width too (a +12 dB Q-4 ring
+      // comes back as Q 6). Measured against an independent meter on that
+      // fixture, the ring only reaches the bed's own level at ≈ 1.5× the
+      // reported excess, and the sibling bands 110 and 440 Hz move by 0.3 dB
+      // across the whole 0…9 dB range: the notch stays a third of an octave, so
+      // the depth, not the width, is what has to match the measurement.
+      const depth = Math.min(cap.box, 1.45 * r.excessDb) * dose;
       // each notch carries its own allowance: two narrow notches half an octave
       // apart do not add up, so a shared budget only ever starved the second one
       const take = Math.min(depth, cap.box);
