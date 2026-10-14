@@ -1787,6 +1787,31 @@ class TruePeakLimiter {
     this.lim = Math.pow(10, (Math.min(0, ceilDb) - 0.1) / 20);
     this.gate = this.lim * 0.5;      // an interval this far down cannot overshoot
     this.rel = 1 - Math.exp(-1 / (Math.max(1, sr) * 0.08));   // ~80 ms release
+    /* ── what this stage costs a master that has no dynamics left ──────────
+     * Measured on the acceptance "squashed master" fixture (itself built at
+     * three crush levels), spread = the 20 ms envelope's p98 − p05:
+     *
+     *   DR 8.1 dB  in 11.38 → out 10.38   (−1.00 dB)
+     *   DR 6.8 dB  in  9.92 → out  8.37   (−1.55 dB)
+     *   DR 5.3 dB  in  7.91 → out  5.81   (−2.09 dB)
+     *
+     * and the cause is this stage and not the compressor: with `tpCeil: 0` the
+     * same renders lose 0.44 dB, with the ceiling at −2 they lose 1.55. The
+     * mechanism is honest — a master peaking at −1.11 dBFS needs 1.1 dB of
+     * reduction to hold a −2 dBTP ceiling, and the gain is applied *inside* the
+     * loud passages (80 ms release) while the quiet ones come back up, so the
+     * loud/quiet ratio shrinks by more than the level does. A whole-file static
+     * trim instead of limiting would keep the ratio: measured on the same
+     * fixture, a trim of 0.5 / 1.0 / 1.5 / 2.0 dB (with `refDb` lowered to
+     * match, so the loudness matcher does not undo it) leaves the spread at
+     * −1.20 / −0.89 / −0.59 / −0.52 dB while the peak still lands on −2.10.
+     * What a trim costs is loudness: 1–2 dB on a class of file that the card
+     * already calls "squashed". The suite therefore *measures* the loss (the
+     * acceptance row prints it, and the row's note reads "squashed" at DR < 9)
+     * and does not yet assert against it: choosing between a 1.5 dB dynamic
+     * loss at the input's level and a 0.5 dB loss 1–2 dB quieter is a product
+     * decision about the promise "the output keeps the upload's level", and it
+     * is the next thing to decide here. */
   }
 
   /**

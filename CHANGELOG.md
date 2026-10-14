@@ -13,6 +13,23 @@ thresholds sat in the tone stages (the glue's and the warmth's), all of them wri
 full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
 else may move.
 
+### Measured — what the true-peak limiter costs a squashed master
+
+* **The card names "squashed" correctly and the chain then takes 1–2 dB more of the little
+  dynamics the file has left.** Measured on the acceptance fixture at three crush levels, spread =
+  the 20 ms envelope's p98 − p05: DR 8.1 dB in 11.38 → **10.38** (−1.00); DR 6.8 in 9.92 → **8.37**
+  (−1.55); DR 5.3 in 7.91 → **5.81** (−2.09). The cause is the true-peak limiter, not the glue:
+  with the ceiling off the same renders lose 0.44 dB, at −2 dBTP they lose 1.55. The mechanism is
+  honest — a master peaking at −1.11 dBFS needs 1.1 dB of reduction to hold a −2 dBTP ceiling — but
+  the gain is applied *inside* the loud passages (80 ms release) while the quiet ones come back up,
+  so the loud/quiet ratio shrinks by more than the level does. A whole-file static trim would keep
+  the ratio: measured, a trim of 0.5/1.0/1.5/2.0 dB (with `refDb` lowered to match) leaves the
+  spread at −1.20/−0.89/−0.59/−0.52 dB with the peak still on −2.10. What a trim costs is loudness,
+  and choosing between a 1.5 dB dynamic loss at the upload's level and a 0.5 dB loss 1–2 dB quieter
+  is a decision about the promise "the output keeps the upload's level" — so it is measured,
+  written into the limiter's own code with the numbers, and left as the named decision rather than
+  silently changed.
+
 ### Fixed — a declared parameter the worklet never read (and the silent stage behind it)
 
 * **`subSrc` was declared, written by the law, plumbed through the harness, read at its call site —
