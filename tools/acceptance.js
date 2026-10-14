@@ -322,10 +322,13 @@ mark('section 4');
    * measures the bed's own leakage through its 60 Hz high-pass instead of the
    * defect. Measured on this fixture as it stands: the bed alone reaches 8–20 Hz
    * at **−68.9 dBFS**, the rumble mixed into it at **−32.4** — 36 dB above that
-   * floor — and the chain brings the band from −38.1 to −67.5 dBFS, i.e. to
-   * within 1.4 dB of what the bed itself does down there. (The row's note used to
-   * print the rumble's own level under the words "the bed alone", which made the
-   * row look 36 dB better than it was; both numbers are named now.) */
+   * floor — and the chain brings the band from −38.1 to **−93.3 dBFS**, i.e.
+   * *past* what the bed itself does down there, because the saturated rung's
+   * corner (42 Hz) sits above the band. (The row's note used to print the
+   * rumble's own level under the words "the bed alone", which made the row look
+   * 36 dB better than it was; both numbers are named now. The 18–24 Hz rung this
+   * row had before the second rung stopped at −67.5 dBFS, within 1.4 dB of the
+   * bed's own floor — which is why the second rung exists.) */
   const low = H.normalize(H.filter(RSDSP, H.filter(RSDSP, H.noise(SR, SEC, 0.30, 12), SR, 'lp', 35, 0.707), SR, 'lp', 35, 0.707), 0.9);
   const dirty = H.normalize(H.mix([clean, low]), 0.7);
   const r = run([dirty]);

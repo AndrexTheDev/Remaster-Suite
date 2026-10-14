@@ -13,6 +13,38 @@ thresholds sat in the tone stages (the glue's and the warmth's), all of them wri
 full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
 else may move.
 
+### Fixed — the sub-sonic guard's ceiling left a saturated rumble floor in place
+
+The guard's corner was `clamp(18 + 6·need, 0, 24)`: whatever the floor measured, the stage never
+went above 24 Hz. On the acceptance §4 fixture — a bed high-passed at 60 Hz with a 4th-order noise
+floor below 35 Hz mixed into it, 15.5 dB of the app's own `infraExcess` — the ceiling was the whole
+story. The chain came out at **10.6 dB** with its quiet 20–45 Hz band still **22.4 dB above the
+mids** (the rumble exactly where it was), and the 320 kbit/s re-upload was still diagnosed `rumble`:
+the app naming its own un-repaired defect, on its own export.
+
+The corner is a measurement, so it now has a second rung:
+`clamp(18 + 6·need + 18·smoothstep(0.55, 1, need), 0, 42)`. The low rung is unchanged, and a
+*saturated* floor — 8 dB or more of measured excess, i.e. quiet passages whose 20–45 Hz band sits
+that far above the file's own mids — reaches **42 Hz, the top of the band the statistic calls
+rumble**.
+
+* Measured on the same fixture: `infraExcess` 10.6 → **3.7 dB**, the quiet 20–45 Hz band 22.4 →
+  **7.2 dB** above the mids, the 8–20 Hz band −38.1 → **−93.3 dBFS** (past the bed's own −68.9),
+  and the re-upload is diagnosed **`dullTop`** — the rumble is no longer on it.
+* The depth is what spends the removal: with sections 2–4 parked at 1 Hz so only one runs, the same
+  42 Hz corner leaves 10.8 dB — as bad as the old ceiling — where the four sections take it to 3.7.
+* The rung is not free, and its price is measured: 42 Hz costs a sustained 35 Hz note **19.1 dB**
+  against **3.4 dB** at the low rung, a 41.2 Hz line about 12 dB (the sweep's 38 Hz / −9.3 dB and
+  45 Hz / −14.8 dB points bracket it). It is paid only where the quiet floor is the defect, and the
+  fixtures that stay out of it are pinned by the suites: the audit's rumbly bed sits exactly on the
+  rung's onset (8.0 dB → 21.3 Hz, unchanged), §17's worn record reads 19.6 Hz (unchanged), a bed
+  with a sustained 35 Hz note never reaches the rung at all (the confidence gate: the unforced law
+  measures 0 Hz on it), and a musical bass fixture — a kick plus a 41–82 Hz line — reads 3.8 dB of
+  "excess" and gets no guard.
+* The acceptance matrix: **74 rows, 18 classes, exit 0** (`acceptance-v2ao.txt`); the five suites
+  **128/137/310/108/17** (`suite-round12.txt`); the matrix's other 69 rows are byte-identical to
+  `acceptance-v2an.txt`, §17's rumble witness included.
+
 ### Fixed — the crackle statistic read sibilance as clicks, and the chain then "repaired" it
 
 The de-clip / de-click detector asked one question per 20 ms window: how tall is the peak of the
@@ -64,11 +96,14 @@ repair, and a clean pop-free master with sibilant vocals would have been next.
   its −2 dBTP ceiling + level ride, measured with the ceiling alone removed (11.86 dB) and with the
   whole output stage off (12.75 = the input)).
 * **Export re-uploads for the three classes that had none**: mains hum (`hum → healthy`), rumble
-  (`rumble,squashed,dullTop → rumble,squashed,dullTop`, `infraExcess` 10.6 dB) and sibilance
-  (`sibilance → sibilance`, deess 0.51). The rumble row is a **bug report against the chain**, not a
-  pass: the sub-sonic guard (24 Hz) cannot touch a rumble that sits at 25–45 Hz, so the app's own
-  per-frame excess still names its own export. Not fixed yet — the fixture is the one that provides
-  the ground truth.
+  (`rumble,squashed,dullTop → **dullTop**`, `infraExcess` 3.7 dB) and sibilance
+  (`sibilance → sibilance`, deess on the export 0.51). The rumble row was a **bug report against the
+  chain** — the sub-sonic guard's 24 Hz ceiling could not touch a rumble that sits at 25–45 Hz, so the
+  app's own per-frame excess still named its own export — and it is the row that found the guard's
+  missing second rung (the entry above). The sibilance row stays a truthful reading rather than a
+  failure: the fixture carries twelve bursts at a third of the file's peak, the chain takes the level
+  inside them −24.97 → −30.90 dBFS and the excess statistic −0.5 → −2.6 dB, and what is left is still
+  sibilance the export may name.
 
 ### Measured — the two repair stages that stay on the taste curve, and why
 

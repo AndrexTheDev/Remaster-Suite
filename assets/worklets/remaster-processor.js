@@ -1976,8 +1976,8 @@ class ChannelChain {
 
     // Sub-sonic guard: a turntable rumble, a desk, a building — measured per
     // song (18–35 Hz above the bass band in the quiet passages) and filtered
-    // only when it was measured. 12 dB/octave at the corner the measurement
-    // asked for, bypassed completely at 0.
+    // only when it was measured. A 4-section (48 dB/octave) high-pass at the
+    // corner the measurement asked for, bypassed completely at 0.
     /* Four sections, not one. A single 2nd-order high-pass at the corner the law
      * picks (18–24 Hz for the excesses it sees) is −3.3 dB at 25 Hz: measured on
      * the acceptance fixture — a bed high-passed at 60 Hz with 4th-order noise
@@ -1990,7 +1990,15 @@ class ChannelChain {
      * of 14–30 Hz where two sections @ 30 Hz take 10.1, and it pays 0.82 dB at
      * 35–45 Hz instead of 0.90 — a steeper knee *below* the bass, which is what
      * the bass guitar's low E (41 Hz) wants. Steeper still (N=6 @ 20 Hz) is
-     * worse on both counts. */
+     * worse on both counts.
+     *
+     * The law has a second rung now — 42 Hz for a *saturated* floor (see presets
+     * 9a) — and there the depth matters more, not less. Measured by parking
+     * sections 2–4 at 1 Hz so that only one runs: a 42 Hz corner leaves the
+     * acceptance §4 fixture at 10.8 dB of excess, as bad as the shipped 24 Hz
+     * rung, where the four sections take it to 3.7. The stack is what lets the
+     * corner go to the top of the measured band without the removal spilling
+     * into the bass above it. */
     this.infra = new Biquad();
     this.infra2 = new Biquad();
     this.infra3 = new Biquad();

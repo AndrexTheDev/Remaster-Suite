@@ -676,8 +676,12 @@
      * app's own statistic unless said otherwise):
      *
      *   rumble at 0 dB rel.   8-20 Hz 54.9 → 26.1 · 20-35 54.8 → 45.8 · music 30-45 -3.2 dB
-     *   a sustained 35 Hz note (no rumble): the statistic reads 10.8 dB of
-     *   "excess" — above the knee — and the guard costs the note 3.7 dB.
+     *   the same bed with a sustained 35 Hz note (the club control, re-measured
+     *   for the two-rung law): the statistic reads 14.7 dB of "excess" — above
+     *   the knee — and the 18-24 Hz rung costs the note 3.4 dB where the
+     *   saturated 42 Hz rung costs it 19.1 dB. The note never reaches the rung
+     *   unforced: the confidence gate gives that fixture 0 Hz, because a
+     *   passage with the note in it is not a quiet passage.
      *
      * Three candidate witnesses that would tell the two apart were measured and
      * each fails, so do not re-derive them:
@@ -690,11 +694,15 @@
      *   · tonality — the peakiness of the quiet frames' 20-45 Hz band over six
      *     narrow probes: a full-scale rumble 5.3 dB, the note 7.1 dB. 1.8 dB.
      * A sustained sub-bass note and a turntable floor are the same thing to
-     * every measurement the app owns. The guard is right to engage, and its
-     * cost is the price of the repair on a file that has a bottom end at all —
-     * which is why the arm threshold stays where the clean population says it
-     * separates (measured: the club note reads 10.8 dB of "excess" and a pink
-     * bed 1.6), rather than being raised until no music can ever trip it. */
+     * every measurement the app owns; what keeps the note out of the repair is
+     * the *confidence* gate, not its shape. Where the gate does open, the cost
+     * is the price of the repair on a file whose quiet floor is the defect —
+     * measured this round: the club note 3.4 dB at the low rung, 19.1 dB at the
+     * saturated one. The arm threshold stays where the clean population says it
+     * separates (measured: the club note reads 14.7 dB of "excess" where the
+     * acceptance §4 bed alone reads -6.4 and a musical bass fixture — a kick
+     * plus a 41-82 Hz line — 3.8), rather than being raised until no music can
+     * ever trip it. The corner's second rung is documented at 9a below. */
 
     // An out-of-phase bottom: the channels are correlated in the mids but
     // *cancel* below 200 Hz. Only stereo material can have it, and only when
@@ -1205,25 +1213,40 @@
      * file. Each is a repair: it is dosed by the measurement of the defect and
      * it does nothing at all when nothing was measured. */
 
-    // 9a · sub-sonic rumble → a high-pass at the measured corner. What this
-    // cannot do is a rumble *above* the corner: a turntable's bottom end reaches
-    // into the 30–80 Hz where the bass lives, and a high-pass that takes it out
-    // takes the music's bottom with it — measured, a 30 Hz corner costs a
-    // sustained 35 Hz note 7.6 dB and a 24 Hz corner costs 3.7 dB (the audit's
+    // 9a · sub-sonic rumble → a high-pass at the measured corner, on two rungs.
+    // What this cannot do is a rumble *above* the corner: a turntable's bottom
+    // end reaches into the 30–80 Hz where the bass lives, and a high-pass that
+    // takes it out takes the music's bottom with it — measured, a 30 Hz corner
+    // costs a sustained 35 Hz note 7.6 dB and a 24 Hz corner 3.4 dB (the audit's
     // "what the sub-sonic guard cannot do" holds those numbers). The rumble
     // statistic is a radio below 45 Hz, so it only ever arms this stage where the
     // music has nothing anyway; a rumble on top of the bass is left in place and
     // named on the card rather than half-removed by a filter that cannot tell it
-    // from the bass. The corner
-    // *is* the amount, and it stays low on purpose: 18–30 Hz is where rumble
-    // lives and where no instrument does, so a 12 dB/octave filter there takes
-    // out what a turntable (or a desk, or a passing lorry) put in without
-    // touching the bass above it. A "repair" that reaches into 40 Hz would be
-    // taking the record's bottom away, which is the opposite of remastering.
-    // The corner is the knee of a 4-section cascade (see the worklet): it stays
-    // clear of the bass guitar's low E at the top of its range, because the
-    // steepness — not the corner — is what spends the removal.
-    a.infraHP = D.infraNeed > 0.02 ? clamp(18 + 6 * D.infraNeed, 0, 24) : 0;
+    // from the bass.
+    //
+    // The corner *is* the amount: 18 Hz at the arm threshold, +6 Hz per unit of
+    // need — and a second rung above need 0.55 that reaches 42 Hz, the top of the
+    // 20–45 Hz band the statistic calls rumble. The rung exists because the low
+    // rung cannot deliver the repair on the floors that are *saturated*, measured
+    // on the acceptance §4 fixture (excess 15.5 dB, need 1.0): 18–24 Hz took it
+    // to 10.6 dB and left its quiet 20–45 Hz band 22.4 dB above the mids, i.e.
+    // exactly where it was; 42 Hz takes the statistic under the knee at 3.7 dB
+    // and that band to 7.2 dB. It is the 4-section depth and not the corner that
+    // spends the removal — 2 sections at the same 42 Hz leave 10.8 dB. The rung
+    // is not free, and its price is bounded by measurement: 42 Hz costs a
+    // sustained 35 Hz note 19.1 dB where the low rung costs it 3.4, and a 41.2 Hz
+    // line about 12 dB (between the sweep's 38 Hz / −9.3 dB and 45 Hz / −14.8 dB
+    // points). It is paid only where the *quiet passages* carry that band 8 dB or
+    // more above the file's own mids — energy no music is playing there — and the
+    // fixtures that stay out of it are pinned by the suites: the audit's rumbly
+    // bed sits exactly on the rung's onset (8.0 dB → 21.3 Hz, unchanged), §17's
+    // worn record reads need 0.27 (19.6 Hz, unchanged), a bed with a sustained
+    // 35 Hz note never reaches the rung at all (the confidence gate: the unforced
+    // law measures 0 Hz on it), and a musical bass fixture reads 3.8 dB of
+    // "excess" and gets no guard.
+    a.infraHP = D.infraNeed > 0.02
+      ? clamp(18 + 6 * D.infraNeed + 18 * smoothstep(0.55, 1, D.infraNeed), 0, 42)
+      : 0;
 
     // 9b · sibilance → the dynamic de-esser amount (up to the cap at full need)
     a.deess = clamp(0.85 * D.sibNeed * D.headroom, 0, 0.85);
