@@ -992,6 +992,19 @@ class DeHiss {
       // deliberately the measured step (see the dsp suite's "the floor regime
       // delivers what was measured", and the matrix rows "the arrival's own top
       // end at the pops the row above still counts"; probes wr9, wr10, wr12).
+      //
+      // Round 16 priced the obvious answer — let the *level* term decide on the
+      // frames where this one reads nothing, capped at the measured step — and
+      // it does not pay. It buys ~9 dB on the worn record's arrival floor (and
+      // 0.2–0.9 dB more pause floor on the dsp hiss fixture), but the app then
+      // names a *new* defect on its own exports: `dullTop` on the hiss, cassette,
+      // vinyl and worn rows, which used to read `hiss`/`healthy` there. The
+      // reason is structural: the level key cannot tell a top end that is quiet
+      // from a top end that is *floor*, and this term is blind to a floor that
+      // lifts both key bands together. Doing it properly needs a *content*
+      // witness — whether the top end is shaped like programme or like noise —
+      // i.e. an analyser metric, not a retune of this stage. Numbers: CHANGELOG,
+      // round 16 (probes wr14/wr15; wr13 is void — an instrument slip).
       const cutTilt = this.maxCut > 0.01 ? clamp(tiltNow - this.tiltRef, 0, this.maxCut) : 60;
       const lvl = smoothstep(this.t1, this.t1 + 1 / this.inv, e);
       const cutLevel = lvl > 1e-6 ? -20 * Math.log10(lvl) : 60;

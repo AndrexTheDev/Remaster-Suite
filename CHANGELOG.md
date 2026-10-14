@@ -6,6 +6,41 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Measured and rejected — the de-hisser's level key may not decide on its own
+
+**Round 15 ended with a named lever: the de-hisser's automatic dose is gated on the *tilt* of the
+top end, a broadband floor lifts both key bands together, so the tilt difference stays at 0 dB while
+the stage's level key allows 19–20 dB of cut — the floor survives and `min(tilt, level)` closes the
+gate.** Round 16 built that lever and priced it (probes `tools/work/wr14.js`, `wr15.js`): where the
+tilt term reads nothing, the level key decides, capped at the measured step so the depth can never
+exceed what the measurement called noise.
+
+**What it buys** (measured):
+
+| fixture | before | with the lever |
+|---|---|---|
+| the worn record's arrival floor at the quiet-passage pop (4–12 kHz, ±2000, p10 / p50 dBFS) | −53.6 / −50.1 | **−62.8 / −59.3** |
+| the same, in the matrix's own window (the shipped chain reads −49.8 / −46.3 there) | −49.8 / −46.3 | **−58.0 / −54.5** |
+| the worn row's `≥4 kHz in the quiet` | −42.03 dBFS | **−46.28 dBFS** |
+| the dsp hiss fixture's pause floor (4/6/8/12 kHz vs the shelf off) | 4.5 / 5.7 / 6.4 / 7.3 dB | **4.7 / 6.1 / 7.1 / 8.2 dB** |
+
+**And what it costs — the reason it is not in the tree:** the app starts naming a *new* defect on its
+own exports. Four acceptance rows flip into `dullTop`: the hiss fixture's export `hiss` → **`dullTop,hiss`**
+(and its measured step 0.00 → 8.51 dB), the worn row's export `healthy` → **`dullTop`**, the cassette
+export-honesty row `hiss` → `dullTop,hiss`, the vinyl one `healthy` → `dullTop`, on top of the rumble
+fixture's export. The music pays too, if less: the dsp fixture's *soft* music frames move 0.003 → 0.114 dB
+at 8 kHz (the pin is < 0.15) and a hissy snare's top end, already worth −0.91 dB to the shipped stage,
+would go to −1.34 dB.
+
+**Why no smaller constant fixes it:** the level key cannot tell a top end that is *quiet* (a musical
+passage whose HF has faded, where cutting is wrong) from a top end that is *floor* (where cutting is the
+whole point) — both put the same band at the same level, and the tilt term is blind to the broadband
+case by construction. The worn record and the cassette fixture are the two sides of that ambiguity. What
+it would take is a **content** witness — whether the top end is shaped like programme or like noise — i.e.
+a new analyser metric, not a retune of the de-hisser's gate. The lever is documented here and at the
+decision it belongs to; dsp stayed 150/150 *with* the change, so the matrix's diagnosis rows are what
+carry this criterion, and they are what rejected it.
+
 ### Measured — the 128 kbit/s worn record's last two pops, and the term of the de-hisser's key that cannot see them
 
 **Round 14 closed the de-clicker's floor: 72/72 → 0/72 on the crackles fixture. On the worn-record row —
