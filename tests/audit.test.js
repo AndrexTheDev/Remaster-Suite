@@ -1676,9 +1676,10 @@ section('audit · the de-clicker\'s own floor');
     ['ratio ≈ 2.0', [[SRC_K, '    let k = clamp((ratio - 1.10) / 1.20, 0, 1);']]],
     ['ratio ≈ 1.9', [[SRC_K, '    let k = clamp((ratio - 1.05) / 0.90, 0, 1);']]],
   ];
-  const costOf = (edits) => {
+  const costOf = (edits, dose) => {
     const Pk = H.loadProcessorEdited(edits || [], SR);
-    const kitOn = H.renderEx(Pk, [kit.sig], { power: 1, autoLevel: 0, declick: 0.715 });
+    const dk = dose === undefined ? 0.715 : dose;
+    const kitOn = H.renderEx(Pk, [kit.sig], { power: 1, autoLevel: 0, declick: dk });
     const kitOff = H.renderEx(Pk, [kit.sig], { power: 1, autoLevel: 0 });
     let worstSnare = 0, touched = 0;
     for (const h of kit.hits) {
@@ -1694,7 +1695,7 @@ section('audit · the de-clicker\'s own floor');
       if (db < worstSnare) worstSnare = db;
     }
     for (let i = 0; i + kitOn.latency < kitOn.out[0].length; i++) if (Math.abs(kitOn.out[0][i + kitOn.latency] - kitOff.out[0][i]) > 0.002) touched++;
-    const wOn = H.renderEx(Pk, [wide], { power: 1, autoLevel: 0, declick: 0.715 });
+    const wOn = H.renderEx(Pk, [wide], { power: 1, autoLevel: 0, declick: dk });
     const wOff = H.renderEx(Pk, [wide], { power: 1, autoLevel: 0 });
     let wt = 0;
     for (let i = 0; i + wOn.latency < wOn.out[0].length; i++) if (Math.abs(wOn.out[0][i + wOn.latency] - wOff.out[0][i]) > 0.002) wt++;
@@ -1708,6 +1709,23 @@ section('audit · the de-clicker\'s own floor');
     'and reaching even the nearest of those pops is what the gate was protecting',
     'snare ' + num(near.snare) + ' → ' + num(reach.snare) + ' dB as the map moves down (' + num(near.master, 1) + ' → '
     + num(reach.master, 1) + ' % of the clean master rewritten)');
+
+  /* The *taste curve* is where that protection lives as well, and that is
+   * measured rather than assumed. The de-clicker's amount is a repair *depth*
+   * — unlike the de-clipper's, which is only the detector's threshold (see the
+   * dsp suite) — so applying it as measured instead of through
+   * 0.35 + 0.65·p^0.85 (0.715/0.830 = 0.861 at the default intensity, 20 %
+   * more) buys one pop of an acceptance-shaped crackle fixture's 72 (3 → 2
+   * above the clean copy, pop energy −10.32 → −10.29 dB) and costs the kit
+   * about 6 dB of snare here (the acceptance reproduction reads 13). Measured
+   * here: the numbers below. The dose stays on the curve — this row is what
+   * stops the next round from "fixing" it. */
+  const curve = 0.35 + 0.65 * Math.pow(0.7, 0.85);
+  const onCurve = costOf(null, 0.715), asMeasured = costOf(null, 0.715 / curve);
+  ok(asMeasured.snare > onCurve.snare + 5 && asMeasured.kit > onCurve.kit * 1.6 && asMeasured.master > onCurve.master * 2,
+    'the de-clicker\u2019s dose belongs on the taste curve: as measured it buys one pop and costs the kit',
+    'snare ' + num(onCurve.snare) + ' → ' + num(asMeasured.snare) + ' dB · kit ' + num(onCurve.kit, 2) + ' → '
+    + num(asMeasured.kit, 2) + ' % · master ' + num(onCurve.master, 2) + ' → ' + num(asMeasured.master, 2) + ' %');
 }
 
 /* The crackle statistic is the one number three things act on: the classifier's

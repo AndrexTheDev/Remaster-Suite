@@ -13,6 +13,29 @@ thresholds sat in the tone stages (the glue's and the warmth's), all of them wri
 full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
 else may move.
 
+### Measured — the two repair stages that stay on the taste curve, and why
+
+* **The de-clicker's amount is a repair depth, and the curve is its transient protection.** Applying
+  it as *measured* (0.861 instead of 0.715 at the default intensity — 20 % more) buys **one** pop of a
+  72-pop fixture: pops above the clean copy 3 → 2, pop energy −10.32 → −10.29 dB, crackleIndex
+  0.061 → 0.016. It costs the fixture's kit **6 dB of snare** (−62.1 → −55.8 dB — 13 dB on the
+  acceptance-shaped reproduction of the same fixtures), 2.3× the touched samples (4.37 → 9.99 %) and
+  2.7× the clean master (2.74 → 7.46 %). At full dose the snare reads −51 dB and
+  the kit 18.6 %. That cost is what the audit suite's own `snare < −55` guard is written around, so the
+  dose stays on the curve — and the audit now **pins the comparison itself** (dose on the curve vs
+  as measured: snare +8 dB, kit ×1.6, master ×2 at minimum), so the next round re-measures rather
+  than re-decides.
+* **The de-clipper's amount is only the detector's threshold** — `implied > 1.2 − 0.7·amount`; the
+  waveform decides how deep the arc goes (the stage's own comment). Measured: the parameter is *live*
+  (bypass −23.49 dB against −33.30 with it on the tonal contract fixture; on a hard-clipped noise
+  fixture 0 → 0.05 moves the plateau error −23.23 → −20.96 dB) and *saturated* — identical to four
+  decimals at every dose from 0.05 to 1.0 on the tone fixture, and within 0.02 dB on the noise one.
+  "As measured" would therefore be a no-op that lowers the evidence bar for weak runs, so it stays on
+  the curve too, and the dsp suite now pins the invariance (0.05 / 0.72 / 0.90 / 1.0 within 0.05 dB).
+* Both verdicts are written into `presets.js` where `repairMeasured` is defined — the de-hisser is the
+  one repair whose amount is a depth *and* a measurement, and it is the only one moved. dsp 127 → 128,
+  audit 309 → 310.
+
 ### Fixed — the key measured a *different* band than the analysis it follows
 
 * **One bandpass where the analysis cascades two.** The de-hisser's key compares the 4 kHz+ band

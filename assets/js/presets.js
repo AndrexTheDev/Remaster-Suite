@@ -1317,9 +1317,21 @@
      * **8.79 dB** and the tilt step the card prints 10.18 → **8.39 dB**, against
      * 0.13 → 0.20 dB on the frames the music owns; both clean-bed fixtures still
      * measure a tilt step under 0.25 dB and a dose of exactly 0. The de-clicker
-     * and the de-clipper are *not* moved here: their amounts carry the same
-     * argument but their risk is the music's transients, and that is its own
-     * round (their rows are green as they stand). */
+     * and the de-clipper are *not* moved here, and that round is closed by
+     * measurement rather than by taste:
+     *   · the de-clicker's amount is a repair *depth*, and the curve is its
+     *     transient protection — applied as measured (0.861 instead of 0.715 at
+     *     the default) it buys **one** pop of a 72-pop fixture (3 → 2 above the
+     *     clean copy, pop energy −10.32 → −10.29 dB) and costs the kit
+     *     **6 dB of snare** (−62.1 → −55.8 dB, 13 dB on the acceptance
+     *     reproduction), 2.3× the touched samples (4.37 → 9.99 %) and 2.7× the
+     *     clean master (2.74 → 7.46 %); the audit suite pins that row;
+     *   · the de-clipper's amount is only the *detector's threshold*
+     *     (`implied > 1.2 − 0.7·amount` — the waveform decides the depth), and
+     *     it is already saturated where it matters: identical plateau error from
+     *     dose 0.05 to 1.0 on the tonal contract fixture and within 0.02 dB on a
+     *     hard-clipped noise fixture, so "as measured" would be a no-op that
+     *     only lowers the evidence bar the dsp suite just pinned. */
     const repairMeasured = (x) => x * smoothstep(0, 0.20, p);
     // Measured defects are not a matter of taste: once the slider has left zero,
     // hum, boxiness and a collapsed image are fixed by the *measurement* — a

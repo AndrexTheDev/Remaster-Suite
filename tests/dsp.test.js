@@ -548,6 +548,22 @@ H.section('engine · de-clipper on a clipped master');
     'and it is the right arc: the damaged samples follow the sine to within a per cent',
     'best-fit error over the flat tops ' + errOff.toFixed(1) + ' → ' + errOn.toFixed(1) + ' dB');
 
+  /* …and the amount is a *threshold*, not a depth — which is why this stage,
+   * unlike the de-hisser, stays on the intensity curve and nothing is lost by
+   * that. The stage's own contract (see `repair()`): a run is repaired when its
+   * implied peak clears `1.2 − 0.7·amount`, and the waveform then decides how
+   * deep the arc goes. Measured on this fixture, the error is *identical* —
+   * −33.3021 dB — at every dose from 0.05 to 1.0, while the bypass is −23.49;
+   * on a hard-clipped *noise* fixture (no period, short runs), where the
+   * threshold is the only thing the dose moves, 0 → 0.05 moves the plateau
+   * error −23.23 → −20.96 dB and 0.05 → 1.0 moves it by 0.02 dB. */
+  const doseErr = (d) => shapeErr(H.renderEx(Processor, [clipped], Object.assign({}, SOLO(), { declip: d, declick: 0 })));
+  const e05 = doseErr(0.05), e90 = doseErr(0.90), e100 = doseErr(1.0);
+  H.ok(Math.max(e05, e90, e100) - Math.min(e05, e90, e100, errOn) < 0.05 && errOn < errOff - 8,
+    'the amount moves the detector\u2019s threshold, not the depth of the reconstruction',
+    'error at dose 0.05 / 0.72 / 0.90 / 1.0: ' + e05.toFixed(2) + ' / ' + errOn.toFixed(2) + ' / ' + e90.toFixed(2)
+    + ' / ' + e100.toFixed(2) + ' dB (bypass ' + errOff.toFixed(2) + ')');
+
   // …and the reconstruction has to survive the *guard* too, which is the one
   // stage that can undo the whole repair: its knee starts 0.55 dB below full
   // scale, i.e. *below* the plateau of a clipped master, so a guard that does
