@@ -468,18 +468,29 @@ mark('section 15');
 {
   let clean = bed(9000, 0.7);
   /* squashed the way an over-limited master is: the peaks are pulled flat, so
-   * the file's own 98th percentile sits almost on its 5th */
+   * the file's own 98th percentile sits almost on its 5th — and squashed hard
+   * enough that the *app* says so. A row named after a defect class has to be a
+   * file the app actually scores as one, and this fixture did not: measured on
+   * the fixture as it shipped (the envelope re-applied at power 0.12, then
+   * tanh ×1.6), the app reads dynamicRangeDb **12.2** and the card comes back
+   * "hiss". Driving the *saturation* instead is the wrong knob — 3.2 → 10.9 dB
+   * "healthy", 5.0 → 9.3 dB "clipping", 7.0 → 7.7 dB "squashed,clipping" — the
+   * dynamic range of an over-limited master comes from its *envelope*, not from
+   * a limiter's knee, and a hard knee also writes flat tops the de-clipper's
+   * plateau detector rightly names. Flattening the envelope (power 0.02) and
+   * keeping the saturation mild (×2.0) is what the class is: measured, the app
+   * reads **8.7 dB** and the card names `squashed` — and nothing else. */
   /* the envelope is taken out and the rest saturated, which is what an
    * over-limited master is: every 20 ms window at nearly the same level. The
    * fixture is built on its own pink bed rather than on `bed()` so that the
    * level stays flat — `bed()` carries the song envelope this class is about */
   const sq = new Float32Array(clean.length);
   const env = H.songEnvelope(SR, SEC, 0.35);
-  for (let i = 0; i < sq.length; i++) sq[i] = clean[i] / Math.max(env[i], 0.02) * Math.pow(Math.max(env[i], 0.02), 0.12);
+  for (let i = 0; i < sq.length; i++) sq[i] = clean[i] / Math.max(env[i], 0.02) * Math.pow(Math.max(env[i], 0.02), 0.02);
   let mean = 0;
   for (let i = 0; i < sq.length; i++) mean += sq[i];
   mean /= sq.length;
-  for (let i = 0; i < sq.length; i++) sq[i] = Math.tanh((sq[i] - mean) * 1.6) / 1.6;
+  for (let i = 0; i < sq.length; i++) sq[i] = Math.tanh((sq[i] - mean) * 2.0) / 2.0;
   const flat = H.normalize(sq, 0.88);
   const r = run([flat]);
   const crest = (sig, lat) => {
@@ -494,7 +505,8 @@ mark('section 15');
     return 20 * Math.log10((lv[Math.floor(lv.length * 0.98)] + 1e-12) / (lv[Math.floor(lv.length * 0.05)] + 1e-12));
   };
   row('squashed master', '20 ms envelope p98 − p05 (dB)', crest(flat), crest(r.out[0], r.lat),
-    'dynamicRangeDb ' + N(r.m.dynamicRangeDb, 1) + ' · glue ' + N(r.P.glue) + ' · warmth ' + N(r.P.warmth) + ' · ' + r.dry.issues.join(','));
+    'the app reads ' + N(r.m.dynamicRangeDb, 1) + ' dB (its own "squashed" line is 9) · card '
+    + r.dry.issues.join(',') + ' · glue dose ' + N(r.P.glue, 2) + ' · warmth dose ' + N(r.P.warmth, 2));
 }
 mark('section 16');
 /* 16 ── an out-of-phase bottom ──────────────────────────────────────────── */

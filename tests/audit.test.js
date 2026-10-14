@@ -1027,6 +1027,37 @@ section('audit · presets and parameters');
     ok(pSquashed.glue <= pNormal.glue, 'and it is not compressed further either',
       'glue ' + pSquashed.glue.toFixed(3) + ' vs ' + pNormal.glue.toFixed(3));
 
+    /* …and the class is *named*, not just dosed for. The two rows above ask what
+     * the chain does with a limited master; this asks whether the diagnosis calls
+     * it one at all. It is a separate question, and it was a hole in the report:
+     * the acceptance tool's own "squashed master" row was built with a crush the
+     * app read as **healthy** (dynamicRangeDb 12.2, card "hiss"), so no fixture in
+     * either tool exercised the class the wording test above checks for. The
+     * dynamic range of an over-limited master comes from its envelope, not from a
+     * limiter's knee — driving the saturation instead lands on "clipping" (5.0 →
+     * 9.3 dB) or "squashed,clipping" (7.0 → 7.7) because a hard knee writes flat
+     * tops. Measured on the flat-envelope, mild-saturation fixture below:
+     * dynamicRangeDb **8.7 dB** and the card names `squashed` — and nothing else.
+     * (The app's own line for the class is 9 dB.) */
+    const flatSq = (() => {
+      const env2 = H.songEnvelope(SR2, 8, 0.35);
+      let s = H.filter(DSP, H.pink(SR2, 8, 0.40, 31), SR2, 'lp', 9000, 0.60);
+      for (let i = 0; i < s.length; i++) s[i] *= env2[i];
+      s = H.normalize(s, 0.7);
+      const sq = new Float32Array(s.length);
+      for (let i = 0; i < sq.length; i++) sq[i] = s[i] / Math.max(env2[i], 0.02) * Math.pow(Math.max(env2[i], 0.02), 0.02);
+      let mean = 0;
+      for (let i = 0; i < sq.length; i++) mean += sq[i];
+      mean /= sq.length;
+      for (let i = 0; i < sq.length; i++) sq[i] = Math.tanh((sq[i] - mean) * 2.0) / 2.0;
+      return H.normalize(sq, 0.88);
+    })();
+    const mSq = DSP.measure([flatSq], SR2);
+    const sqIssues = Presets.diagnose(mSq).issues || [];
+    ok(mSq.dynamicRangeDb < 9 && sqIssues.indexOf('squashed') !== -1,
+      'an over-limited master is diagnosed as one, not merely dosed for',
+      'dynamicRangeDb ' + mSq.dynamicRangeDb.toFixed(1) + ' dB · card ' + sqIssues.join(','));
+
     const clean = (() => {
       const env = H.songEnvelope(SR2, 10, 0.04);
       let s = H.mul(H.pink(SR2, 10, 0.35, 77), 1);

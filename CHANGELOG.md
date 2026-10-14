@@ -13,6 +13,26 @@ thresholds sat in the tone stages (the glue's and the warmth's), all of them wri
 full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
 else may move.
 
+### Fixed — the report's "squashed master" row tested a file the app called healthy
+
+* **No fixture in either tool exercised the `squashed` class.** The acceptance row is named after the
+  defect — but its crush (the song envelope re-applied at power 0.12, then `tanh × 1.6`) reads
+  `dynamicRangeDb` **12.2 dB** with the card coming back **"hiss"**, i.e. a file the diagnosis does
+  not consider squashed at all; the suite's wording test checked the *label* existed and nothing
+  checked the class ever fired.
+* **The wrong knob was saturation.** Measured across the crush constant on this fixture: ×3.2 →
+  10.9 dB "healthy", ×5.0 → 9.3 dB "clipping", ×7.0 → 7.7 dB "squashed,clipping". The dynamic range of
+  an over-limited master comes from its **envelope**, not from a limiter's knee — and a hard knee also
+  writes the flat tops the de-clipper's plateau detector rightly names. Flattening the envelope
+  (power 0.02) and keeping the saturation mild (×2.0) is what the class is: measured, the app reads
+  **8.7 dB** and the card names `squashed` — and nothing else.
+* The row now reads 12.82 → 11.45 dB (the chain's limiter cost on a file with almost no dynamics
+  left, as measured in the limiter section below), and its note names what the app itself concluded:
+  `the app reads 8.7 dB (its own "squashed" line is 9) · card squashed · glue dose 0.12 · warmth dose
+  0.14` — before, the note printed bare doses beside a card that said "hiss".
+* New audit row next to the limited-master dosing rows: an over-limited master must be **diagnosed**
+  as one (8.7 dB, card `squashed`), not merely dosed for. audit 308 → 309.
+
 ### Fixed — a strong room ring came out of the chain still reported boxy
 
 * **The resonance notch's ceiling was a flat 8 dB, and 8 dB is not enough for a strong ring.** On a
