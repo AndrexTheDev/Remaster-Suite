@@ -704,13 +704,29 @@
      * plus a 41-82 Hz line — 3.8), rather than being raised until no music can
      * ever trip it. The corner's second rung is documented at 9a below. */
 
-    // An out-of-phase bottom: the channels are correlated in the mids but
-    // *cancel* below 200 Hz. Only stereo material can have it, and only when
-    // there is real side energy down there to cancel in the first place.
+    // An out-of-phase bottom: the channels agree in the mids but the bottom of
+    // one channel is *inverted*, so it cancels below 200 Hz. Only stereo
+    // material can have it, and only when there is real side energy down there
+    // to cancel in the first place. The frontier is between a *cancelling* and a
+    // merely *decorrelated* bottom, and it is drawn on the negative side because
+    // zero is not the defect: measured, the audit's inverted-bass fixture reads
+    // −0.82 in the low band and the acceptance §16 fixture (one channel's bottom
+    // inverted by 1.9×) −0.49, while two independent pink noises — a legitimately
+    // *wide* stereo image, i.e. the thing that must not be repaired — read +0.06
+    // and were treated as full need by the old curve, which put the truth at
+    // +0.55 and the defect's *absence* at +0.05. The mono-maker was therefore
+    // folding the bottom of well-made wide mixes: on the engine's own
+    // stereo-integrity fixture the old curve moved the file's correlation
+    // 0.03 → 0.32, past the ±0.25 the suite allows — and the suite is right to
+    // allow no more. Need now reaches full only where a cancellation does
+    // (≤ −0.35) and is zero at +0.05: the same wide fixture reads 0.03 → 0.03
+    // (Δ 0.00) and is not named, a mild cancellation (0.35×) reads +0.97 and is
+    // left alone, and both inverted fixtures above still ask for the stage in
+    // full (bassMono 1.00).
     const st = m.stereo || {};
     const lowRho = (m.channels > 1 && isFinite(st.low)) ? st.low : 1;
     const widenGuard = m.channels > 1 && isFinite(st.mid) ? 1 : 0;
-    const phaseNeed = widenGuard * smoothstep(0.55, 0.05, lowRho);
+    const phaseNeed = widenGuard * smoothstep(0.05, -0.35, lowRho);
 
     // How percussive the material is (crest factor: a bed of sound sits at
     // 12–15 dB, hits and notes at 18–22 dB). It decides how the glue
@@ -1628,13 +1644,23 @@
     if ((m.clipEvidence || 0) > 0.05) push('clipping', clamp(m.clipEvidence, 0, 1));
     else if (m.clipRatio > 0.002) push('clipping', 0.6);
     if (m.dynamicRangeDb < 9) push('squashed', 0.5);
-    if (m.correlation < 0.2 && m.channels > 1) push('narrow', 0.5);
     // the per-song findings are part of the sentence as well: they are the ones
     // a profile cannot know about
     const D = demand(m, d);
     if (D.sibNeed > 0.3) push('sibilance', D.sibNeed);
     if (D.infraNeed > 0.3) push('rumble', D.infraNeed);
     if (D.phaseNeed > 0.3) push('outOfPhase', D.phaseNeed);
+    /* A narrow stereo image, on the licence of its own repair: this used to be
+     * `m.correlation < 0.2`, which is the *opposite* of a narrow image — a
+     * narrow one is a *correlated* one (ρ → 1; the law at `widenNeed` says so and
+     * the card's own row is keyed on it). Measured before the fix, the engine's
+     * wide-stereo pair — two independent pink noises, ρ = 0.030, the widener asked
+     * for nothing (dose 0.000) and the image came out untouched at 0.031 — was
+     * named `narrow` in the sentence, i.e. the app telling the user "almost mono"
+     * about the widest file it can be handed, while a genuinely narrow pair
+     * (ρ = 0.982, dose 0.457) was named nothing. The threshold is the one the
+     * card's own row uses (0.15), so the sentence and the card cannot disagree. */
+    if (D.widenNeed > 0.15) push('narrow', clamp(D.widenNeed, 0, 1));
     if (m.dcOffsetDb !== undefined && m.dcOffsetDb > -46) push('dc', 0.5);
     if (!issues.length) push('healthy', 1);
     issues.sort((a, b) => b.weight - a.weight);

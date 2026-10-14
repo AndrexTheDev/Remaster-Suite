@@ -749,6 +749,19 @@ section('audit · presets and parameters');
     return [H.normalize(a, 0.8), H.normalize(b, 0.8)];
   })();
   const phaseM = DSP.measure(phasePair, 48000);
+  // …and the case that is *not* a fault: two channels that are simply different
+  // are a wide image, and its low band reads near zero correlation — which is
+  // where the old curve put full need, so the mono-maker folded the bottom of
+  // well-made wide mixes (on the engine's stereo-integrity fixture the file's
+  // correlation moved 0.03 → 0.32, past the ±0.25 that suite allows). The
+  // frontier is asserted here so the next round re-measures rather than
+  // re-decides: the mono-maker may not fire, and must not be asked for, on a
+  // pair whose low band merely disagrees in phase *at random*.
+  const widePair = [
+    H.normalize(H.pink(48000, 6, 0.3, 81), 0.9),
+    H.normalize(H.mix([H.pink(48000, 6, 0.25, 82), H.tone(1000, 48000, 6, 0.05)]), 0.85),
+  ];
+  const wideM = DSP.measure(widePair, 48000);
   // …and a turntable's rumble: real programme with no content below 120 Hz, a
   // steady 20–40 Hz noise floor under it — the one defect a high-pass can fix
   // and the only fixture that can ask for it.
@@ -773,6 +786,19 @@ section('audit · presets and parameters');
     'a centred bass is left centred');
   ok(Presets.buildParams('auto', phaseM, 0.8).bassMono > 0.5,
     'an inverted bass asks for the mono-maker', Presets.buildParams('auto', phaseM, 0.8).bassMono.toFixed(2));
+  // (the dose is a smoothstep, so the claim is "nothing that could fold the
+  // bottom" — 0.003 of dose at ρ = 0.037, against 1.00 on the inverted fixture)
+  ok(Presets.buildParams('auto', wideM, 0.8).bassMono < 0.02,
+    'a merely wide bottom does not', 'low correlation ' + wideM.stereo.low.toFixed(3)
+    + ' → bassMono ' + Presets.buildParams('auto', wideM, 0.8).bassMono.toFixed(3));
+  // …and the same frontier in the diagnosis sentence, which has its own list: the
+  // issue used to be pushed on `correlation < 0.2`, the opposite of a narrow
+  // image, so the widest possible file was called "almost mono" while a genuinely
+  // narrow one was called nothing.
+  ok(Presets.diagnose(wideM).issues.indexOf('narrow') < 0,
+    'a wide image is not called narrow', Presets.diagnose(wideM).issues.join(', ') || 'healthy');
+  ok(Presets.diagnose(stereoM).issues.indexOf('narrow') >= 0,
+    'a narrow image still is', Presets.diagnose(stereoM).issues.join(', '));
   ok(Presets.buildParams('auto', DSP.measure([sibilant], 48000), 0.8).deess > 0.2,
     'a sibilant recording asks for the de-esser',
     Presets.buildParams('auto', DSP.measure([sibilant], 48000), 0.8).deess.toFixed(2));

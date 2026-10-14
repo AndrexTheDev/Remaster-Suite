@@ -13,6 +13,52 @@ thresholds sat in the tone stages (the glue's and the warmth's), all of them wri
 full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
 else may move.
 
+### Fixed — the mono-maker measured a band it never folded, and folded bottoms that were merely wide
+
+**The mono-maker measured a band it never folded.** The analysis reports the low band's correlation
+through a one-pole at **200 Hz** (`stereoBands`) while the stage folded the side with a 2-pole corner
+at **120 Hz**: bands that do not match, so the stage could never deliver on its own licence. Measured
+on the acceptance §16 fixture: the chain's *own output* still read `outOfPhase` — and so did the
+320 kbit/s export — i.e. the app reporting its own repair as unfixed. The fold now uses the same
+one-pole the analysis measures with, and because the analysis reports corr(LP(L), LP(R)) with LP
+linear, subtracting LP(side) makes that correlation 1 by construction. Measured: the low correlation
+**−0.55 → 0.76** (the row's own second meter 0.16 → 0.92, from −0.10/0.61), and the issue is gone from
+the chain's output *and* from the re-upload.
+
+**And it folded bottoms that were merely wide.** The need curve keyed on *low* correlation
+(`smoothstep(0.55, 0.05, rho)`), and zero is not the defect: measured, the audit's inverted-bass
+fixture reads **−0.82**, the §16 fixture **−0.49**, and two independent pink noises — a legitimately
+*wide* image, the one thing that must not be repaired — **+0.06**, which the old curve read as *full*
+need. The engine's stereo-integrity test caught the consequence: the file's correlation moved
+0.03 → **0.32**, past the ±0.25 that test allows. Need now reaches full only where a cancellation
+does (≤ −0.35) and is zero at +0.05; the wide pair reads 0.03 → **0.03** (Δ 0.00) and is not named, a
+mild cancellation (+0.97) is left alone, and both inverted fixtures still ask for the stage in full
+(`bassMono 1.00`). The frontier is pinned in the audit suite (313 assertions now) rather than argued.
+
+**And the same defect in the sentence.** The diagnosis list pushed `narrow` when
+`m.correlation < 0.2` — the *opposite* of a narrow image, which is a *correlated* one (ρ → 1); the
+card's own row is keyed on `widenNeed` and says so. Measured before the fix, on the engine's
+wide-stereo pair (two independent pink noises, ρ = **0.030**, widener dose **0.000**, image out
+untouched at 0.031): the app called it `narrow` — "almost mono" about the widest file it can be
+handed — while a genuinely narrow pair (ρ = **0.982**, dose 0.457) was called nothing. The issue is
+now pushed on the same licence the card's row uses (0.15), and the i18n label was aligned with what
+the defect is (`enge Stereo-Bühne` / `narrow stereo image`, not "almost mono"). The assignment matrix
+shows both sides: the wide control's issues `narrow → healthy`, the §16 fixture's dry list
+`outOfPhase,narrow → outOfPhase`, and the narrow pair's own row now carries `narrow`.
+
+### Added — the acceptance matrix re-uploads *every* class's export, not only the three that had a row
+
+The user's own check — process, export 320 kbit/s, feed the export back — applied to the whole
+matrix. The entry is recorded inside the matrix's own `run()`, so a class cannot forget it, and the
+new section (§19) compares the input's issues, the chain's own output and the re-upload, marking the
+one failure that matters: *the input has the defect, the chain's output does not, the export does*.
+
+Measured (`acceptance-v2as.txt`): **97 rows · 19 classes · exit 0**, and **no class names a repaired
+defect on its export** — including the classes that arrived as a 128 kbit/s MP3, where the re-upload
+is a second generation of lossy coding, and the two classes that had no export row before (`dc` and
+`outOfPhase`, both `healthy` on the export now). Where the encoder itself adds a reading, the row
+says so instead of counting it as a return.
+
 ### Fixed — the sub-sonic guard's ceiling left a saturated rumble floor in place
 
 The guard's corner was `clamp(18 + 6·need, 0, 24)`: whatever the floor measured, the stage never

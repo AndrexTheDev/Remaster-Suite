@@ -109,13 +109,21 @@ function flatSpans(sig, tol) {
 }
 
 /* ── the chain ──────────────────────────────────────────────────────────── */
+const EXPORTS = [];
 function run(chans, over) {
   const m = RSDSP.measure(chans, SR);
   const cls = RP.classify(m);
   const P = Object.assign({}, RP.buildParams('auto', m, 0.7), over || {});
   const r = H.renderEx(Processor, chans, P);
   const mo = RSDSP.measure(r.out, SR);
-  return { m, mo, P, cls, out: r.out, lat: r.latency, dry: RP.diagnose(m), wet: RP.diagnose(mo) };
+  const dry = RP.diagnose(m), wet = RP.diagnose(mo);
+  /* Every class is re-uploaded once from its own export (§19): the app must not
+   * name a defect on the export that the chain has just repaired. It is recorded
+   * here rather than per section so that *every* class is covered by
+   * construction — a class that forgets its own export row still shows up. */
+  const exp = RP.diagnose(RSDSP.measure(U.enc(r.out, 320, U.WORK + '/accept-export' + EXPORTS.length + '.mp3'), SR));
+  EXPORTS.push({ cls: cls.id, dry: dry.issues, wet: wet.issues, exp: exp.issues });
+  return { m, mo, P, cls, out: r.out, lat: r.latency, dry, wet };
 }
 const ROWS = [];
 const row = (defect, stat, dry, wet, note) => ROWS.push([defect, stat, dry, wet, note || '']);
@@ -797,6 +805,35 @@ mark('section 16');
    * is the correlation above 2 kHz, where the mono-maker must not write */
   row('out-of-phase bottom', 'above-2 kHz correlation, must stay put (ratio)', hpRho(L, R, 0, 2000), hpRho(r.out[0], r.out[1], r.lat, 2000),
     'the repair may only touch the bottom');
+  /* The repair has to deliver on *its own* statistic — the one the diagnosis
+   * acts on — or the app goes on naming its own output for a defect it has just
+   * repaired. The analysis reports the low band's correlation through a one-pole
+   * at 200 Hz, the fold uses that same one-pole, and the naming line is 0.05
+   * from below: the number that armed the stage has to reach the far side of it.
+   * (This row is the one that found the mismatch: the fold used to be a 2-pole
+   * corner at 120 Hz, which left the chain's output at −0.10 and the app naming
+   * `outOfPhase` on its own export.) */
+  row('out-of-phase bottom', "the app's own low-band correlation (ratio)", r.m.stereo.low, r.mo.stereo.low,
+    'this number arms the stage (`phaseNeed`), ' + (r.wet.issues.join(',') || 'healthy') + ' after it');
+  /* …and the case that must *not* be repaired: two channels that are simply
+   * different are a wide image, not a phase fault, and its bottom reads near
+   * zero — exactly the value the old need curve treated as full need, which is
+   * how the mono-maker came to fold well-made wide mixes (the engine's own
+   * stereo-integrity test: correlation 0.03 → 0.32). The pair is a control: the
+   * app must ask for nothing here and the chain must leave the image alone. */
+  const widePair = (() => {
+    const env = H.songEnvelope(SR, SEC, 0.30);
+    const mk = (seed, lp, norm) => {
+      const s = H.filter(RSDSP, H.pink(SR, SEC, 0.40, seed), SR, 'lp', lp, 0.60);
+      for (let i = 0; i < s.length; i++) s[i] *= env[i];
+      return H.normalize(s, norm);
+    };
+    return [mk(81, 9000, 0.9), mk(82, 12000, 0.85)];
+  })();
+  const rw = run(widePair);
+  row('out-of-phase bottom', 'a merely wide bottom — control (ratio)', RSDSP.stereoCorrelation(widePair), RSDSP.stereoCorrelation(rw.out),
+    "the app's own low-band correlation " + N(rw.m.stereo.low, 3) + ' · bassMono ' + N(rw.P.bassMono, 2)
+    + ' · issues ' + (rw.dry.issues.join(',') || 'healthy') + ' · the two independent meters must agree that nothing was folded');
 }
 
 mark('section 17');
@@ -959,6 +996,30 @@ mark('section 18');
   const rm = RSDSP.measure([re], SR);
   row('hot modern master', 're-upload at 320 kbit/s → diagnosis', r.dry.issues.join(','), RP.diagnose(rm).issues.join(',') || 'healthy',
     'card ' + r.cls.id + ' → ' + RP.classify(rm).id + ' — the clipping is gone from the export, and what is left is the master\'s own dynamics, honestly reported');
+}
+
+mark('section 19');
+/* 19 ── the app's honesty about its own export, for every class at once ────
+ * The user's own check, applied to the whole matrix instead of to the three
+ * classes that had an export row: process the class's fixture, write the
+ * 320 kbit/s MP3 the app would hand back, re-upload it, and compare the two
+ * diagnosis lists. What this section looks for is the failure the request names
+ * — a defect the chain has repaired that is *named again* on the export, i.e.
+ * `the input has it, the chain's own output does not, the export does`. Codec
+ * noise the encoder adds is a different thing and is reported as such (a
+ * 320 kbit/s encode puts its own floor under the file; on material that arrived
+ * as a 128 kbit/s MP3 the re-upload is a second generation of lossy coding).
+ *
+ * It covers every class *by construction*: the entry is recorded in `run()`, so
+ * a class that forgets its own export row still shows up here. */
+for (const e of EXPORTS) {
+  const back = e.dry.filter((x) => e.exp.includes(x) && !e.wet.includes(x));
+  const codec = e.exp.filter((x) => !e.dry.includes(x) && !e.wet.includes(x));
+  row('export honesty', e.cls + ': input → re-upload at 320 kbit/s',
+    e.dry.join(',') || 'healthy', e.exp.join(',') || 'healthy',
+    (back.length ? '**a repaired defect is back on the export: ' + back.join(',') + '**' : 'no repaired defect returns')
+    + ' · the chain\'s own output reads ' + (e.wet.join(',') || 'healthy')
+    + (codec.length ? ' · the encode itself adds ' + codec.join(',') : ''));
 }
 
 /* ── print ──────────────────────────────────────────────────────────────── */

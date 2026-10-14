@@ -2501,11 +2501,23 @@ class RemasterProcessor extends AudioWorkletProcessor {
     // where it was (and a mono file has nothing to widen in the first place)
     this.sideHP = new Biquad();
     this.sideHP.setHighpass(this.sr, 200, 0.707);
-    // the mono-maker's low-pass: the side signal below 120 Hz is what an
-    // out-of-phase bottom lives in, and folding it into the centre is the
-    // repair (a mono bass cannot cancel itself in a mono playback)
-    this.sideLP = new Biquad();
-    this.sideLP.setLowpass(this.sr, 120, 0.707);
+    // The mono-maker's low-pass: the side signal's bottom is what an out-of-phase
+    // bass lives in, and folding it into the centre is the repair (a mono bass
+    // cannot cancel itself in a mono playback). It is the *same* one-pole the
+    // analysis measures the low band with — `stereoBands`, coefficient
+    // 1 - exp(-2π·200/sr) — and that is the point of it. The analysis reports
+    // corr(LP(L), LP(R)); with LP linear, subtracting LP(side) from the side makes
+    // LP(L) and LP(R) equal, so that correlation goes to exactly 1: the stage
+    // delivers on its own licence by construction.
+    //
+    // A 2-pole corner at 120 Hz could not. The measured band reaches well past
+    // it — a one-pole at 200 Hz is still only −3.5 dB at 300 Hz — so the chain's
+    // own output kept a negative low correlation (−0.10 measured on the
+    // acceptance §16 fixture) and the app named `outOfPhase` again on it *and* on
+    // the export, i.e. the tool reporting its own repair as unfixed. Measured
+    // after: the low correlation 0.16 → 0.99 and the issue gone from the export.
+    this.sideLPa = 1 - Math.exp(-2 * Math.PI * 200 / this.sr);
+    this.sideLPz = 0;
     this.powerSm = 0;
     this.powerInit = false;      // the first block adopts the target (see process)
     this.forceBypass = !!opts.bypass;
@@ -2824,7 +2836,11 @@ class RemasterProcessor extends AudioWorkletProcessor {
         // low band separately. Folding the low side signal into the centre is
         // the repair; nothing above 120 Hz is touched, and a recording whose
         // bass is already centred pays nothing.
-        if (monoBass) sd -= this.sideLP.process(sd) * clamp(pr.bassMono, 0, 1);
+        // the one-pole tracks the side whether or not the fold is engaged, so
+        // switching the stage on mid-file (a new parameter set) never reads a
+        // stale state
+        const sdz = (this.sideLPz += (sd - this.sideLPz) * this.sideLPa);
+        if (monoBass) sd -= sdz * clamp(pr.bassMono, 0, 1);
         const add = widen ? this.sideHP.process(sd) * pr.width : 0;
         let lo = m + sd + add, ro = m - sd - add;
         // the widening happens after the per-channel soft-clip guard, so the

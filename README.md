@@ -107,7 +107,10 @@ Seven of the chain's parameters are not amounts at all but *measurements of the 
 frequency, the frequency and sharpness of its two worst resonances, where its noise starts, which
 split its de-hisser should use, how percussive it is — and four stages exist only when a file asks
 for them: the **sub-sonic guard**, the **per-song corrective EQ**, the **de-esser** and the **bass
-mono-maker**. They are computed from that file's own spectrum, and on a recording that measures
+mono-maker** — the last of which fires on a *cancelling* bottom (a negative low-band correlation) and
+never on a merely wide one: measured, an inverted-bass fixture reads −0.82 and is repaired in full,
+while two independent channels read +0.06 and are left exactly as they were. They are computed from
+that file's own spectrum, and on a recording that measures
 clean they do nothing (on a 93/100 file: sub-sonic guard and de-esser exactly 0, mono-maker 0, no
 corrective band above **0.2 dB**). Each one is visible in the analysis, in one plain sentence — and
 when a file has several problems at once, automatic mode treats all of them (see
