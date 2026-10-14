@@ -6,6 +6,47 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Fixed — the drum row read the off render 88 samples early
+
+**The matrix's own meter carried the bug the round before it had just fixed in the dsp suite: a
+render's latency read under the wrong name.** A raw `H.renderEx` result reports its look-ahead as
+`latency`; the acceptance tool's `run()` re-labels it `lat`, and every reader of either writes
+`(lat || 0)` — so the wrong name reads as **zero** samples, silently. The two rows the click round
+added read `off.lat` and `offp.lat` on *raw* renders, which made their "de-click off" column read the
+render 88 samples (1.8 ms — the limiter's look-ahead) *before* the hit it was measuring. The drum row
+had a second one in the same expression: it sorted each render's 16 hit peaks and paired them by rank
+(`ppOn[k]` against `ppOff[k]` on the *sorted* arrays), which is not a comparison of hits. Between them
+the row reported **1.79 / 2.83 dB** (median / worst) of peak damage the de-clicker does not do.
+
+Measured with both fixed — the same fixture, the same dose 0.072, both columns at each render's own
+latency, hits paired in fixture order: **−0.06 / 0.31 dB**. That is what the dsp suite's own regression
+guard has read all along (−0.27 / 0.31 of its 16 hits), so the two meters agree on the worst hit to a
+hundredth of a decibel (the medians differ by a fifth of one: the suite's fixture has no clave, hi-hat
+or crash in it). The burst row above read the same wrong key and cost nothing measurable: its 3 ms
+window starts 1.8 ms early and still contains the burst (−0.490 / −1.250 dB either way, probe
+`tools/work/dsp-lat.js`) — that row's fixture *does* declare 88 samples of look-ahead, so the reason it
+did not move is the window, not luck.
+
+* `tests/harness.js`'s `renderEx` returns the look-ahead under **both** names now, with the reason in
+  the code: a result that carries only one of them reads as zero at the other, and zero is exactly the
+  sample count a row is trying to measure.
+* `tools/acceptance.js` reads a raw render through `rawLat()`, which **throws** if the result does not
+  carry a numeric latency, and `run()` carries both names.
+* `tests/dsp.test.js`: the six readers of a raw render (`burstBand`, the de-hisser's frame meter) use
+  `.latency`. Two printed numbers move by a tenth of a dB with the corrected alignment, both in the
+  direction of the claim: the bursts' own 7.8 kHz band **−25.0 → −31.8 dBFS** (was −31.5) and the
+  de-hisser's pause floor **6000:5.7  12000:7.3 dB** (was 5.6 / 7.2); the continuous "s" reads
+  **4.2 → 5.0 dB** down (was 4.3 → 5.1), and README row 5b is corrected to it.
+* the de-clicker's pin is tightened to what the corrected meter measures — `|delta| < 0.6 && worst < 1.0`
+  where it read `|delta| < 1.0 && worst < 3.0`: a bound ten times the effect is a comment, not a guard.
+  Its statistic is paired per hit now as well (it sorted the 16 peaks and compared them by rank — the
+  same flaw the acceptance row had; on this fixture the ranks and the hits agree, so its −0.27 / 0.31 dB
+  did not move: the guard now says what it means).
+
+One row of 113 changes (acceptance `v2bk` → `v2bm`: 113 rows · 29 classes, exit 0) — the drum row's
+line and its note. The paragraph below, which quoted 1.84 / 2.36 dB for the same fixture, is corrected
+in place. `npm test`: 150 / 137 / 316 / 108 / 17, exit 0.
+
 ### Fixed — the de-esser was handed a measurement and spent 0.830 of it
 
 **The amount is the law's reading of the file, and the intensity curve was taking a sixth of it — the
@@ -196,15 +237,16 @@ sits in the band a sibilant onset occupies (0.045–0.12) and the duty gate neve
 with the top end and fails the duty gate long before the index looks at it: nine realistic percussion fixtures —
 a kick+snare+hi-hat groove, a snare with a 130 ms top end, a snare roll at 8/s, a hi-hat with 45 ms, a crash with
 800 ms, a clave, a rimshot, a stick click with a 900 Hz body, a 4 ms burst with a 1200 Hz body — read **0 spike
-windows each**, with and without the gate, and the same chain's de-clicker moves their hits by **0.30 dB** of peak worst
-in the regression guard — **1.84 dB mean / 2.36 dB worst** of the 16 hits of §20's own performance fixture, at the
-profile's floor dose (0.072), which is the per-sample trade every de-clicker has. The
+windows each**, with and without the gate, and the same chain's de-clicker moves their hits by **0.31 dB** of peak worst
+(median −0.27 dB) in the regression guard — §20's own performance fixture reads **−0.06 / 0.31 dB** of its 16 hits at the
+profile's floor dose (0.072), which is the per-sample trade every de-clicker has. (This sentence first carried 1.84 / 2.36 dB
+and then 1.79 / 2.83: the acceptance row measured the *off* render 88 samples early until the fix at the top of this section.) The
 fixture the old gate was tuned on (24 × 0.4 ms of HP-3 kHz noise, no body, no tail) is a click train by every
 statistic here — duty 0.02–0.04, the band a pop occupies — and is named and repaired as one.
 
 * a regression guard, because that is the part the suite did not have: `tests/dsp.test.js` now carries both
   families — a 0.6 ms ring (index 0.73, dose 0.67, repaired to 0.00 / +0.2 dB measured twice) and a drum
-  performance (0 spike windows, dose 0.07, hits move 0.30 dB worst in the regression guard) — 134 checks, was 128;
+  performance (0 spike windows, dose 0.07, hits move 0.31 dB worst in the regression guard, median −0.27 dB) — 134 checks, was 128;
 * §20 of the acceptance matrix is rebuilt around them: the burst train's two rows are re-labelled as what the
   fixture is, and four rows are new — the drum performance (index · hit level through the chain, dose 0.072) and
   the click as a file carries it (index before/after 0.73 → 0.00 · the independent 4–12 kHz meter +13.1 →

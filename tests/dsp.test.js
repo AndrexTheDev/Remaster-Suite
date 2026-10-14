@@ -258,7 +258,7 @@ H.section('engine · de-esser, the dose it is handed is the dose it spends');
     return 10 * Math.log10(e / Math.max(1, n) + 1e-20);
   };
   const r = H.renderEx(Processor, [sig], law);
-  const dry = burstBand(sig, 0), wet = burstBand(r.out[0], r.lat);
+  const dry = burstBand(sig, 0), wet = burstBand(r.out[0], r.latency);
   H.ok(dry - wet > 3, 'the bursts lose the band the defect lives in',
     dry.toFixed(1) + ' → ' + wet.toFixed(1) + ' dBFS in 7.8 kHz over the 12 bursts');
 
@@ -317,8 +317,8 @@ H.section('engine · de-esser, the dose it is handed is the dose it spends');
     return 10 * Math.log10(sum / Math.max(1, take) + 1e-20);
   };
   const zero = loud20([sus], 0, sus);
-  const moved = zero - loud20(onS.out, onS.lat, sus);
-  const before = zero - loud20(onC.out, onC.lat, sus);
+  const moved = zero - loud20(onS.out, onS.latency, sus);
+  const before = zero - loud20(onC.out, onC.latency, sus);
   H.ok(sm.sibExcessDb > 3 && sLaw.deess > 0.4 && moved > before + 0.4,
     'a continuous "s" (the file that needs it) is moved further than the curve moved it',
     'excess ' + sm.sibExcessDb.toFixed(2) + ' dB · dose 0.463 → ' + sLaw.deess.toFixed(3)
@@ -390,7 +390,7 @@ H.section('engine · de-hiss, the floor regime delivers what was measured');
 
   // 1 ── the pause floor comes down where the split alone ran out of reach
   const deeper = [4000, 6000, 8000, 12000].map((f) =>
-    bandDb(off.out[0], f, pause, off.lat) - bandDb(on.out[0], f, pause, on.lat));
+    bandDb(off.out[0], f, pause, off.latency) - bandDb(on.out[0], f, pause, on.latency));
   H.ok(Math.min(...deeper) > 3,
     'the pause floor comes down 4–12 kHz further than the split can take it',
     deeper.map((v, i) => [4000, 6000, 8000, 12000][i] + ':' + v.toFixed(1)).join('  ') + ' dB');
@@ -399,8 +399,8 @@ H.section('engine · de-hiss, the floor regime delivers what was measured');
   //      ones where the gate can be half-closed
   const moves = [];
   for (const f of [1000, 2000, 4000, 8000]) {
-    moves.push(Math.abs(bandDb(on.out[0], f, music, on.lat) - bandDb(off.out[0], f, music, off.lat)));
-    moves.push(Math.abs(bandDb(on.out[0], f, soft, on.lat) - bandDb(off.out[0], f, soft, off.lat)));
+    moves.push(Math.abs(bandDb(on.out[0], f, music, on.latency) - bandDb(off.out[0], f, music, off.latency)));
+    moves.push(Math.abs(bandDb(on.out[0], f, soft, on.latency) - bandDb(off.out[0], f, soft, off.latency)));
   }
   H.ok(Math.max(...moves) < 0.15,
     'music frames (loud and soft) are untouched by the shelf',
@@ -618,24 +618,30 @@ H.section('engine · a performance keeps its top end');
   const law = Object.assign({}, H.DEFAULT_PARAMS, RP.buildParams('auto', RSDSP.measure([perf], SR), 0.7));
   const on = H.renderEx(Processor, [perf], law);
   const off = H.renderEx(Processor, [perf], Object.assign({}, law, { declick: 0 }));
-  const peaks = (o, lat) => {
-    const v = hits.map((h) => {
-      let pk = 0;
-      const c = h + (lat || 0);
-      for (let i = -Math.round(SR * 0.001); i < SR * 0.004; i++) {
-        const j = c + i;
-        if (j >= 0 && j < o.length) { const a = Math.abs(o[j]); if (a > pk) pk = a; }
-      }
-      return pk;
-    });
-    v.sort((a, b) => a - b);
-    return v;
-  };
+  /* Per hit, not per rank: the arrays used to be sorted here and then paired
+   * `k` against `k`, which compares the k-th smallest peak of one render with
+   * the k-th smallest of the other — on a fixture whose hits differ by a couple
+   * of dB that is not a comparison of hits. The acceptance row had the same
+   * line and the same flaw; this round fixed both. The median is still a median,
+   * read off a sorted *copy*. */
+  const peaks = (o, lat) => hits.map((h) => {
+    let pk = 0;
+    const c = h + (lat || 0);
+    for (let i = -Math.round(SR * 0.001); i < SR * 0.004; i++) {
+      const j = c + i;
+      if (j >= 0 && j < o.length) { const a = Math.abs(o[j]); if (a > pk) pk = a; }
+    }
+    return pk;
+  });
   const db = (x, y) => 20 * Math.log10((x + 1e-12) / (y + 1e-12));
-  const medOn = peaks(on.out[0], on.latency || 0), medOff = peaks(off.out[0], off.latency || 0);
-  const delta = db(medOn[medOn.length >> 1], medOff[medOff.length >> 1]);
-  const worst = Math.max.apply(null, hits.map((h, k) => Math.abs(db(medOn[k], medOff[k]))));
-  H.ok(Math.abs(delta) < 1.0 && worst < 3.0, '…and the de-clicker leaves the hits where they are',
+  const medOf = (v) => { const s = v.slice().sort((a, b) => a - b); return s[s.length >> 1]; };
+  const pkOn = peaks(on.out[0], on.latency || 0), pkOff = peaks(off.out[0], off.latency || 0);
+  const delta = db(medOf(pkOn), medOf(pkOff));
+  const worst = Math.max.apply(null, pkOn.map((v, k) => Math.abs(db(v, pkOff[k]))));
+  /* The pin was `|delta| < 1.0 && worst < 3.0` while this meter reads the hits
+   * correctly: a bound 10× the effect is not a guard, it is a comment. Tightened
+   * to the measured margin. */
+  H.ok(Math.abs(delta) < 0.6 && worst < 1.0, '…and the de-clicker leaves the hits where they are',
     'declick dose ' + law.declick.toFixed(2) + ' · hit peaks move ' + delta.toFixed(2) + ' dB at the median, '
     + worst.toFixed(2) + ' dB at the worst of ' + hits.length + ' hits');
 }

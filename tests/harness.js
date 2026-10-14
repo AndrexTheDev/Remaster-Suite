@@ -121,7 +121,16 @@ function renderEx(Processor, input, params, blockSize) {
     const outBlocks = out.map((c) => c.subarray(pos, pos + n));
     proc.process([inBlocks], [outBlocks], arrays);
   }
-  return { out, latency: proc.latency || 0 };
+  /* The look-ahead, under both spellings this repo has used for it: the harness
+   * called it `latency`, the acceptance matrix's `run()` re-labels it `lat`, and
+   * every reader of either writes `(lat || 0)`. A result that carries only one
+   * of the two names therefore reads as **zero samples** at the other name —
+   * silent, and exactly the sample count a row is trying to measure. That is how
+   * the acceptance's drum-performance row came to report 1.79 dB of peak damage
+   * the de-clicker does not do (`tools/acceptance.js`, and the round that fixed
+   * it): the off render was read with `.lat`, 88 samples of limiter delay early.
+   * The result carries both, so neither name can be the wrong one. */
+  return { out, latency: proc.latency || 0, lat: proc.latency || 0 };
 }
 
 /** Render and return the output channels only. See renderEx for the latency. */

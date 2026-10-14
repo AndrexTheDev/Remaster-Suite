@@ -123,13 +123,26 @@ function run(chans, over) {
    * construction — a class that forgets its own export row still shows up. */
   const exp = RP.diagnose(RSDSP.measure(U.enc(r.out, 320, U.WORK + '/accept-export' + EXPORTS.length + '.mp3'), SR));
   EXPORTS.push({ cls: cls.id, dry: dry.issues, wet: wet.issues, exp: exp.issues });
-  return { m, mo, P, cls, out: r.out, lat: r.latency, dry, wet };
+  return { m, mo, P, cls, out: r.out, lat: r.latency, latency: r.latency, dry, wet };
 }
 const ROWS = [];
 const row = (defect, stat, dry, wet, note) => ROWS.push([defect, stat, dry, wet, note || '']);
 const N = (v, d) => (typeof v === 'number' && isFinite(v) ? v.toFixed(d === undefined ? 2 : d) : String(v));
 /** a 0–1 clamp for the rows that re-derive a statistic from the exposed fields */
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
+
+/* H.renderEx reports its look-ahead as `latency`; `run()` re-labels it `lat`.
+ * Reading the wrong one yields `undefined`, and every reader here writes
+ * `(lat || 0)` — so the row reads the render *before* the limiter's 88 samples
+ * instead of after them. That is exactly what happened to the two rows of the
+ * click section below: the drum row has reported 1.79 dB of "damage" that the
+ * stage does not do since the round that added it, and the burst row's
+ * de-click-off column was read 1.8 ms early. A raw render's latency is read
+ * here, and a result that does not carry one is an error, not a 0. */
+const rawLat = (x) => {
+  if (!x || typeof x.latency !== 'number') throw new Error('rawLat: expected an H.renderEx result');
+  return x.latency;
+};
 
 const bed = (lp, norm, depth) => {
   let s = H.filter(RSDSP, H.pink(SR, SEC, 0.40, 31), SR, 'lp', lp, 0.60);
@@ -1226,7 +1239,7 @@ mark('section 20');
     }
     return { mean: sum / Math.max(n, 1), worst };
   };
-  const a = hitLoss(off.out[0], off.lat), b = hitLoss(r.out[0], r.lat);
+  const a = hitLoss(off.out[0], rawLat(off)), b = hitLoss(r.out[0], r.lat);
   row('a train of 0.4 ms bursts (no body, no tail)', 'burst peak level through the chain: de-click off vs on (dB)',
     N(a.mean, 2) + ' / ' + N(a.worst, 2), N(b.mean, 2) + ' / ' + N(b.worst, 2),
     'mean / worst · de-click dose ' + N(r.P.declick, 3) + ' — 24 clicks, and the stage spends its dose on them (before this round the same reading was the worst false positive in the matrix: 13.97 / 53.32 dB on a fixture the duration gate then silenced at index 0.000)');
@@ -1272,28 +1285,31 @@ mark('section 20');
     0.75 * clamp01((cp.crestP98Db - 13) / 10) + 0.25 * clamp01((cp.globalCrestDb - 13) / 10), rp.m.crackleIndex,
     'spike windows ' + N(cp.spikeFrames, 0) + ' · contrast ' + N(cp.spikeContrastDb, 1) + ' dB · card ' + rp.cls.id
     + ' · a kick, a snare with a 130 ms top end, a hi-hat with 45 ms, a clave and a crash — a window that carries a hit with a tail is filled with the top end and never reaches the spike set, which is why the duration gate was never what protected this');
-  const perfPeaks = (o, lat) => {
-    const v = performance.pos.map((h) => {
-      let pk = 0;
-      const c = h + (lat || 0);
-      for (let i = -Math.round(SR * 0.001); i < SR * 0.004; i++) {
-        const j = c + i;
-        if (j >= 0 && j < o.length) { const x = Math.abs(o[j]); if (x > pk) pk = x; }
-      }
-      return pk;
-    });
-    v.sort((x, y) => x - y);
-    return v;
-  };
+  /* Per hit, in the fixture's own order: sorting here (as this row used to)
+   * pairs the k-th *smallest* peak of one render with the k-th smallest of the
+   * other, which is not a comparison of hits — and reading a raw render's
+   * latency as `.lat` read the off column 88 samples early. Both made this row
+   * report damage the stage does not do. */
+  const perfPeaks = (o, lat) => performance.pos.map((h) => {
+    let pk = 0;
+    const c = h + (lat || 0);
+    for (let i = -Math.round(SR * 0.001); i < SR * 0.004; i++) {
+      const j = c + i;
+      if (j >= 0 && j < o.length) { const x = Math.abs(o[j]); if (x > pk) pk = x; }
+    }
+    return pk;
+  });
+  const medOf = (v) => { const s = v.slice().sort((x, y) => x - y); return s[s.length >> 1]; };
   const offp = H.renderEx(P0, [performance.sig], Object.assign({}, rp.P, { declick: 0 }));
-  const ppOn = perfPeaks(rp.out[0], rp.lat), ppOff = perfPeaks(offp.out[0], offp.lat);
-  const pMed = 20 * Math.log10((ppOn[ppOn.length >> 1] + 1e-12) / (ppOff[ppOff.length >> 1] + 1e-12));
-  const pWorst = Math.max.apply(null, performance.pos.map((h, k) =>
-    Math.abs(20 * Math.log10((ppOn[k] + 1e-12) / (ppOff[k] + 1e-12)))));
+  const ppOn = perfPeaks(rp.out[0], rp.lat), ppOff = perfPeaks(offp.out[0], rawLat(offp));
+  const pMed = 20 * Math.log10((medOf(ppOn) + 1e-12) / (medOf(ppOff) + 1e-12));
+  const pWorst = Math.max.apply(null, ppOn.map((v, k) =>
+    Math.abs(20 * Math.log10((v + 1e-12) / (ppOff[k] + 1e-12)))));
   row('a drum performance (body + 30–800 ms top end)', 'hit peak level through the chain: de-click off vs on (dB)',
     '0.00 / 0.00', N(pMed, 2) + ' / ' + N(pWorst, 2),
     'median / worst of ' + performance.pos.length + ' hits · de-click dose ' + N(rp.P.declick, 3)
-    + ' — the same chain and the same stage as the two rows above, on material that is a performance instead of a train of clicks');
+    + ' — the same chain and the same stage as the two rows above, on material that is a performance instead of a train of clicks,'
+    + ' both columns at the render\'s own latency (a raw renderEx result reports it as `latency`; this row read `lat` and measured the off render 88 samples early until this round)');
 
   /* ── the click as a *file* carries it: a damped ring at the cartridge resonance ── */
   const clickTrain = (() => {
