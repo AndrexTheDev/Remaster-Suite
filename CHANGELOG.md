@@ -37,10 +37,13 @@ else may move.
   **15.82 dB** against the stage's own **11.35 dB** in the same-band frames — a 4.5 dB gap in
   aggregation and frame set rather than in meters, and an ask raised by an unexplained offset is not
   a fix.
-* The remaining lever is therefore a **policy** question, not a defect: the cap (the frame needs
-  32 dB, the calibrated analysis grants 18, the profile caps at 17.3). Pinned in the acceptance
+* **The cap is not what binds**: lifting the law from 0.95 to 1.0 is worth **+0.29 dB** of band
+  (8.05 → 8.34 dB in the noise-owned frames). What remains open is the **4.5 dB between the stage's
+  key and the analyser's own bound** — an aggregation and frame-set difference, measured but not
+  explained, and therefore not something to raise an ask by — and the frame's own requirement
+  (32 dB), which is beyond any single-key expander without a spectral model. Pinned in the acceptance
   header so the next round does not re-derive it. acceptance 57 rows, exit 0 →
-  `tools/work/acceptance-v2ad.txt`.
+  `tools/work/acceptance-v2ae.txt`.
 
 ### Measured — where the dull-top class's line sits, and what the chain does with it
 

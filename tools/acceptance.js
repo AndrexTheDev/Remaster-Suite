@@ -246,9 +246,13 @@ mark('section 2');
  *     is **15.82 dB** against the stage's own **11.35 dB** in the same-band frames — a 4.5 dB
  *     gap in aggregation and frame set, not in meters, and raising an ask by an unexplained
  *     offset is not a fix.
- * What is left is a **policy** question, not a bug: the cap. The frame needs 32 dB, the
- * analyser's calibrated bound grants 18, the card's profile caps at 17.3 — and a cap is what
- * stops a repair from turning a severely hissy transfer into a dull one.
+ * What is left, then, is **not** a policy the app could just dial up: the cap the law applies
+ * is worth **+0.29 dB** of band when it is lifted from 0.95 to 1.0 (8.05 → 8.34 dB in the
+ * noise-owned frames — the cap is not what binds), and the frame's own requirement (32 dB)
+ * is beyond what any single-key expander can separate from programme without a spectral
+ * model. The open item is the **4.5 dB between the stage's key and the analyser's own bound**
+ * — an aggregation and frame-set difference, measured, not explained, and therefore not
+ * something to raise an ask by.
  * ------------------------------------------------------------------------- */
 {
   const clean = bed(9000, 0.7);
