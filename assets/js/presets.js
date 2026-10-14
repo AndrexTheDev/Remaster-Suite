@@ -347,6 +347,15 @@
     //     128: 39.4) against 10–20 dB for a medium's slope and 24.6 dB for the
     //     app's own 320 export after its de-hisser took the hiss out of the top
     //     octave. The threshold sits at 32 dB, inside that gap.
+    //   One boundary of this rule, measured and left as it is: the fall is
+    //   measured into the file's *own* floor, so a file with a digital-silence
+    //   floor (a synthetic bed, a file whose noise was already removed) and a
+    //   low-pass reads as a wall — the acceptance suite's own harsh fixture, a
+    //   pink bed low-passed at 9 kHz with no noise at all, keeps its "codec"
+    //   line for exactly that reason, and it did before this rule too. On real
+    //   material the floor is what makes the two populations separable, and a
+    //   file with nothing above 14 kHz and nothing below it either *was*
+    //   band-limited by something.
     const brickwall = clamp(m.brickwall || 0, 0, 1);
     const cliff = m.cliffHz || 0;
     if (cliff > 0 && cliff < 17000 && brickwall > 0) return true;
