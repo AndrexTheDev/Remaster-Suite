@@ -1030,34 +1030,52 @@ mark('section 20');
  * about material that carries no defect of the class being measured — because
  * the chain acts on the diagnosis, a false positive is not a wrong label, it is
  * an instruction. Measured end to end, the worst of them: the crackle index read
- * **0.982** on a pattern of 24 clave-like hits, and the 0.702 de-click dose that
- * came with it cost the hits **13.97 dB mean / 53.32 dB worst** of their peak
- * level through the chain (the same chain with the de-clicker off: 0.49 / 1.25).
- * That is the stage spending its whole authority on a performance, which the
- * request says it may not do. The rules that close it are in `crackleStep`'s
- * value(): a *contrast* gate (a click interrupts its file; a square wave is
- * nothing but edges) and a *duration* gate (a click is the analysis filter's own
- * ring; a performance rings as long as the drum does). Both are measured against
- * every crackle fixture the matrix has — §1 dry, §1 at 320 kbit/s, §17's worn
- * rip at 128, the vinyl and garage sims, drums with pops on them — all of which
- * still read `crackle`, so the rows below are the far side of the same line.
+ * **0.982** on a pattern of 24 bursts of 0.4 ms, and the 0.702 de-click dose
+ * that came with it cost those bursts **13.97 dB mean / 53.32 dB worst** of
+ * their peak level through the chain (the same chain with the de-clicker off:
+ * 0.49 / 1.25).
  *
- * …and the boundary, because a gate that is not written down is a gate nobody
- * can trust: a percussion *inside a dense cymbal mix* still reads crackle, 0.693
- * on this tool's own fixture (24 claves of 0.4 ms under crashes), because the
- * crash's own onset is a narrow 8.5 kHz transient too and it dilutes the wide
- * share the gate counts (7 % against the 15 % bound, where the same claves on a
- * quiet bed measure 18 %). The cost measured there is 1.65 dB mean / 8.70 dB
- * worst on the claves against 0.29 / 1.89 with the de-clicker off. The
- * populations genuinely overlap: spike durations run 2–18 samples for those
- * claves and 5–10 for a pop smeared by a 128 or 320 kbit/s encode, so *no*
- * duration bound separates them, and the honest answer is the one written here
- * rather than a bound tuned until this fixture passes.
+ * That measurement is why this section is built around what a *performance* is.
+ * The fixture was written as a percussion guard — an HP-3 kHz noise burst of
+ * 0.4 ms, twenty-four of them 0.33 s apart — and what it lacks is the two things
+ * every real hit has: a body, and a top end that outlives the attack. Measured
+ * on nine fixtures that have them (a kick+snare+hi-hat groove · a snare with a
+ * 130 ms top end · a snare roll at 8/s · a hi-hat with 45 ms · a crash with
+ * 800 ms · a clave · a rimshot · a stick click with a 900 Hz body · a 4 ms
+ * burst with a 1200 Hz body; probe /tmp/gate5.js): **0 spike windows each**,
+ * with and without a duration gate, because a window that carries a hit *with a
+ * tail* is filled with the top end and fails the duty gate (0.04) before the
+ * index ever looks at it. The rows below are that measurement in this tool's own
+ * fixtures.
+ *
+ * What the burst fixture always was, and what a duration gate cost: a burst of
+ * 0.4 ms with no body and no tail is a click in *every* statistic here — duty
+ * 0.02–0.04, the band a pop occupies; contrast 22.8 dB; one window wide; the
+ * nine fixtures above the same. Naming and repairing it is what a de-clicker is
+ * for, and the guard that keeps the stage off a performance is the tail,
+ * measured above. The gate that used to keep the burst out (fewer than 15 % of
+ * the spike windows wider than 0.25 ms) was tuned on the harness's click model
+ * — one to three samples, 5–10 samples wide at −20 dB — and it threw away the
+ * click as a *file* carries it, a damped oscillation at the cartridge
+ * resonance: on a 9 kHz ring, 9 per second, on the same bed, τ 0.1 / 0.3 / 0.6
+ * ms reads index 1.00 / 0.89 / **0.00**, 21 % of the 0.6 ms ring's spike windows
+ * being wider than the 0.25 ms bound (a ninth ring of the family, τ 1.5 ms, reads
+ * 0.00 still — its ring fills the 20 ms window, so its duty sits in the band a
+ * sibilant onset occupies: duty p50 0.063, 71 of its 72 windows inside 0.045–0.12
+ * and 1 under the 0.04 gate, so 1 spike window and no dose — probes
+ * /tmp/duty15.js and /tmp/gate5.js). That is the beta report this section now
+ * carries: with
+ * the gate the file read index 0.00, healthy, dose 0 — and the clicks stayed in
+ * it.
+ *
+ * Both directions are rows below, measured twice: by the app's own index and by
+ * this tool's independent time-domain meter — every click's peak in the 4–12 kHz
+ * band against the same file *without* the clicks.
  * ------------------------------------------------------------------------- */
 {
   const P0 = Processor;
-  /* 24 percussion hits of 0.4 ms, the attack of a clave or a rimshot, on the
-   * same bed the crackle fixtures use — nothing else about the file is a defect */
+  /* a train of 0.4 ms top-end bursts with no body and no tail: a click train by
+   * every statistic this file has (see the header) — and the app now says so */
   const ticks = (() => {
     const out = Float32Array.from(bed(9000, 0.7));
     const hf = filt(H.noise(SR, SEC, 0.6, 91), [bq('HP', 3000, 0.707)]);
@@ -1069,13 +1087,14 @@ mark('section 20');
   })();
   const r = run([ticks]);
   const cd = RSDSP.crackleDetect([ticks], SR);
-  /* what the statistic said before the gates: the two terms of the old index */
+  /* what the statistic said before the gate: the two terms of the old index */
   const crestAlone = 0.75 * clamp01((cd.crestP98Db - 13) / 10) + 0.25 * clamp01((cd.globalCrestDb - 13) / 10);
-  row('a percussion pattern, not crackle', 'crackle index: crest alone vs gated (0–1)', N(crestAlone, 3), N(r.m.crackleIndex, 3),
-    'spikes ' + N(cd.spikeFrames, 0) + '/400 · contrast ' + N(cd.spikeContrastDb, 1) + ' dB (gate 6) · duration ' + N(cd.spikeWidth, 0)
-    + ' samples · ' + N(100 * cd.spikeWideShare, 0) + ' % of them wider than 0.25 ms (gate 15 %) → ' + (r.dry.issues.join(',') || 'healthy')
-    + ' · the same fixture at 2 ms and 5 ms never reaches the spike set at all (duty 0.05–0.12 against the 0.04 gate)');
-  /* …and the consequence the index is about: no dose, no damage */
+  row('a train of 0.4 ms bursts (no body, no tail)', 'crackle index: crest alone vs the app (0–1)', N(crestAlone, 3), N(r.m.crackleIndex, 3),
+    'spikes ' + N(cd.spikeFrames, 0) + '/400 · contrast ' + N(cd.spikeContrastDb, 1) + ' dB · duration ' + N(cd.spikeWidth, 0)
+    + ' samples · ' + N(100 * cd.spikeWideShare, 0) + ' % of them wider than 0.25 ms → ' + (r.dry.issues.join(',') || 'healthy')
+    + ' · duty 0.02–0.04, the band a pop occupies — this is 24 clicks and the app repairs them as clicks; the three rows below are the same chain on material that is a performance');
+  /* …and what the stage does to it. On a click train that repair *is* the job;
+   * the guard is the tail, and the performance rows below carry it. */
   const off = H.renderEx(P0, [ticks], Object.assign({}, r.P, { declick: 0 }));
   const hitLoss = (out, lat) => {
     let sum = 0, n = 0, worst = 0;
@@ -1089,9 +1108,119 @@ mark('section 20');
     return { mean: sum / Math.max(n, 1), worst };
   };
   const a = hitLoss(off.out[0], off.lat), b = hitLoss(r.out[0], r.lat);
-  row('a percussion pattern, not crackle', 'hit peak level through the chain: de-click off vs on (dB)',
+  row('a train of 0.4 ms bursts (no body, no tail)', 'burst peak level through the chain: de-click off vs on (dB)',
     N(a.mean, 2) + ' / ' + N(a.worst, 2), N(b.mean, 2) + ' / ' + N(b.worst, 2),
-    'mean / worst · de-click dose ' + N(r.P.declick, 3) + ' — before the gates the same chain took 13.97 / 53.32 dB off these peaks at dose 0.702');
+    'mean / worst · de-click dose ' + N(r.P.declick, 3) + ' — 24 clicks, and the stage spends its dose on them (before this round the same reading was the worst false positive in the matrix: 13.97 / 53.32 dB on a fixture the duration gate then silenced at index 0.000)');
+
+  /* ── a performance: a body plus a top end that outlives the attack ─────── */
+  const noiseBuf = (seed, hp, lp) => filt(H.noise(SR, 2 * SEC, 0.5, seed), [bq('HP', hp, 0.707), bq('LP', lp, 0.707)]);
+  const hitAt = (out, at, len, atkMs, tauMs, gen) => {
+    const atk = Math.max(1, SR * atkMs * 1e-3), tau = SR * tauMs * 1e-3;
+    for (let i = 0; i < Math.min(len, out.length - at); i++) out[at + i] += (1 - Math.exp(-i / atk)) * Math.exp(-i / tau) * gen(i);
+  };
+  const bn = noiseBuf(101, 1200, 16000), bb = noiseBuf(102, 150, 400), hn = noiseBuf(103, 7000, 17000);
+  const cn = noiseBuf(104, 4000, 17000);
+  const kickAt = (o, at) => {
+    hitAt(o, at, Math.round(SR * 0.3), 0.5, 60, (i) => Math.sin(2 * Math.PI * 55 * i / SR) * Math.exp(-i / (SR * 0.09)));
+    hitAt(o, at, Math.round(SR * 0.01), 0.1, 3, (i) => 0.25 * Math.sin(2 * Math.PI * 2400 * i / SR));
+  };
+  const snareAt = (o, at) => {
+    hitAt(o, at, Math.round(SR * 0.25), 0.3, 130, (i) => 0.55 * bn[at + i] * 3);
+    hitAt(o, at, Math.round(SR * 0.2), 0.5, 70, (i) => 0.40 * bb[at + i] * 3);
+  };
+  const hatAt = (o, at) => hitAt(o, at, Math.round(SR * 0.2), 0.2, 45, (i) => 0.42 * hn[at + i] * 3);
+  const claveAt = (o, at) => {
+    hitAt(o, at, Math.round(SR * 0.15), 0.2, 32, (i) => 0.45 * Math.sin(2 * Math.PI * 2400 * i / SR));
+    hitAt(o, at, Math.round(SR * 0.05), 0.1, 6, (i) => 0.20 * Math.sin(2 * Math.PI * 5200 * i / SR));
+  };
+  const crashAt = (o, at) => hitAt(o, at, Math.round(SR * 1.6), 3, 800, (i) => 0.30 * cn[at + i] * 3);
+  const performance = (() => {
+    const out = Float32Array.from(bed(9000, 0.7));
+    const pos = [];
+    for (let k = 0; k * 0.5 < SEC; k++) {
+      const at = Math.round(k * 0.5 * SR);
+      pos.push(at);
+      if (k % 2 === 0) kickAt(out, at); else snareAt(out, at);
+      hatAt(out, Math.round((k * 0.5 + 0.25) * SR));
+      claveAt(out, Math.round((k * 0.5 + 0.125) * SR));
+      if (k % 4 === 0) crashAt(out, at + 1);
+    }
+    return { sig: H.normalize(out, 0.8), pos };
+  })();
+  const rp = run([performance.sig]);
+  const cp = RSDSP.crackleDetect([performance.sig], SR);
+  row('a drum performance (body + 30–800 ms top end)', 'crackle index: crest alone vs the app (0–1)',
+    0.75 * clamp01((cp.crestP98Db - 13) / 10) + 0.25 * clamp01((cp.globalCrestDb - 13) / 10), rp.m.crackleIndex,
+    'spike windows ' + N(cp.spikeFrames, 0) + ' · contrast ' + N(cp.spikeContrastDb, 1) + ' dB · card ' + rp.cls.id
+    + ' · a kick, a snare with a 130 ms top end, a hi-hat with 45 ms, a clave and a crash — a window that carries a hit with a tail is filled with the top end and never reaches the spike set, which is why the duration gate was never what protected this');
+  const perfPeaks = (o, lat) => {
+    const v = performance.pos.map((h) => {
+      let pk = 0;
+      const c = h + (lat || 0);
+      for (let i = -Math.round(SR * 0.001); i < SR * 0.004; i++) {
+        const j = c + i;
+        if (j >= 0 && j < o.length) { const x = Math.abs(o[j]); if (x > pk) pk = x; }
+      }
+      return pk;
+    });
+    v.sort((x, y) => x - y);
+    return v;
+  };
+  const offp = H.renderEx(P0, [performance.sig], Object.assign({}, rp.P, { declick: 0 }));
+  const ppOn = perfPeaks(rp.out[0], rp.lat), ppOff = perfPeaks(offp.out[0], offp.lat);
+  const pMed = 20 * Math.log10((ppOn[ppOn.length >> 1] + 1e-12) / (ppOff[ppOff.length >> 1] + 1e-12));
+  const pWorst = Math.max.apply(null, performance.pos.map((h, k) =>
+    Math.abs(20 * Math.log10((ppOn[k] + 1e-12) / (ppOff[k] + 1e-12)))));
+  row('a drum performance (body + 30–800 ms top end)', 'hit peak level through the chain: de-click off vs on (dB)',
+    '0.00 / 0.00', N(pMed, 2) + ' / ' + N(pWorst, 2),
+    'median / worst of ' + performance.pos.length + ' hits · de-click dose ' + N(rp.P.declick, 3)
+    + ' — the same chain and the same stage as the two rows above, on material that is a performance instead of a train of clicks');
+
+  /* ── the click as a *file* carries it: a damped ring at the cartridge resonance ── */
+  const clickTrain = (() => {
+    const bedSym = bed(9000, 0.7);
+    const raw = Float32Array.from(bedSym);
+    const rand = H.rng(7);
+    const pos = [];
+    const tau = SR * 0.6e-3;
+    for (let k = 0; k < Math.round(9 * SEC); k++) {
+      const p = Math.floor(rand() * (raw.length - 6 * tau - 4));
+      pos.push(p);
+      const amp = 0.55 * (0.5 + rand()) * (rand() < 0.5 ? -1 : 1);
+      for (let i = 0; i < 6 * tau && p + i < raw.length; i++) raw[p + i] += amp * Math.exp(-i / tau) * Math.sin(2 * Math.PI * 9000 * i / SR);
+    }
+    /* the reference is the *same* file without the clicks — the bed scaled by the
+     * same gain, not normalised on its own (the clicks raise the peak) */
+    const g = 0.8 / H.peak(raw);
+    return { sig: Float32Array.from(raw, (x) => x * g), pos, clean: Float32Array.from(bedSym, (x) => x * g) };
+  })();
+  const rc = run([clickTrain.sig]);
+  const cc = RSDSP.crackleDetect([clickTrain.sig], SR);
+  const ca = RSDSP.crackleDetect([rc.out[0]], SR);
+  row('a click as a file carries it (0.6 ms ring, 9 kHz)', 'crackle index: before vs after the chain (0–1)',
+    N(cc.index, 2), N(ca.index, 2),
+    'spikes ' + N(cc.spikeFrames, 0) + '/400 · ' + N(cc.spikeWidth, 0) + ' samples wide · '
+    + N(100 * cc.spikeWideShare, 0) + ' % of them wider than 0.25 ms · dose ' + N(rc.P.declick, 3)
+    + ' · ' + (rc.dry.issues.join(',') || 'healthy') + ' → ' + (rc.wet.issues.join(',') || 'healthy')
+    + ' — the duration gate this replaces read 0.00 here, named nothing and budgeted no dose');
+  /* the independent meter: per click, 4–12 kHz, against the same file without clicks */
+  const bandPeaks = (sig, pos, lat) => {
+    const bnd = filt(sig, [bq('HP', 4000, 0.707), bq('LP', 12000, 0.707)]);
+    const v = pos.map((p) => {
+      let pk = 0;
+      const o2 = Math.max(0, p + (lat || 0) - Math.round(SR * 0.002));
+      for (let i = 0; i < SR * 0.006 && o2 + i < bnd.length; i++) { const x = Math.abs(bnd[o2 + i]); if (x > pk) pk = x; }
+      return pk;
+    });
+    v.sort((x, y) => x - y);
+    return v[v.length >> 1];
+  };
+  const mClean = bandPeaks(clickTrain.clean, clickTrain.pos, 0);
+  const mDry = bandPeaks(clickTrain.sig, clickTrain.pos, 0);
+  const mOut = bandPeaks(rc.out[0], clickTrain.pos, rc.lat);
+  row('a click as a file carries it (0.6 ms ring, 9 kHz)', 'per click in 4–12 kHz vs the same file without clicks (dB)',
+    N(20 * Math.log10((mDry + 1e-12) / (mClean + 1e-12)), 1), N(20 * Math.log10((mOut + 1e-12) / (mClean + 1e-12)), 1),
+    'median of ' + clickTrain.pos.length + ' clicks · independent time-domain meter (this tool\'s own biquads), not the app\'s statistic — the repair need not be perfect at the loudest of them, but the population has to come back to the clean file\'s level');
   /* a hi-hat pattern: the family the duty gate already excluded */
   const hats = (() => {
     const out = Float32Array.from(bed(9000, 0.7));
@@ -1106,7 +1235,8 @@ mark('section 20');
   const ch = RSDSP.crackleDetect([hats], SR);
   row('a hi-hat pattern, not crackle', 'crackle index: crest alone vs gated (0–1)',
     0.75 * clamp01((ch.crestP98Db - 13) / 10) + 0.25 * clamp01((ch.globalCrestDb - 13) / 10), rh.m.crackleIndex,
-    'the burst is 15 dB wide, so the crest factor barely sees it · ' + (rh.dry.issues.join(',') || 'healthy'));
+    'the burst rings 5 ms, so a window that carries it is filled with the top end — duty 0.05–0.12 against the 0.04 gate — '
+    + 'and the crest factor never sees it · ' + (rh.dry.issues.join(',') || 'healthy'));
   /* a synthesizer square: real flat tops at the file's peak, and a crackle
    * reading built from 400 spike windows that stand 0 dB above the file's own
    * median crest — every window in the file is an edge */

@@ -247,6 +247,171 @@ H.section('engine · de-clicker');
     'de-clicker keeps the music body intact');
 }
 
+H.section('engine · the click as the chain makes it');
+{
+  /* A stylus click is a *damped oscillation* at the cartridge resonance, not a
+   * one-sample impulse — the harness's `addCrackle` above is the impulse model,
+   * and the fixtures the de-clicker was tuned on were built with it. Measured on
+   * both families (`node /tmp/gate5.js`): the impulse reads 1.00 of crackle and
+   * a 9 kHz ring of 0.6 ms on the same bed reads 1.00, 0.89 and 0.73 at τ 0.1 /
+   * 0.3 / 0.6 ms, while a ring of 0.6 ms was the *only* one of the three the old
+   * duration gate (fewer than 15 % of spike windows wider than 0.25 ms) threw
+   * away — 21 % of its spike windows are wider than that — so the app named
+   * nothing, budgeted no dose and left every click in the file. That is the beta
+   * report this fixture is written for, and it is measured twice: the app's own
+   * index before and after the chain, and an independent time-domain meter that
+   * does not know what the app thinks — every click's peak in the 4–12 kHz band
+   * against the same file *without* the clicks. */
+  const SEC = 8;
+  const env = H.songEnvelope(SR, SEC, 0.35);
+  const bed = (() => {
+    const s = H.filter(RSDSP, H.pink(SR, SEC, 0.30, 33), SR, 'lp', 9000, 0.707);
+    for (let i = 0; i < s.length; i++) s[i] *= env[i];
+    return H.normalize(s, 0.7);
+  })();
+  const train = (perSec, amp, fc, tauMs) => {
+    const raw = Float32Array.from(bed);
+    const rand = H.rng(7);
+    const tau = SR * tauMs * 1e-3;
+    const pos = [];
+    for (let k = 0; k < Math.round(perSec * SEC); k++) {
+      const p = Math.floor(rand() * (raw.length - 6 * tau - 4));
+      pos.push(p);
+      const a = amp * (0.5 + rand()) * (rand() < 0.5 ? -1 : 1);
+      for (let i = 0; i < 6 * tau && p + i < raw.length; i++) {
+        raw[p + i] += a * Math.exp(-i / tau) * Math.sin(2 * Math.PI * fc * i / SR);
+      }
+    }
+    /* the reference is *the same file without the clicks*: the bed scaled by the
+     * same gain, not the bed normalised on its own — the clicks raise the peak,
+     * so a separately normalised bed would sit several dB away from the bed the
+     * clicks were added to. */
+    const g = 0.8 / H.peak(raw);
+    const sig = Float32Array.from(raw, (x) => x * g);
+    const clean = Float32Array.from(bed, (x) => x * g);
+    return { sig, pos, clean };
+  };
+  const { sig, pos, clean: cleanBed } = train(9, 0.55, 9000, 0.6);
+  const clean = RSDSP.crackleDetect([bed], SR);
+  const dirty = RSDSP.crackleDetect([sig], SR);
+  H.ok(dirty.index > 0.5, 'a damped 0.6 ms click on a quiet bed is crackle, not music',
+    clean.index.toFixed(2) + ' clean → ' + dirty.index.toFixed(2) + ' with 72 clicks ('
+    + dirty.spikeFrames + ' spike windows, ' + dirty.spikeWidth + ' samples wide, '
+    + Math.round(100 * dirty.spikeWideShare) + ' % of them wider than 0.25 ms)');
+  const law = Object.assign({}, H.DEFAULT_PARAMS, RP.buildParams('auto', RSDSP.measure([sig], SR), 0.7));
+  H.ok(law.declick > 0.4, '…and the automatic chain budgets a de-click dose for them',
+    'declick ' + law.declick.toFixed(2));
+  const r = H.renderEx(Processor, [sig], law);
+  const after = RSDSP.crackleDetect([r.out[0]], SR);
+  H.ok(after.index < 0.05, 'the chain takes them out — the app\'s own meter',
+    dirty.index.toFixed(2) + ' → ' + after.index.toFixed(2));
+  /* the band a click occupies (4–12 kHz), per click, against the same file
+   * without the clicks: the repair need not be perfect at the loudest of 72
+   * positions, but the population has to come back to the clean file's level. */
+  const band = (s) => {
+    const hp = RSDSP.biquadHP(SR, 4000, 0.707);
+    const stage = new RSDSP.Biquad(); stage.setLowpass(SR, 12000, 0.707);
+    const out = new Float32Array(s.length);
+    let z1 = 0, z2 = 0;
+    for (let i = 0; i < s.length; i++) {
+      const x = s[i]; const y = hp[0] * x + z1;
+      z1 = hp[1] * x - hp[3] * y + z2; z2 = hp[2] * x - hp[4] * y;
+      out[i] = stage.process(y);
+    }
+    return out;
+  };
+  const perClick = (b, lat) => {
+    const v = pos.map((p) => {
+      let pk = 0;
+      const o = Math.max(0, p + (lat || 0) - Math.round(SR * 0.002));
+      for (let i = 0; i < SR * 0.006 && o + i < b.length; i++) { const a = Math.abs(b[o + i]); if (a > pk) pk = a; }
+      return pk;
+    });
+    v.sort((a, c) => a - c);
+    return v;
+  };
+  const med = (v) => v[v.length >> 1];
+  const db = (x, y) => 20 * Math.log10((x + 1e-12) / (y + 1e-12));
+  const bClean = band(cleanBed), bOut = band(r.out[0]), bDry = band(sig);
+  const dryDb = db(med(perClick(bDry, 0)), med(perClick(bClean, 0)));
+  const outDb = db(med(perClick(bOut, r.latency || 0)), med(perClick(bClean, 0)));
+  H.ok(dryDb > 6 && outDb < 3.5, '…and an independent time-domain meter agrees',
+    'the clicks stand ' + dryDb.toFixed(1) + ' dB above the clean copy dry and ' + outDb.toFixed(1)
+    + ' dB after the chain (median of 72 clicks, 4–12 kHz)');
+}
+
+H.section('engine · a performance keeps its top end');
+{
+  /* The counter-fixture, and the reason there is no duration gate any more: a
+   * performance has a **body** and a top end that rings for as long as the drum
+   * does, and a window that carries one is *filled* with the top end, so the duty
+   * gate never lets it into the spike set. Built that way — a kick, a snare with
+   * a 130 ms top end, a hi-hat with 45 ms — the detector reads no crackle at all,
+   * and the de-clicker moves the hits by less than a decibel. (Nine variants of
+   * this fixture — a clave, a rimshot, a crash, a roll, a stick click with a
+   * 900 Hz body … — read 0.000 before and after the gate was removed; `node
+   * /tmp/gate5.js`.) */
+  const SEC = 8;
+  const env = H.songEnvelope(SR, SEC, 0.35);
+  const bed = (() => {
+    const s = H.filter(RSDSP, H.pink(SR, SEC, 0.30, 31), SR, 'lp', 9000, 0.707);
+    for (let i = 0; i < s.length; i++) s[i] *= env[i];
+    return H.normalize(s, 0.7);
+  })();
+  const filt = (seed, hp, lp) => H.filter(RSDSP, H.filter(RSDSP, H.noise(SR, 2 * SEC, 0.5, seed), SR, 'hp', hp, 0.707),
+    SR, 'lp', lp, 0.707);
+  const bn = filt(101, 1200, 16000), bb = filt(102, 150, 400), hn = filt(103, 7000, 17000);
+  const hit = (out, at, len, atkMs, tauMs, gen) => {
+    const atk = Math.max(1, SR * atkMs * 1e-3), tau = SR * tauMs * 1e-3;
+    for (let i = 0; i < Math.min(len, out.length - at); i++) {
+      out[at + i] += (1 - Math.exp(-i / atk)) * Math.exp(-i / tau) * gen(i);
+    }
+  };
+  const sig = Float32Array.from(bed);
+  const hits = [];
+  for (let k = 0; k * 0.5 < SEC; k++) {
+    const at = Math.round(k * 0.5 * SR);
+    hits.push(at);
+    if (k % 2 === 0) {
+      hit(sig, at, Math.round(SR * 0.3), 0.5, 60, (i) => Math.sin(2 * Math.PI * 55 * i / SR) * Math.exp(-i / (SR * 0.09)));
+      hit(sig, at, Math.round(SR * 0.01), 0.1, 3, (i) => 0.25 * Math.sin(2 * Math.PI * 2400 * i / SR));
+    } else {
+      hit(sig, at, Math.round(SR * 0.25), 0.3, 130, (i) => 0.55 * bn[at + i] * 3);
+      hit(sig, at, Math.round(SR * 0.2), 0.5, 70, (i) => 0.40 * bb[at + i] * 3);
+    }
+    const off = at + Math.round(0.25 * SR);
+    hit(sig, off, Math.round(SR * 0.2), 0.2, 45, (i) => 0.42 * hn[off + i] * 3);
+  }
+  const perf = H.normalize(sig, 0.8);
+  const det = RSDSP.crackleDetect([perf], SR);
+  H.ok(det.index < 0.05, 'a drum performance is not crackle',
+    'index ' + det.index.toFixed(2) + ' · ' + det.spikeFrames + ' spike windows · contrast '
+    + det.spikeContrastDb.toFixed(1) + ' dB');
+  const law = Object.assign({}, H.DEFAULT_PARAMS, RP.buildParams('auto', RSDSP.measure([perf], SR), 0.7));
+  const on = H.renderEx(Processor, [perf], law);
+  const off = H.renderEx(Processor, [perf], Object.assign({}, law, { declick: 0 }));
+  const peaks = (o, lat) => {
+    const v = hits.map((h) => {
+      let pk = 0;
+      const c = h + (lat || 0);
+      for (let i = -Math.round(SR * 0.001); i < SR * 0.004; i++) {
+        const j = c + i;
+        if (j >= 0 && j < o.length) { const a = Math.abs(o[j]); if (a > pk) pk = a; }
+      }
+      return pk;
+    });
+    v.sort((a, b) => a - b);
+    return v;
+  };
+  const db = (x, y) => 20 * Math.log10((x + 1e-12) / (y + 1e-12));
+  const medOn = peaks(on.out[0], on.latency || 0), medOff = peaks(off.out[0], off.latency || 0);
+  const delta = db(medOn[medOn.length >> 1], medOff[medOff.length >> 1]);
+  const worst = Math.max.apply(null, hits.map((h, k) => Math.abs(db(medOn[k], medOff[k]))));
+  H.ok(Math.abs(delta) < 1.0 && worst < 3.0, '…and the de-clicker leaves the hits where they are',
+    'declick dose ' + law.declick.toFixed(2) + ' · hit peaks move ' + delta.toFixed(2) + ' dB at the median, '
+    + worst.toFixed(2) + ' dB at the worst of ' + hits.length + ' hits');
+}
+
 H.section('engine · the de-hisser does not undo the de-clicker');
 {
   // A worn record with hiss *and* crackle: both repairs are asked for at once,

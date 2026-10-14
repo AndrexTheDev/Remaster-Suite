@@ -945,7 +945,8 @@
              * (~0.1 ms), a hit rings for as long as the drum does (0.4 ms and
              * up). The threshold is 20 dB rather than 6 because at −6 dB both
              * are inside the filter's ring and the two families measure 3 and 3;
-             * at −20 dB they separate. See the gate in value(). */
+             * at −20 dB they separate. It is a *witness* now, not a gate — the
+             * duration gate that used it is gone, see value(). */
             let wid = win;
             if (best > 1e-20) {
               const th = 0.1 * best;
@@ -1074,43 +1075,86 @@
          *   the worn rip at 128k     60/400  1.000  25.1 dB   7/10   ·   0 %
          *   pops at 320 kbit/s       61/400  1.000  24.9 dB   8/9    ·   0 %
          *   pops under drum hits     60/400  1.000  24.8 dB   5/6    ·   0 %
-         *   ── music ──
+         *   ── hits, as the burst model makes them (no body, no tail — the
+         *   two subsections below are what removed the duration gate) ──
          *   hits of 0.4 ms           26/400  0.982  22.8 dB   9/18   ·  31 %
          *   hits of 0.8 ms           26/400  0.854  21.1 dB   8/19   ·  31 %
          *   hits of 2 ms              8/400  0.000   0.0 dB  15/23   ·   —
          *   a 55 Hz square wave     400/400  1.000   0.0 dB   4/4    ·   0 %
          *   the clean bed             1/400  0.000   0.0 dB   4/4    ·   0 %
          *
-         * Two gates, each for one of the two ways this index named music, and
-         * each on the *index* only — the statistics above stay levels and stay
-         * worth looking at:
+         * One gate, for the way this index named music, and it is on the
+         * *index* only — the statistics above stay levels and stay worth
+         * looking at:
          *
          *  · **contrast ≥ 6 dB.** A click *interrupts* its file; a square wave
          *    is nothing but edges, so all 400 of its windows are as spiky as one
          *    another and its own median crest equals its 98th percentile — 0.0 dB
          *    of contrast, where every crackle fixture above stands ≥ 19.8 dB
-         *    above a median that is the floor. Its spikes are 4 samples wide, so
-         *    the duration gate cannot see it; contrast is what sees it.
-         *  · **fewer than 15 % of the spike windows wider than 0.25 ms.** A
-         *    performance — a clave, a rimshot, the snap of a snare — has an
-         *    attack between 0.4 and 1 ms, and the 8.5 kHz band of it rings for
-         *    18–23 samples, against 5–10 for a pop at any bitrate measured. The
-         *    0.4 ms and 0.8 ms hit fixtures are the only ones of either family
-         *    that sit on the wrong side of the *count*: their spikes are rare and
-         *    tall enough to pass the duty gate and the contrast gate, and about a
-         *    third of them are too wide to be clicks. The gate asks for a
-         *    *majority* of impulses, not for one: a record whose crackle is real
-         *    but mixed with hits keeps 300 of its 400 windows out of the spike
-         *    set entirely (the drum-hit fixture's spike window population is 0 %
-         *    wide).
+         *    above a median that is the floor. Its spikes are 4 samples wide;
+         *    contrast is what sees it.
+         *  · **…and no duration gate.** There used to be a second one —
+         *    fewer than 15 % of the spike windows wider than 0.25 ms, measured
+         *    as the −20 dB span of the tallest excursion. It is gone, and the
+         *    measurement that removed it is this one: it was tuned on the
+         *    harness's click model (one to three samples, 5–10 samples wide at
+         *    −20 dB) and on music fixtures that were themselves click-shaped —
+         *    an HP-3 kHz noise burst of 0.4–2 ms with no drum body behind it and
+         *    no tail after it. Realistic percussion looks different, and it was
+         *    never measured: a body plus a top end that rings for as long as the
+         *    drum does. Built with the app's own filter coefficients, one
+         *    fixture each (kick+snare+hi-hat groove · snare alone with a 130 ms
+         *    tail · a snare roll at 8/s · a hi-hat with 45 ms · a crash with
+         *    800 ms · a clave · a rimshot · a stick click with a 900 Hz body ·
+         *    a 4 ms clave-like burst with a 1200 Hz body) every one of them
+         *    reads **0 spike windows**, before and after this change, and the
+         *    reason is the duty gate above and not the duration: a window that
+         *    contains a hit *with a tail* is filled with the top end, so its
+         *    samples are not 25 dB below its own peak, so it is not a spike.
+         *    What the duration gate did reject was the click as the file really
+         *    carries it: a stylus click is a damped oscillation at the
+         *    cartridge resonance, not a one-sample impulse. Measured on a 9 kHz
+         *    ring, 9 per second, amplitude 0.55, on a quiet bed, as
+         *    (spike windows · share wider than 0.25 ms · index as it shipped):
          *
-         * What the false positive cost, measured end to end on the 0.4 ms
-         * fixture — it was named `crackle`, so the vinyl profile and a 0.702
-         * de-click dose came with it: the hits' peak level through the chain fell
-         * **13.97 dB** on average, −53.3 dB worst, against **0.49 dB** for the
-         * identical chain with the de-clicker off. The stage spent its whole dose
-         * on a performance, which the request says it may not do. With both gates
-         * the fixture reads index 0.000, a general profile and dose 0. */
+         *      τ 0.1 ms            56 ·  0 % · 1.00
+         *      τ 0.3 ms            61 ·  8 % · 0.89
+         *      τ 0.6 ms            58 · 21 % · **0.00**
+         *      4 kHz, τ 0.6 ms     26 · 19 % · **0.00**
+         *      12 kHz, τ 0.6 ms    57 · 98 % · **0.00**
+         *      τ 0.6 on a crash     12 · 33 % · **0.00**
+         *      τ 0.6 6/s on a groove 27 · 33 % · **0.00**
+         *      a 130 Hz thump + ring 54 · 20 % · **0.00**
+         *
+         *    Six of the eight fixtures in the table were invisible to the
+         *    chain — no card, no dose, the click left in the file, which is the
+         *    beta report this is written for. Without the gate the same eight
+         *    read 1.00 · 0.89 · 0.73 · 0.81 · 0.70 · 0.34 · 0.47 · 0.73 — and a
+         *    ninth ring of the family, τ 1.5 ms, still reads 0.00: its ring fills
+         *    the window, so its duty sits with the sibilant onsets and the gate
+         *    above never lets it in (probe `node /tmp/duty15.js`: duty p50 0.063,
+         *    71 of its 72 windows in the 0.045–0.12 band, 1 under the 0.04 gate —
+         *    so 1 spike window, index 0.00, no dose, `node /tmp/gate5.js`) — and
+         *    nothing else measured moved: the nine percussion fixtures above
+         *    read 0.000 either way, a 55 Hz square reads 0.000 (its contrast is
+         *    0.0 dB, and that is what keeps it out), a clean bed, a sibilant
+         *    fixture, a cassette, a low-bitrate and a combo sim read 0.000, and
+         *    the vinyl, garage and combo sims read 0.98 / 0.73 / 0.62 as before
+         *    (a probe run over the whole battery: `node /tmp/gate5.js`).
+         *
+         *    Two costs are paid and stated. A *burst* of 0.4–2 ms with no body
+         *    and no tail — the fixtures the old gate was tuned on — reads
+         *    crackle again (0.98 / 0.85), because in every statistic measured
+         *    here it *is* one: same duty (0.002–0.04), same crest, same one
+         *    window of it. It is repaired like a click; the guard that protects
+         *    a performance is the tail, and a recording that really is a train
+         *    of such bursts will be de-clicked the way RX's de-click would
+         *    de-click it. And a ring longer than about 1.2 ms still does not get
+         *    in: it fills a tenth of its window with samples near its own peak,
+         *    which is the duty band a sibilant onset occupies (0.045–0.12), so
+         *    the duty gate cannot take it without taking the sibilants — a
+         *    measured limit of the statistic, not of this gate. */
+
         const widthMax = Math.max(2, Math.round(sr * 0.25e-3));
         let wide = 0;
         for (const w of widKept) if (w > widthMax) wide++;
@@ -1118,7 +1162,7 @@
         widKept.sort((a, b) => a - b);
         const spikeWidth = widKept.length ? widKept[Math.floor(widKept.length * 0.5)] : 0;
         const spikeContrastDb = crestP98Db - medDb;
-        const impulsive = spikeContrastDb >= 6 && wideShare < 0.15;
+        const impulsive = spikeContrastDb >= 6;
         const index = impulsive
           ? clamp((crestP98Db - 13) / 10, 0, 1) * 0.75
             + clamp((globalCrestDb - 13) / 10, 0, 1) * 0.25

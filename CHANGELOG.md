@@ -13,6 +13,63 @@ thresholds sat in the tone stages (the glue's and the warmth's), all of them wri
 full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
 else may move.
 
+### Fixed — the click as a file carries it: the duration gate on the crackle diagnosis is gone
+
+**The gate that was added to stop the app naming music was rejecting the damage it was built to find.** It asked
+for *fewer than 15 % of the spike windows wider than 0.25 ms* — the −20 dB duration of the tallest excursion in
+the 8.5 kHz band — and it was tuned on the harness's click model, one to three samples wide. A click as a file
+really carries it is not that: it is a **damped oscillation at the cartridge resonance**. Measured on a 9 kHz ring,
+9 per second, on the fixture's own bed (spike windows · share wider than 0.25 ms · index as it shipped):
+
+| ring | spikes | > 0.25 ms | index |
+| --- | --- | --- | --- |
+| τ 0.1 ms | 56 | 0 % | 1.00 |
+| τ 0.3 ms | 61 | 8 % | 0.89 |
+| τ 0.6 ms | 58 | **21 %** | **0.00** |
+| 4 kHz, τ 0.6 ms | 26 | 19 % | **0.00** |
+| 12 kHz, τ 0.6 ms | 57 | 98 % | **0.00** |
+| τ 0.6 on a crash bed | 12 | 33 % | **0.00** |
+| τ 0.6 6/s over a groove | 27 | 33 % | **0.00** |
+| a 130 Hz thump + ring | 54 | 20 % | **0.00** |
+
+Six of the eight rings in the table were invisible to the chain — no card, no dose, every click left in the file.
+Without the gate they read 1.00 · 0.89 · 0.73 · 0.81 · 0.70 · 0.34 · 0.47 · 0.73, and the chain repairs them: measured by the app's index 0.73 → **0.00** and by an independent time-domain meter (per click, 4–12 kHz,
+against the same file without the clicks) **+13.6 dB → +0.2 dB** — that meter the regression guard's, built on the
+app's own high-pass and a 4–12 kHz band; §20 measures the same thing with the acceptance tool's own biquads and
+its own fixture, 13.1 → 0.8 dB. A ninth ring of the family, τ 1.5 ms, is still
+not named, and it is the boundary this fix does not move: a ring that long *fills* the 20 ms window, so its duty
+sits in the band a sibilant onset occupies (0.045–0.12) and the duty gate never lets it into the spike set
+(probe `/tmp/duty15.js` and `/tmp/gate5.js`: duty p50 0.063 — 71 of its 72 windows inside the sibilant band
+0.045–0.12 — and **1** under the 0.04 gate, so 1 spike window, index 0.00 and no dose).
+
+**What guards a performance is the duty gate, not duration.** A window that carries a hit *with a tail* is filled
+with the top end and fails the duty gate long before the index looks at it: nine realistic percussion fixtures —
+a kick+snare+hi-hat groove, a snare with a 130 ms top end, a snare roll at 8/s, a hi-hat with 45 ms, a crash with
+800 ms, a clave, a rimshot, a stick click with a 900 Hz body, a 4 ms burst with a 1200 Hz body — read **0 spike
+windows each**, with and without the gate, and the same chain's de-clicker moves their hits by **0.30 dB** of peak worst
+in the regression guard — **1.84 dB mean / 2.36 dB worst** of the 16 hits of §20's own performance fixture, at the
+profile's floor dose (0.072), which is the per-sample trade every de-clicker has. The
+fixture the old gate was tuned on (24 × 0.4 ms of HP-3 kHz noise, no body, no tail) is a click train by every
+statistic here — duty 0.02–0.04, the band a pop occupies — and is named and repaired as one.
+
+* a regression guard, because that is the part the suite did not have: `tests/dsp.test.js` now carries both
+  families — a 0.6 ms ring (index 0.73, dose 0.67, repaired to 0.00 / +0.2 dB measured twice) and a drum
+  performance (0 spike windows, dose 0.07, hits move 0.30 dB worst in the regression guard) — 134 checks, was 128;
+* §20 of the acceptance matrix is rebuilt around them: the burst train's two rows are re-labelled as what the
+  fixture is, and four rows are new — the drum performance (index · hit level through the chain, dose 0.072) and
+  the click as a file carries it (index before/after 0.73 → 0.00 · the independent 4–12 kHz meter +13.1 →
+  +0.8 dB). The *dense* case, measured through the app's own `crackleDetect` (probe `/tmp/dense-levels.js`): a
+  groove with claves and a bell over it reads **0 spike windows and index 0.000** on a 6 kHz and on a 12 kHz bed
+  and at −20 and at −60 dBFS — the duty gate is what carries it, exactly as it carries the nine fixtures above;
+* the harness's impulse model of a click was the reason this was missed for a release: `addCrackle` builds one to
+  three samples, and every fixture the gate was tuned on was built with it.
+
+Measured: `npm test` **ALL PASSED (134 / 137 / 313 / 108 / 17)**, exit 0 (`tools/work/suite-round17.txt`; the
+audit suite's own summary line is overwritten by the NUL bytes it writes while testing the progress bar — the
+clean capture is `tools/work/audit-round17.txt`), and the acceptance matrix **108 rows · 27 defect classes**,
+exit 0 (`tools/work/acceptance-v2ba.txt`), its rows byte-identical to `tools/work/acceptance-v2az.txt` before this
+documentation pass.
+
 ### Fixed — three detectors named music: a clave is not crackle, an organ is not hum, a square is not clipping
 
 **The crackle index could not tell a performance from damage.** It is a crest factor of the 8.5 kHz band,
