@@ -13,6 +13,63 @@ thresholds sat in the tone stages (the glue's and the warmth's), all of them wri
 full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
 else may move.
 
+### Fixed — three detectors named music: a clave is not crackle, an organ is not hum, a square is not clipping
+
+**The crackle index could not tell a performance from damage.** It is a crest factor of the 8.5 kHz band,
+and a clave's attack has one too. Measured, a pattern of 24 percussion hits of 0.4 ms — the attack of a clave
+or a rimshot, nothing else wrong with the file — read **0.982**, so the vinyl card took it and the chain
+spent a **0.702** de-click dose on it: the hits' peak level through the chain fell **13.97 dB** on average and
+**53.32 dB** worst, against 0.49 / 1.25 dB for the identical chain with the de-clicker off. Two gates on the
+index now, each for one measured family, and each on the *index* only — the crest statistics stay levels and
+stay worth looking at:
+
+  * **contrast ≥ 6 dB** (p98 crest minus the file's own median crest). A click *interrupts* its file; a
+    55 Hz square wave is nothing but edges, so all 400 of its windows are spikes and its p98 equals its own
+    median — 0.0 dB of contrast, where every crackle fixture stands ≥ 19.8 dB above a median that is the floor;
+  * **fewer than 15 % of the spike windows wider than 0.25 ms** (the excursion's own −20 dB duration). A pop
+    is the analysis filter's ring at any bitrate measured (5–10 samples); a drum rings as long as the drum
+    does. The clave fixture is 32 % wide and reads **0.000** now, dose 0.063, and the same chain costs those
+    hits **0.61 dB mean / 1.33 dB worst**. Every crackle fixture still reads crackle: §1 dry and at
+    320 kbit/s, §17's worn rip at 128, the vinyl and garage sims, drums with pops on them.
+
+The boundary is written down in the code and in the new §20, because a gate that is not written down is a
+gate nobody can trust: percussion *inside a dense cymbal mix* still reads crackle, 0.693 on the §20 fixture
+(cost 1.65 / 8.70 dB on the claves), because a crash's own onset is a narrow 8.5 kHz transient too. The two
+populations genuinely overlap — those claves measure 2–18 samples of duration against 5–10 for a pop smeared
+by a 320 kbit/s encode — so no duration bound separates them.
+
+**And the hum detector's one real test could not run on music that never stops.** It asks whether the line
+sits still while the music stops, which needs a 1 s segment 6 dB below the file's median — a real silence.
+On a file with none, it fell back to `persist = 1` (assume hum) and the verdict rested on `steady` alone:
+measured, an organ piece whose pedal note is played at exactly 50 Hz in phrases reads a **25.6 dB** line,
+steady 0.88, fallback 1.00 → named `hum` at **0.70**. The fallback is now a measurement: a 100 ms frame, a
+20 ms hop, the line read *against its own ±30 Hz shoulders* in the same frame and compared to the frame's own
+loudness — the **slope**, in dB per dB. A mains line is a constant (the §3 fixture **−1.00**, the sustained
+tone **0.00**); a played note follows (the organ **0.88–0.91**) and the score is tapered to zero from 0.35
+to 0.70. It replaces nothing: a file *with* quiet passages keeps the segment test exactly as it was — a hum
+under a phrase is still a hum — and every hum row in the matrix, including §3's and §17's, is byte-identical.
+
+**And the clipping detector named a synthesizer's flat tops a defect.** Both of its terms are floors: a
+square wave satisfies them completely — measured, a 55 Hz square alone is **100.000 %** flat at its own peak
+with an implied missing peak of **15.35 dB**, against 0.005–11.6 % and 1.65–2.04 dB for programme a real
+transfer cut at 0.9 / 0.7 / 0.5 / 0.3 of its peak. Two ceilings, on the detector's `evidence` so both the
+card and the dose inherit them: the plateau share at 70→95 % and the implied overshoot at 5→10 dB. The share
+ceiling is deliberately the wider edge — how much of a legitimately clipped file sits at the rail depends on
+the source's crest factor, not on the defect (a 997 Hz tone cut 2 dB down, the matrix's own clipping fixture,
+sits there 42 % of the time) — so the overshoot is the sharp one. The square is not named clipping or crackle
+any more; every clipped fixture the suite has (the audit's, e2e's, the matrix's tone and its over-limited
+master) is untouched.
+
+**Section 20 is new: a clean file is not named.** Every other section proves a repair; this one proves the
+diagnosis keeps quiet about material that carries no defect of the class being measured — percussion (0.4 ms
+and 5 ms), a square-wave bass, a phrased organ pedal at 50 Hz, a clean master and its own 320 kbit/s export
+(so the user's loop is covered for a file with nothing wrong with it), with the gates' own numbers and the
+boundary above on the rows.
+
+Measured: `tools/work/suite-round16c.txt` — ALL TESTS PASSED (128 / 137 / 313 / 108 / 17), exit 0;
+`tools/work/acceptance-v2ay.txt` — **104 rows · 25 defect classes**, exit 0, and its first 97 rows are
+byte-identical to `acceptance-v2au.txt`.
+
 ### Fixed — the mono-maker measured a band it never folded, and folded bottoms that were merely wide
 
 **The mono-maker measured a band it never folded.** The analysis reports the low band's correlation

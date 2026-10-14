@@ -128,6 +128,8 @@ function run(chans, over) {
 const ROWS = [];
 const row = (defect, stat, dry, wet, note) => ROWS.push([defect, stat, dry, wet, note || '']);
 const N = (v, d) => (typeof v === 'number' && isFinite(v) ? v.toFixed(d === undefined ? 2 : d) : String(v));
+/** a 0–1 clamp for the rows that re-derive a statistic from the exposed fields */
+const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
 const bed = (lp, norm, depth) => {
   let s = H.filter(RSDSP, H.pink(SR, SEC, 0.40, 31), SR, 'lp', lp, 0.60);
@@ -1020,6 +1022,155 @@ for (const e of EXPORTS) {
     (back.length ? '**a repaired defect is back on the export: ' + back.join(',') + '**' : 'no repaired defect returns')
     + ' · the chain\'s own output reads ' + (e.wet.join(',') || 'healthy')
     + (codec.length ? ' · the encode itself adds ' + codec.join(',') : ''));
+}
+
+mark('section 20');
+/* 20 ── a clean file is not named ────────────────────────────────────────────
+ * Seventeen sections prove a repair. This one proves the *diagnosis* keeps quiet
+ * about material that carries no defect of the class being measured — because
+ * the chain acts on the diagnosis, a false positive is not a wrong label, it is
+ * an instruction. Measured end to end, the worst of them: the crackle index read
+ * **0.982** on a pattern of 24 clave-like hits, and the 0.702 de-click dose that
+ * came with it cost the hits **13.97 dB mean / 53.32 dB worst** of their peak
+ * level through the chain (the same chain with the de-clicker off: 0.49 / 1.25).
+ * That is the stage spending its whole authority on a performance, which the
+ * request says it may not do. The rules that close it are in `crackleStep`'s
+ * value(): a *contrast* gate (a click interrupts its file; a square wave is
+ * nothing but edges) and a *duration* gate (a click is the analysis filter's own
+ * ring; a performance rings as long as the drum does). Both are measured against
+ * every crackle fixture the matrix has — §1 dry, §1 at 320 kbit/s, §17's worn
+ * rip at 128, the vinyl and garage sims, drums with pops on them — all of which
+ * still read `crackle`, so the rows below are the far side of the same line.
+ *
+ * …and the boundary, because a gate that is not written down is a gate nobody
+ * can trust: a percussion *inside a dense cymbal mix* still reads crackle, 0.693
+ * on this tool's own fixture (24 claves of 0.4 ms under crashes), because the
+ * crash's own onset is a narrow 8.5 kHz transient too and it dilutes the wide
+ * share the gate counts (7 % against the 15 % bound, where the same claves on a
+ * quiet bed measure 18 %). The cost measured there is 1.65 dB mean / 8.70 dB
+ * worst on the claves against 0.29 / 1.89 with the de-clicker off. The
+ * populations genuinely overlap: spike durations run 2–18 samples for those
+ * claves and 5–10 for a pop smeared by a 128 or 320 kbit/s encode, so *no*
+ * duration bound separates them, and the honest answer is the one written here
+ * rather than a bound tuned until this fixture passes.
+ * ------------------------------------------------------------------------- */
+{
+  const P0 = Processor;
+  /* 24 percussion hits of 0.4 ms, the attack of a clave or a rimshot, on the
+   * same bed the crackle fixtures use — nothing else about the file is a defect */
+  const ticks = (() => {
+    const out = Float32Array.from(bed(9000, 0.7));
+    const hf = filt(H.noise(SR, SEC, 0.6, 91), [bq('HP', 3000, 0.707)]);
+    for (let k = 0; k * 0.33 < SEC; k++) {
+      const at = Math.round(k * 0.33 * SR);
+      for (let i = 0; i < SR * 0.02 && at + i < out.length; i++) out[at + i] += 0.5 * Math.exp(-i / (SR * 0.0004)) * hf[at + i] * 3;
+    }
+    return H.normalize(out, 0.7);
+  })();
+  const r = run([ticks]);
+  const cd = RSDSP.crackleDetect([ticks], SR);
+  /* what the statistic said before the gates: the two terms of the old index */
+  const crestAlone = 0.75 * clamp01((cd.crestP98Db - 13) / 10) + 0.25 * clamp01((cd.globalCrestDb - 13) / 10);
+  row('a percussion pattern, not crackle', 'crackle index: crest alone vs gated (0–1)', N(crestAlone, 3), N(r.m.crackleIndex, 3),
+    'spikes ' + N(cd.spikeFrames, 0) + '/400 · contrast ' + N(cd.spikeContrastDb, 1) + ' dB (gate 6) · duration ' + N(cd.spikeWidth, 0)
+    + ' samples · ' + N(100 * cd.spikeWideShare, 0) + ' % of them wider than 0.25 ms (gate 15 %) → ' + (r.dry.issues.join(',') || 'healthy')
+    + ' · the same fixture at 2 ms and 5 ms never reaches the spike set at all (duty 0.05–0.12 against the 0.04 gate)');
+  /* …and the consequence the index is about: no dose, no damage */
+  const off = H.renderEx(P0, [ticks], Object.assign({}, r.P, { declick: 0 }));
+  const hitLoss = (out, lat) => {
+    let sum = 0, n = 0, worst = 0;
+    for (let k = 0; k * 0.33 < SEC; k++) {
+      const at = Math.round(k * 0.33 * SR), j = at + (lat || 0);
+      let pk = 0, pkD = 0;
+      for (let i = 0; i < SR * 0.003 && j + i < out.length; i++) { const a = Math.abs(out[j + i]); if (a > pk) pk = a; }
+      for (let i = 0; i < SR * 0.003 && at + i < ticks.length; i++) { const a = Math.abs(ticks[at + i]); if (a > pkD) pkD = a; }
+      if (pkD > 1e-6) { const d = 20 * Math.log10(pk / pkD); sum += d; n++; if (Math.abs(d) > Math.abs(worst)) worst = d; }
+    }
+    return { mean: sum / Math.max(n, 1), worst };
+  };
+  const a = hitLoss(off.out[0], off.lat), b = hitLoss(r.out[0], r.lat);
+  row('a percussion pattern, not crackle', 'hit peak level through the chain: de-click off vs on (dB)',
+    N(a.mean, 2) + ' / ' + N(a.worst, 2), N(b.mean, 2) + ' / ' + N(b.worst, 2),
+    'mean / worst · de-click dose ' + N(r.P.declick, 3) + ' — before the gates the same chain took 13.97 / 53.32 dB off these peaks at dose 0.702');
+  /* a hi-hat pattern: the family the duty gate already excluded */
+  const hats = (() => {
+    const out = Float32Array.from(bed(9000, 0.7));
+    const hf = filt(H.noise(SR, SEC, 0.6, 91), [bq('HP', 3000, 0.707)]);
+    for (let k = 0; k * 0.33 < SEC; k++) {
+      const at = Math.round(k * 0.33 * SR);
+      for (let i = 0; i < SR * 0.02 && at + i < out.length; i++) out[at + i] += 0.5 * Math.exp(-i / (SR * 0.005)) * hf[at + i] * 3;
+    }
+    return H.normalize(out, 0.7);
+  })();
+  const rh = run([hats]);
+  const ch = RSDSP.crackleDetect([hats], SR);
+  row('a hi-hat pattern, not crackle', 'crackle index: crest alone vs gated (0–1)',
+    0.75 * clamp01((ch.crestP98Db - 13) / 10) + 0.25 * clamp01((ch.globalCrestDb - 13) / 10), rh.m.crackleIndex,
+    'the burst is 15 dB wide, so the crest factor barely sees it · ' + (rh.dry.issues.join(',') || 'healthy'));
+  /* a synthesizer square: real flat tops at the file's peak, and a crackle
+   * reading built from 400 spike windows that stand 0 dB above the file's own
+   * median crest — every window in the file is an edge */
+  const square = H.normalize((() => {
+    const sq = new Float32Array(SR * SEC);
+    for (let i = 0; i < sq.length; i++) sq[i] = 0.5 * Math.sign(Math.sin(2 * Math.PI * 55 * i / SR));
+    return sq;
+  })(), 0.7);
+  const squareMix = H.normalize(H.mix([bed(4000, 0.5), H.normalize((() => {
+    const sq = new Float32Array(SR * SEC);
+    for (let i = 0; i < sq.length; i++) sq[i] = 0.5 * Math.sign(Math.sin(2 * Math.PI * 55 * i / SR));
+    return sq;
+  })(), 0.5) ]), 0.7);
+  const cq = RSDSP.crackleDetect([square], SR);
+  const mq = RSDSP.measure([square], SR);
+  const dq = RP.diagnose(mq);
+  const dqm = RP.diagnose(RSDSP.measure([squareMix], SR));
+  row('a square-wave bass, not crackle', 'crackle index: crest alone vs gated (0–1)',
+    0.75 * clamp01((cq.crestP98Db - 13) / 10) + 0.25 * clamp01((cq.globalCrestDb - 13) / 10), mq.crackleIndex,
+    'contrast ' + N(cq.spikeContrastDb, 1) + ' dB against the 6 dB gate — 400 of 400 windows are spikes, p98 ' + N(cq.crestP98Db, 1)
+    + ' dB on a median of ' + N(cq.medianCrestDb, 1) + ' · ' + (dq.issues.join(',') || 'healthy'));
+  row('a square-wave bass, not clipping', 'clipping evidence: floors only vs with the ceilings (0–1)',
+    N(Math.min(1, (mq.clipFlatRatio || 0) / 0.004) * clamp01(((mq.clipOvershootDb || 0) - 0.6) / 2), 2), N(mq.clipEvidence || 0, 2),
+    'the file is ' + N(100 * mq.clipFlatRatio, 3) + ' % flat at its own peak with an implied missing peak of ' + N(mq.clipOvershootDb, 2)
+    + ' dB — a transfer that clips 0.9/0.7/0.5/0.3 of the peak measures 0.005–11.6 % and 1.65–2.04 dB (a 997 Hz tone cut 2 dB down reads 42 %, and is left alone), so the ceilings sit at 70 % and 5 dB · with the bed under it '
+    + (dqm.issues.join(',') || 'healthy'));
+  /* an organ: a real line at exactly the mains frequency, *played* */
+  const organ = (() => {
+    let s = new Float32Array(SR * SEC);
+    const chords = [[220, 261.6, 329.6], [196, 246.9, 293.7], [174.6, 220, 261.6], [196, 233.1, 293.7]];
+    const bar = 1.5, on = 1.15;
+    for (let k = 0; k * bar < SEC; k++) {
+      const at = Math.round(k * bar * SR), len = Math.round(on * SR);
+      for (const f of chords[k % 4]) for (let i = 0; i < len && at + i < s.length; i++) {
+        const e = Math.min(1, i / (SR * 0.08)) * Math.min(1, (len - i) / (SR * 0.12));
+        s[at + i] += 0.16 * e * (Math.sin(2 * Math.PI * f * i / SR) + 0.3 * Math.sin(2 * Math.PI * f * 2 * i / SR));
+      }
+      for (let i = 0; i < len && at + i < s.length; i++) {
+        const e = Math.min(1, i / (SR * 0.06)) * Math.min(1, (len - i) / (SR * 0.15));
+        for (const [k2, a2] of [[1, 1], [2, 0.4], [3, 0.25], [4, 0.15], [6, 0.08]])
+          s[at + i] += 0.30 * a2 * e * Math.sin(2 * Math.PI * 50 * k2 * i / SR);
+      }
+    }
+    const env = H.songEnvelope(SR, SEC, 0.35);
+    for (let i = 0; i < s.length; i++) s[i] *= env[i];
+    return H.normalize(H.mix([s, H.mul(bed(9000, 0.25), 0.5)]), 0.72);
+  })();
+  const ro = run([organ]);
+  const lineOnly = clamp01((ro.m.humPeakDb - 3) / 6) * clamp01((ro.m.humSteady - 0.7) / 0.25) * (ro.m.humPersist === undefined ? 1 : ro.m.humPersist);
+  row('an organ pedal at 50 Hz, not hum', 'hum score: line and steadiness alone vs with the slope (0–1)', N(lineOnly, 3), N(ro.m.humScore, 3),
+    'the line is ' + N(ro.m.humPeakDb, 1) + ' dB above its own shoulders and steady ' + N(ro.m.humSteady, 2)
+    + ' — a real mains line in every respect but one: it drops ' + N(ro.m.humFollowSlope, 2)
+    + ' dB per dB with the music, and a line that follows is a note · the control stays named: the §3 fixture below reads slope '
+    + '-1.00 (a constant line grows *relatively* louder as the music falls) and the sustained tone reads 0.00 · '
+    + (ro.dry.issues.join(',') || 'healthy'));
+  /* …and the user's own loop: their export of a *clean* master may not come back
+   * with a defect the encoder put in it */
+  const master = bed(20000, 0.8);
+  const expo = U.enc([master], 320, U.WORK + '/accept-clean-320.mp3')[0];
+  const dm = RP.diagnose(RSDSP.measure([master], SR)), de = RP.diagnose(RSDSP.measure([expo], SR));
+  row('a clean master, not codec', '8–16 kHz vs the pre-encode master (dB): master vs its 320 kbit/s export',
+    N(bandSumDb(master, 8000, 16000) - bandSumDb(master, 8000, 16000), 2), N(bandSumDb(expo, 8000, 16000) - bandSumDb(master, 8000, 16000), 2),
+    'card ' + dm.id + ' → ' + de.id + ' · issues ' + (dm.issues.join(',') || 'healthy') + ' → ' + (de.issues.join(',') || 'healthy')
+    + ' — the brick wall and the noise floor the encoder adds are not defects the card names');
 }
 
 /* ── print ──────────────────────────────────────────────────────────────── */

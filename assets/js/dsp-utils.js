@@ -810,7 +810,35 @@
           runMedian: n ? ls / n : 0,
           overshootDb,
           maxRun: mx,
-          evidence: Math.min(1, (sm / total) / 0.004) * clamp((overshootDb - 0.6) / 2, 0, 1),
+          /* …and two *ceilings*, because the two terms above are both floors and
+           * a square wave clears both of them: measured on a 55 Hz square
+           * synthesizer on its own, the flat share at the peak is **100.000 %**
+           * (every sample in the file is inside a plateau) with an implied
+           * missing peak of **15.35 dB**. Programme clipped by a real transfer —
+           * the same bed cut at 0.9, 0.7, 0.5 and 0.3 of its own peak, and the
+           * acceptance matrix's over-limited master at a 0.70 rail — reads
+           * 0.005 / 0.168 / 1.819 / 11.556 / 0.690 % and 1.65 / 1.80 / 1.93 /
+           * 2.04 / 1.79 dB. Saturation is not in that population: a 15 dB
+           * overshoot is not a peak to reconstruct, it is a waveform that never
+           * had one, and a file whose plateaus *are* the waveform has nothing
+           * left to interpolate between.
+           *
+           * The share ceiling is the wider of the two edges, and deliberately:
+           * how much of a *legitimately* clipped file sits at the rail depends
+           * on the source's own crest factor, not on the defect — a 997 Hz sine
+           * cut 2 dB below its peak (the matrix's own clipping fixture) sits
+           * there **42 %** of the time, where programme cut 2 dB down sits there
+           * 0.005–11.6 %. So the ceiling starts at 70 % and is complete at 95 %,
+           * above every clipping fixture the suite has and still catching a
+           * waveform that is nothing but rails (measured: 100.000 %). The
+           * overshoot ceiling is the sharper edge for that family anyway — a
+           * square's is 15.35 dB against 1.65–2.05 dB for every clipped fixture
+           * measured, so it starts at 5 dB and is complete at 10. (The square's
+           * *crackle* reading is closed by its own gate in value() below; this
+           * one is the clipping detector's.) */
+          evidence: Math.min(1, (sm / total) / 0.004) * clamp((overshootDb - 0.6) / 2, 0, 1)
+            * (1 - clamp((sm / total - 0.70) / 0.25, 0, 1))
+            * (1 - clamp((overshootDb - 5) / 5, 0, 1)),
         };
       },
     };
@@ -867,7 +895,7 @@
     /* Per window: its HF energy and its HF peak. The *selection* of which
      * windows carry the statistic is made in value(), against the file's own
      * HF level — see the gate there. */
-    const st = { ms: [], peak: [], duty: [], spikeFrames: 0, crests: [], peaks: [], gPeak: 0, gSum: 0, gCount: 0, pops: 0 };
+    const st = { ms: [], peak: [], duty: [], wid: [], spikeFrames: 0, crests: [], peaks: [], gPeak: 0, gSum: 0, gCount: 0, pops: 0 };
     /* one window of band-passed samples, kept for the second pass that measures
      * how much of the window sits near its own peak — see the duty gate in value() */
     const spikeBuf = new Float32Array(win);
@@ -903,9 +931,29 @@
              * 0.13–0.47, a clean bed 0.24–0.45, a hiss 0.22–0.39, a squashed
              * master 0.21–0.38. */
             const nearTh = 0.3 * peak;
-            let near = 0;
-            for (let i = 0; i < win; i++) { const a = spikeBuf[i] < 0 ? -spikeBuf[i] : spikeBuf[i]; if (a > nearTh) near++; }
+            let near = 0, ipk = 0, best = -1;
+            for (let i = 0; i < win; i++) {
+              const a = spikeBuf[i] < 0 ? -spikeBuf[i] : spikeBuf[i];
+              if (a > nearTh) near++;
+              if (a > best) { best = a; ipk = i; }
+            }
             st.duty.push(near / win);
+            /* …and how long the tallest excursion in the window takes to fall
+             * 20 dB from its own peak, in samples. That is the *duration* of the
+             * spike, and duration is the one thing a click and a musical hit do
+             * not share: a click is over in the analysis filter's own ring
+             * (~0.1 ms), a hit rings for as long as the drum does (0.4 ms and
+             * up). The threshold is 20 dB rather than 6 because at −6 dB both
+             * are inside the filter's ring and the two families measure 3 and 3;
+             * at −20 dB they separate. See the gate in value(). */
+            let wid = win;
+            if (best > 1e-20) {
+              const th = 0.1 * best;
+              wid = 1;
+              for (let i = ipk - 1; i >= 0 && Math.abs(spikeBuf[i]) >= th; i--) wid++;
+              for (let i = ipk + 1; i < win && Math.abs(spikeBuf[i]) >= th; i++) wid++;
+            }
+            st.wid.push(wid);
             st.gSum += ms; st.gCount += win;
             if (peak > st.gPeak) st.gPeak = peak;
             st.ms.push(ms); st.peak.push(peak);
@@ -942,7 +990,7 @@
         const sortedMs = st.ms.slice().sort((a, b) => a - b);
         const hfMed = sortedMs.length ? sortedMs[Math.floor(sortedMs.length * 0.5)] : 0;
         const gate = Math.max(hfMed * 0.05, 1e-20);
-        const crests = [], peakKept = [];
+        const crests = [], peakKept = [], widKept = [];
         let gSum = 0, gCount = 0, gPeak = 0, spikeCount = 0;
         for (let i = 0; i < st.ms.length; i++) {
           if (st.ms[i] <= gate) continue;
@@ -977,7 +1025,7 @@
            * chain has repaired falls back to the floor. */
           const spike = st.duty[i] <= 0.04;
           const rms = Math.sqrt(st.ms[i] / win);
-          if (spike) { spikeCount++; crests.push(st.peak[i] / rms); peakKept.push(st.peak[i]); }
+          if (spike) { spikeCount++; crests.push(st.peak[i] / rms); peakKept.push(st.peak[i]); widKept.push(st.wid[i]); }
           else crests.push(1);
         }
         st.spikeFrames = spikeCount;
@@ -1011,8 +1059,70 @@
         const p98 = st.crests.length ? st.crests[Math.min(st.crests.length - 1, Math.floor(st.crests.length * 0.98))] : 1;
         const med = st.crests.length ? st.crests[Math.floor(st.crests.length * 0.5)] : 1;
         const crestP98Db = 20 * Math.log10(p98 + 1e-9);
-        const index = clamp((crestP98Db - 13) / 10, 0, 1) * 0.75
-          + clamp((globalCrestDb - 13) / 10, 0, 1) * 0.25;
+        const medDb = 20 * Math.log10(med + 1e-9);
+        /* ── …but a crest factor cannot tell damage from a performance ───────
+         * Measured with these numbers on twelve-second fixtures built for both
+         * families (spike windows of 400 · index · contrast = p98 − median
+         * crest · the *duration* of the spike in samples, median/p90 over its
+         * spike windows · share of spike windows wider than 0.25 ms):
+         *
+         *   72 pops on a bed         62/400  1.000  24.7 dB   5/6    ·   0 %
+         *   72 weaker pops           54/400  1.000  23.4 dB   5/5    ·   2 %
+         *   the vinyl sim            46/400  0.984  24.0 dB   6/7    ·   0 %
+         *   the garage sim           17/400  0.728  19.8 dB   5/8    ·   0 %
+         *   the worn rip             62/400  1.000  25.0 dB   5/6    ·   0 %
+         *   the worn rip at 128k     60/400  1.000  25.1 dB   7/10   ·   0 %
+         *   pops at 320 kbit/s       61/400  1.000  24.9 dB   8/9    ·   0 %
+         *   pops under drum hits     60/400  1.000  24.8 dB   5/6    ·   0 %
+         *   ── music ──
+         *   hits of 0.4 ms           26/400  0.982  22.8 dB   9/18   ·  31 %
+         *   hits of 0.8 ms           26/400  0.854  21.1 dB   8/19   ·  31 %
+         *   hits of 2 ms              8/400  0.000   0.0 dB  15/23   ·   —
+         *   a 55 Hz square wave     400/400  1.000   0.0 dB   4/4    ·   0 %
+         *   the clean bed             1/400  0.000   0.0 dB   4/4    ·   0 %
+         *
+         * Two gates, each for one of the two ways this index named music, and
+         * each on the *index* only — the statistics above stay levels and stay
+         * worth looking at:
+         *
+         *  · **contrast ≥ 6 dB.** A click *interrupts* its file; a square wave
+         *    is nothing but edges, so all 400 of its windows are as spiky as one
+         *    another and its own median crest equals its 98th percentile — 0.0 dB
+         *    of contrast, where every crackle fixture above stands ≥ 19.8 dB
+         *    above a median that is the floor. Its spikes are 4 samples wide, so
+         *    the duration gate cannot see it; contrast is what sees it.
+         *  · **fewer than 15 % of the spike windows wider than 0.25 ms.** A
+         *    performance — a clave, a rimshot, the snap of a snare — has an
+         *    attack between 0.4 and 1 ms, and the 8.5 kHz band of it rings for
+         *    18–23 samples, against 5–10 for a pop at any bitrate measured. The
+         *    0.4 ms and 0.8 ms hit fixtures are the only ones of either family
+         *    that sit on the wrong side of the *count*: their spikes are rare and
+         *    tall enough to pass the duty gate and the contrast gate, and about a
+         *    third of them are too wide to be clicks. The gate asks for a
+         *    *majority* of impulses, not for one: a record whose crackle is real
+         *    but mixed with hits keeps 300 of its 400 windows out of the spike
+         *    set entirely (the drum-hit fixture's spike window population is 0 %
+         *    wide).
+         *
+         * What the false positive cost, measured end to end on the 0.4 ms
+         * fixture — it was named `crackle`, so the vinyl profile and a 0.702
+         * de-click dose came with it: the hits' peak level through the chain fell
+         * **13.97 dB** on average, −53.3 dB worst, against **0.49 dB** for the
+         * identical chain with the de-clicker off. The stage spent its whole dose
+         * on a performance, which the request says it may not do. With both gates
+         * the fixture reads index 0.000, a general profile and dose 0. */
+        const widthMax = Math.max(2, Math.round(sr * 0.25e-3));
+        let wide = 0;
+        for (const w of widKept) if (w > widthMax) wide++;
+        const wideShare = widKept.length ? wide / widKept.length : 0;
+        widKept.sort((a, b) => a - b);
+        const spikeWidth = widKept.length ? widKept[Math.floor(widKept.length * 0.5)] : 0;
+        const spikeContrastDb = crestP98Db - medDb;
+        const impulsive = spikeContrastDb >= 6 && wideShare < 0.15;
+        const index = impulsive
+          ? clamp((crestP98Db - 13) / 10, 0, 1) * 0.75
+            + clamp((globalCrestDb - 13) / 10, 0, 1) * 0.25
+          : 0;
         // The index was briefly gated on how far the loud frames' peaks stood
         // above the file's *own* HF median, to stop a *repaired* file from
         // reading as still-crackly: every term above is a ratio inside a frame,
@@ -1038,11 +1148,18 @@
           index,
           crestP98Db,
           globalCrestDb,
-          medianCrestDb: 20 * Math.log10(med + 1e-9),
+          medianCrestDb: medDb,
           peakProminenceDb: prominenceDb,
           spikeFrames: spikeCount,
           frames: st.crests.length,
           spikes: st.pops,
+          // the two gates behind `index`, in their own units, so a row can
+          // witness them: the median duration of the file's spikes (samples to
+          // fall 20 dB), how far their p98 crest stands above the file's own
+          // median crest, and the share of spikes too wide to be clicks
+          spikeWidth,
+          spikeContrastDb,
+          spikeWideShare: wideShare,
         };
       },
     };
@@ -1735,6 +1852,100 @@
     const out = stepRange('hum', segCount, segCount * (segLen * 2 + (segLen / dec) * (1.5 + K * 3)), slice);
     out.value = () => {
       const dbo = (v) => 20 * Math.log10(Math.max(v, 1e-9));
+      /* ── the one question the segment test cannot answer ──────────────────
+       * "Does the line follow the music?" is asked two ways here. The segment
+       * test above can only answer it when the file *has* quiet passages: it
+       * needs a 1 s segment that is 6 dB below the file's median, i.e. a real
+       * silence, and it falls back to `persist = 1` (assume hum) when it finds
+       * none. On music that never stops that fallback is what decides, and it
+       * decides wrong: measured, an organ piece whose pedal note is played at
+       * exactly 50 Hz in phrases — the notes *are* the loudest thing in the
+       * file — reads a 25.6 dB line, steady 0.88, persist 1.00 (no quiet
+       * segment found) and is named `hum` at 0.70, where the right answer is
+       * "that is the piece".
+       *
+       * So the line is also measured the way a musician would: frame by frame,
+       * 100 ms at a 20 ms hop, against the same frame's own loudness. A mains
+       * line is a *constant* and its correlation with the programme is zero; a
+       * note is played and its level rises and falls with everything around it.
+       * Measured (correlation of the 50 Hz frame level with the frame's own
+       * RMS): the sustained-tone fixture 0.02, hum under the acceptance bed
+       * 0.03, the phrased organ **0.83** — the same number on the file whose
+       * pedal is 5 Hz off the grid, so it is the phrasing being read and not
+       * the frequency. From 0.30 up the line is following and the score is
+       * tapered to zero by 0.60.
+       *
+       * It costs one Goertzel per hop at the branch's fundamental (decimated
+       * 8:1 like the segment pass), and it replaces nothing: a line that sits
+       * still through the silences *and* does not follow the music is still
+       * hum, and a file with no silence at all is now judged by the music
+       * instead of by an assumption. */
+      const followSeries = (f0) => {
+        const fw = Math.max(64, Math.round(sr * 0.10));
+        const hop = Math.max(1, Math.round(sr * 0.02));
+        const d2 = Math.max(1, Math.round(sr / 6000));
+        const used = Math.floor(fw / d2), rate2 = sr / d2;
+        const w = new Float64Array(used);
+        for (let m = 0; m < used; m++) w[m] = 0.5 - 0.5 * Math.cos(TWO_PI * m / used);
+        /* the line and the two shoulders it is read against, all three at the
+         * same window so the window's own gain cancels in the difference — the
+         * segment pass's trick, moved down to a 100 ms frame. Without it the
+         * frame measures the *bin* and not the line: on the matrix's hum fixture
+         * the bed's own energy across 45–55 Hz is the same order as the tone, so
+         * a bare 50 Hz frame level follows the bed (slope 0.57 dB/dB against a
+         * tone that does not move at all) and the fallback would taper a real
+         * hum away. */
+        const freqs = [f0, f0 - 30, f0 + 30];
+        const pr = freqs.map((fq) => Math.cos(TWO_PI * fq / rate2));
+        const pi = freqs.map((fq) => -Math.sin(TWO_PI * fq / rate2));
+        const lev = [], prog = [];
+        for (let start = 0; start + fw <= n; start += hop) {
+          let prk = [1, 1, 1], pik = [0, 0, 0], sum = 0;
+          const re = [0, 0, 0], im = [0, 0, 0];
+          for (let m = 0, i = start; m < used; m++, i += d2) {
+            const x = b ? (a[i] + b[i]) * 0.5 : a[i];
+            const y = x * w[m];
+            for (let k = 0; k < 3; k++) {
+              re[k] += y * prk[k]; im[k] += y * pik[k];
+              const nr = prk[k] * pr[k] - pik[k] * pi[k];
+              pik[k] = prk[k] * pi[k] + pik[k] * pr[k];
+              prk[k] = nr;
+            }
+            sum += x * x;
+          }
+          const mag = (k) => 4 * Math.sqrt(re[k] * re[k] + im[k] * im[k]) / Math.max(used, 1);
+          const shoulder = 0.5 * (mag(1) + mag(2));
+          lev.push(dbo(mag(0)) - dbo(shoulder));      // the line over its own neighbourhood, in dB
+          prog.push(Math.sqrt(sum / fw));
+        }
+        return { lev, prog };
+      };
+      /** The line's *slope* against the programme, in dB per dB — not a
+       *  correlation. A correlation is ill-conditioned on the very file that
+       *  needs the test most: a line that is perfectly constant has no variance
+       *  to correlate, and a little leakage from a moving bass is then enough to
+       *  produce a correlation near 0.6 out of nothing (measured on the
+       *  sustained-tone fixture: r = 0.62 where the line itself moves 0.02 dB
+       *  per dB of programme). The slope asks the question the ear asks — when
+       *  the music drops 10 dB, how far does the line drop? — and a constant
+       *  answers 0 whatever else is in the bin. */
+      const followSlope = (f0) => {
+        const s2 = followSeries(f0);
+        const nn = s2.lev.length;
+        if (nn < 8) return 0;
+        /* the file's own quietest and loudest quarter of frames, compared by
+         * *median* rather than by a least-squares fit: the medians of the two
+         * ends are what the ear hears as the drop, and leakage that rides on the
+         * programme cannot move a median the line itself dominates */
+        const order = s2.prog.map((v, i) => i).sort((x, y) => s2.prog[x] - s2.prog[y]);
+        const q = Math.max(2, Math.floor(nn / 4));
+        const med = (arr) => { const c = arr.slice().sort((a, b) => a - b); return c[Math.floor(c.length / 2)]; };
+        const quietIdx = order.slice(0, q), loudIdx = order.slice(nn - q);
+        const progDrop = dbo(med(quietIdx.map((i) => s2.prog[i]))) - dbo(med(loudIdx.map((i) => s2.prog[i])));
+        const lineDrop = med(quietIdx.map((i) => s2.lev[i])) - med(loudIdx.map((i) => s2.lev[i]));
+        if (progDrop > -0.5) return 0;                 // no dynamic range to read a slope from
+        return clamp(lineDrop / progDrop, -1, 2);
+      };
       const median = (arr) => {
         if (!arr.length) return 0;
         const c = arr.slice().sort((x, y) => x - y);
@@ -1774,18 +1985,33 @@
         for (let i = 0; i < st.rms.length; i++) if (st.rms[i] < rmsMed * 0.5) quiet.push(i);
         const followDb = quiet.length >= 3 ? dbo(median(quiet.map((i) => abs[i]))) - dbo(median(abs)) : 0;
         const persist = quiet.length >= 3 ? clamp((followDb + 7) / 5, 0, 1) : 1;
-        return { mains, excess: fundDb - shoulderDb, fundDb, shoulderDb, steady, followDb, persist, harm };
+        return { mains, excess: fundDb - shoulderDb, fundDb, shoulderDb, steady, followDb, persist, quietN: quiet.length, harm };
       };
       const b50 = branch(50), b60 = branch(60);
       const best = b50.excess >= b60.excess ? b50 : b60;
       const evidence = clamp((best.excess - 3) / 6, 0, 1);
       const credibility = clamp((best.steady - 0.7) / 0.25, 0, 1);
+      /* …and where the segment test had *nothing to look at* the frame-level
+       * slope answers instead of the old assumption. This is the exact place the
+       * bug was: `persist` is the right test whenever the file has quiet
+       * passages (the line sits still while the music stops) and it *only* has
+       * an answer then — `quiet.length >= 3` — so on music that never stops it
+       * fell back to 1 and the score rested on `steady` alone. Measured, that is
+       * where a phrased organ pedal at 50 Hz was named `hum` (line 25.6 dB,
+       * steady 0.88, fallback 1.00 → score 0.70). A file *with* quiet passages
+       * keeps the segment test and is untouched by the slope: a hum under a
+       * phrase is still a hum, which is what `persist` is for. */
+      const followSlopeDb = followSlope(best.mains);
+      const followTaper = best.quietN >= 3 ? 1 : 1 - clamp((followSlopeDb - 0.35) / 0.35, 0, 1);
       return {
-        score: clamp(evidence * credibility * best.persist, 0, 1),
+        score: clamp(evidence * credibility * best.persist * followTaper, 0, 1),
         peakDb: clamp(best.excess, -20, 60),
         steady: best.steady,
         followDb: best.followDb,
         persist: best.persist,
+        followSlope: followSlopeDb,
+        followTaper,
+        shoulderDb: best.shoulderDb,
         mainsHz: best.mains,
         hum50Db: b50.excess,
         hum60Db: b60.excess,
@@ -2166,6 +2392,8 @@
         humFollowDb: hum.followDb,
         mainsHz: hum.mainsHz,
         humPersist: hum.persist,
+        humFollowSlope: hum.followSlope,
+        humShoulderDb: hum.shoulderDb,
         humMainsHz: hum.mainsHz,
         hum2Db: hum.hum2Db,
         hum3Db: hum.hum3Db,
