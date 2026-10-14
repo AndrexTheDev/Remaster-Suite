@@ -13,6 +13,27 @@ thresholds sat in the tone stages (the glue's and the warmth's), all of them wri
 full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
 else may move.
 
+### Fixed — a strong room ring came out of the chain still reported boxy
+
+* **The resonance notch's ceiling was a flat 8 dB, and 8 dB is not enough for a strong ring.** On a
+  +18 dB Q-4 peak over a bed the scan reports 8.5 dB of excess, the chain cut the ceiling's 8, and
+  **the file it had just written still read 3.5 dB of excess at 223 Hz** — the export would have come
+  back diagnosed boxy, the same class of dishonesty as the codec card this suite already fixed. A
+  +21 dB ring (reported 10.0 dB) came out at 4.9 dB. Measured with the deeper cut: **10 dB closes the
+  18 dB ring, 12 dB closes the 21 dB one** (scan 0.0, no resonance listed in either case).
+* **Width is not the lever, depth is**: moving the notch from Q 6 to Q 4 (a third of an octave
+  instead of a quarter) moves the residue 0.87 → 0.60 dB and pushes the app's own reading *up* to
+  3.9 dB — so the depth, not the notch's shape, is what was missing. The ceiling is now 12 dB.
+* **What it costs, measured**: over those rings the notch's own third of an octave loses **6.8 dB**
+  and the two neighbouring third-octaves (110 and 440 Hz) move **1.0 dB** — the cut stays inside the
+  third of an octave the design always wanted it in, which is why it may go deeper at all. Rings the
+  scan reports at ≤ 5.5 dB — everything the acceptance fixture and the audit's own room fixture
+  write, where `1.45 ×` the report is still ≤ 8 — are **untouched** by this change, which is why
+  those rows' numbers do not move.
+* Pinned by a new pair of audit rows in `audit · a room, not a note`: a ring stronger than the old
+  ceiling could handle must come out **un-reported** (not half-cut), and the price must stay inside
+  its own third of an octave.
+
 ### Measured — where the de-clicker's detector stops, and what moving it costs
 
 * **The pops a de-clicker cannot see are the ones the statistic under-reads, and that is now a

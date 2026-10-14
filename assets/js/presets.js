@@ -67,7 +67,20 @@
     // *measurement*: the peak has to sit ≥ 3 dB above its own local trend, at
     // Q ≥ 3, inside 150–1800 Hz, and it is read from the quiet-frame spectrum —
     // sound that is there when the music is not.
-    box: 8,
+    // …and the ceiling was 8 until a stronger ring showed what an open-loop
+    // cap does at the top of its range. Measured on +18 and +21 dB Q-4 rings
+    // over the same bed (the scan reports 8.5 and 10.0 dB, above anything the
+    // card's own "boxy" scale saturates at): at 8 dB of cut the *export is still
+    // diagnosed boxy* — the app's own scan reads 3.5 and 4.9 dB of excess at
+    // 223 Hz on the file it just wrote — while 10 and 12 dB close both (scan
+    // 0.0, no resonance listed). A wider notch is not the lever (Q 4 instead of
+    // 6 moves the residue 0.87 → 0.60 dB and the scan *up* to 3.9), and the cost
+    // of the deeper cut stays where the design wants it: over those rings the
+    // notch's own third of an octave loses 5.2–6.2 dB and the two neighbouring
+    // third-octaves move 1.0–1.4 dB. Rings the scan reports at ≤ 5.5 dB — which
+    // is everything the acceptance fixture and the audit's own room fixture
+    // write, and where 1.45 × the report is still ≤ 8 — are untouched by this.
+    box: 12,
     width: 0.55,       // stereo width restoration (≈ +3.4 dB of side signal)
     airRoom: 0.95,     // how much top end the synthesiser may rebuild
     eq: 6,             // dB the per-song corrective EQ may move a band in auto

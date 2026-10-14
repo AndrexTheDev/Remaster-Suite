@@ -1808,6 +1808,45 @@ section('audit · a room, not a note');
     num(wet) + ' dB vs the clean bed ' + num(floor) + ' dB, source ' + num(excess(ringBed)) + ' dB');
   const mo = DSP.measure(r.out, SR);
   ok((mo.resoExcessDb || 0) < 1, 'the analyser agrees the resonance is gone', 'resoExcess ' + num(mo.resoExcessDb) + ' dB');
+  /* …and the same question at the top of the range. A flat ceiling of 8 dB of
+   * cut was not enough for a *strong* ring: on a +18 dB Q-4 peak (the scan
+   * reports 8.5 dB) the file the chain had just written still read 3.5 dB of
+   * excess at 223 Hz — i.e. the export would have come back diagnosed boxy, the
+   * exact failure the third requirement is about. Measured: a deeper notch is
+   * what closes it (10 dB closes the 18 dB ring, 12 the 21 dB one — at 8 both
+   * stay reported), and *wider* is not (Q 4 instead of 6 moves the residue
+   * 0.87 → 0.60 dB and the scan up to 3.9). The ceiling is 12 dB. The cost of the
+   * extra depth stays a third of an octave wide: measured on this fixture, the
+   * notch's own band loses ~6 dB and the two neighbouring third-octaves move
+   * about 1 dB — which is why the cut is allowed to go deeper at all. */
+  {
+    const strong = (() => {
+      const ring2 = DSP.applyBiquad(clean, peak(220, 4, 18));
+      let s = new Float32Array(clean.length);
+      for (let i = 0; i < s.length; i++) s[i] = clean[i] + 1.5 * ring2[i];
+      return H.normalize(s, 0.7);
+    })();
+    const mS = DSP.measure([strong], SR);
+    const PS = Presets.buildParams(Presets.classify(mS).id, mS, 0.7);
+    const rS = H.renderEx(H.loadProcessor(SR), [strong], PS);
+    const moS = DSP.measure(rS.out, SR);
+    ok(PS.boxG1 < -9 && (moS.resoExcessDb || 0) < 1,
+      'a ring stronger than 8 dB of cut could handle now comes out un-reported, not half-cut',
+      'reported ' + num(mS.resoExcessDb) + ' dB → notch ' + num(PS.boxG1) + ' dB → the export reads '
+      + num(moS.resoExcessDb) + ' dB (it read 3.5 dB at the old 8 dB ceiling)');
+    const offS = H.renderEx(H.loadProcessor(SR), [strong], Object.assign({}, PS, { boxG1: 0, boxG2: 0 }));
+    const gain = (f, q) => {
+      const a = rms(DSP.applyBiquad(rS.out[0].subarray(rS.latency), bp(f, q)));
+      const b = rms(DSP.applyBiquad(offS.out[0].subarray(offS.latency), bp(f, q)));
+      return 20 * Math.log10(a / b + 1e-20);
+    };
+    const own = gain(220, 4), sib = 20 * Math.log10((bandOf(110) + bandOf(440)) / (bandOf2(110) + bandOf2(440)));
+    function bandOf(f) { return rms(DSP.applyBiquad(rS.out[0].subarray(rS.latency), bp(f, 2))); }
+    function bandOf2(f) { return rms(DSP.applyBiquad(offS.out[0].subarray(offS.latency), bp(f, 2))); }
+    ok(own > -9 && own < -3 && sib > -2.5,
+      'and it pays for that depth only inside its own third of an octave',
+      'the ring band ' + num(own) + ' dB · the neighbours at 110 + 440 Hz ' + num(sib) + ' dB');
+  }
 }
 /* An honest verdict about a top end: a *ceiling* is not a *wall*.
  *
