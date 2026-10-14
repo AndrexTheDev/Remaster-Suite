@@ -13,6 +13,38 @@ thresholds sat in the tone stages (the glue's and the warmth's), all of them wri
 full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
 else may move.
 
+### Fixed — the report printed a hiss gate that cannot move, and never re-uploaded the export
+
+* **`hissAmount` is a 0–1 gate, not a size — and it saturates at a step of 5.3 dB**
+  (`tiltEvidence = (step − 0.8)/5`). On section 2's own fixture it reads **1.00 on the input, 1.00 on
+  the output and 1.00 on the re-upload**, while the number the card prints — `hissTiltStepDb`, how much
+  of the 4–16 kHz top end the programme cannot account for — goes **18.35 → 11.16 → 10.40 dB** and the
+  quiet passages' top end comes down **3.84 dB** (independent meter: an RBJ high-pass at 4 kHz over the
+  20 ms frames that are 3 dB below the file's own median). A row that printed the gate alone said
+  "nothing happened" about a repair that took 7 dB out of the noise; the rows now print the pair and
+  the gate's saturation is stated on the row.
+* **Where the repair acts, measured rather than asserted.** A quiet frame counts as the *noise's* when
+  the clean copy's top end sits below the hiss's own — **48 of the 53** quiet frames. There the band
+  comes down **5.8 dB**; in the 5 quiet frames the music owns, and in the loud passages, it moves
+  **0.02** and **0.28 dB** — the numbers that have to stay near zero.
+* **The dose law is not the lever, and the arithmetic says why.** Every repair is multiplied by
+  `0.35 + 0.65·p^0.85` (`presets.js`, `repair()`), i.e. **0.830** at the default intensity, so the
+  de-hisser's own ceiling of 0.92 reaches the stage as **0.764**. A certainty override in the dose law
+  measured as a **no-op** (render dose 0.7636 before and after, internals already at the ceiling) and
+  was withdrawn rather than shipped with a comment claiming something it does not do. What the slider
+  is worth on the hiss-owned frames: **+1.25 dB** of band (5.85 → 7.10 dB at dose 1.0); what the stage
+  applies of its key's ask (13.99 dB): **8.8 dB** median, energy-weighted 6.2, because the gate closes
+  over 250 ms and only five quiet stretches (longest 960 ms) let it settle.
+* **The export is re-uploaded for the two classes the user's loop is about.** Crackle: encode the
+  finished file at 320 kbit/s, decode, and ask again — pop energy over the clean copy **−10.26 → −10.23
+  dB**, the same **3 of 72** pops above it, and the app's own verdict on its own export **healthy**
+  (`crackleIndex` 1.00 dry → 0.06 after the chain → **0.04**). Hiss: the export reads `hiss`, and the
+  note says why that is the truthful answer — a step of ~10 dB is still a hiss, and no repair of this
+  class removes 18 dB without taking the music's top end with it. Both rows take the alignment from a
+  correlation (lag 0 samples on this fixture) instead of assuming it, because a window meter that is
+  offset measures the bed.
+* acceptance 53 → 57 rows.
+
 ### Fixed — the report compared a clipped file with a finished render, and what it printed was the EQ's phase
 
 * **§5's first row compared two things that cannot be compared.** The plateau error (the metric the

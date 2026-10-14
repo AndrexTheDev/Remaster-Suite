@@ -156,22 +156,105 @@ mark('section 1');
   row('crackle', 'pop energy over the clean copy (median dB)', d.med, w.med, 'pops above it: ' + d.over + '/' + d.n + ' → ' + w.over + '/' + w.n);
   row('crackle', 'analyser crackleIndex', r.m.crackleIndex, r.mo.crackleIndex,
     r.cls.id + ' · dose ' + N(r.P.declick));
+  /* The user's own loop, on the app's own export: encode the finished file at
+   * 320 kbit/s, feed it back and ask the same two questions. This is the claim
+   * that started the round — "the export still crackles and the app still calls
+   * it crackle" — so it is measured here and not argued: the pop energy stays
+   * where the repair left it (median **−10.26 → −10.23 dB** over the clean copy,
+   * the same 3 of 72 pops above it), and the app's verdict on its own export is
+   * **healthy** (crackleIndex 1.00 dry → 0.06 after the chain → 0.04 after the
+   * re-upload). The encoder returns sample-aligned output, so the alignment is
+   * the render's own latency; it is found by correlation anyway (lag 0 samples on
+   * this fixture) rather than assumed, because the pop meter is a window meter
+   * and a wrong offset measures the bed. */
+  const re = U.enc(r.out, 320, U.WORK + '/accept-crackle-320.mp3')[0];
+  const lag = (() => {
+    let best = 0, bv = -Infinity;
+    for (let d2 = -256; d2 <= 256; d2++) {
+      let s = 0;
+      for (let i = 4800; i < r.out[0].length - 4800; i += 11) s += r.out[0][i] * re[i + d2];
+      if (s > bv) { bv = s; best = d2; }
+    }
+    return best;
+  })();
+  const rm = RSDSP.measure([re], SR);
+  const w320 = at(re, r.lat + lag);
+  row('crackle', 're-upload at 320 kbit/s → pop energy (median dB)', w.med, w320.med,
+    'pops above it: ' + w.over + '/' + w.n + ' → ' + w320.over + '/' + w320.n + ' · aligned by correlation, lag ' + lag + ' samples');
+  row('crackle', 're-upload at 320 kbit/s → diagnosis', r.dry.issues.join(','), RP.diagnose(rm).issues.join(',') || 'healthy',
+    'crackleIndex ' + N(rm.crackleIndex) + ' · what the user re-uploads is this file, and it must not be named a crackle the chain has repaired');
 }
 mark('section 2');
-/* 2 ── hiss ──────────────────────────────────────────────────────────────── */
+/* 2 ── hiss ────────────────────────────────────────────────────────────────
+ * The de-hisser's dose is not a strength: it is the fraction of a *measured*
+ * repair (see the stage), so both halves of the measurement belong on the row.
+ * `hissTiltStepDb` is how many dB of the 4–16 kHz top end the programme cannot
+ * account for — the *size*, and the number the card prints. `hissAmount` is a
+ * 0–1 gate whose evidence term clamps at a step of 5.3 dB
+ * (tiltEvidence = (step − 0.8)/5), so on anything clearly hissy it reads 1.00 on
+ * the input, on the output *and* on the re-upload, and cannot move: a row that
+ * printed it alone would say "nothing happened" about a repair that took the
+ * step from 18.35 to 11.16 dB. The rows print the pair.
+ *
+ * Two more things are measured here rather than assumed, because the audit of
+ * this class needs them — all on this fixture (step 18.35 dB, card cassette,
+ * dose 0.764, and the hiss shaped 2 kHz up so that it sits where the stage
+ * works; white noise at this level is mostly below the band the row measures and
+ * the repair moves it by 1 dB):
+ *   · *where* the repair acts. The quiet mask is 53 of 400 frames, and in 48 of
+ *     them the top end is the noise's own — measured, not asserted: the clean
+ *     copy's ≥4 kHz sits below the hiss's. There the band comes down 5.8 dB; in
+ *     the 5 quiet frames the music owns, and in the loud passages, it moves 0.02
+ *     and 0.28 dB — those are the numbers that have to stay near zero;
+ *   · *how much of the key's ask is applied*. In the noise-owned frames the tilt
+ *     key reads 13.99 dB, the smoothed cut reaches 11.5 dB, and the amount that
+ *     leaves the stage is 0.764 × that = 8.8 dB (energy-weighted 6.2, because
+ *     the gate opens in 8 ms and closes over 250 ms). The 0.764 is the intensity
+ *     curve — every repair is multiplied by 0.35 + 0.65·p^0.85, i.e. 0.830 at
+ *     the default p = 0.7 — so the slider itself is worth +1.25 dB on those
+ *     frames (measured: 5.85 → 7.10 dB of band at dose 1.0). What is *not*
+ *     claimed here is that this is enough: a step of 10 dB is still a hiss, and
+ *     the re-upload row says so instead of leaving the gate at 1.00 to imply
+ *     nothing happened.
+ * ------------------------------------------------------------------------- */
 {
   const clean = bed(9000, 0.7);
-  /* The hiss has to sit where the de-hisser works (its repair band is 2.2–4 kHz,
-   * keyed on ≥4 kHz): white noise at this level is mostly *below* the band the
-   * row measures and the repair moved it by 1 dB. Shaped 2 kHz and up, the row
-   * reads a 4 dB repair — and the analyser's own reading ("hiss") is unchanged. */
-  const dirty = H.normalize(H.mix([clean, H.mul(H.filter(RSDSP, H.noise(SR, SEC, 1, 21), SR, 'hp', 2000, 0.5), 0.040)]), 0.7);
+  const hiss = H.mul(H.filter(RSDSP, H.noise(SR, SEC, 1, 21), SR, 'hp', 2000, 0.5), 0.040);
+  const dirty = H.normalize(H.mix([clean, hiss]), 0.7);
   const r = run([dirty]);
   const HP4 = bq('HP', 4000, 0.707);
   const mask = quietMask(clean, 0.5);
+  /* the population the repair exists for, measured against the clean copy: a
+   * frame is the noise's when the clean copy's top end sits below the hiss's */
+  const noiseOwns = (() => {
+    const F = Math.round(SR * 0.02), frames = Math.floor(clean.length / F);
+    const fc = filt(clean, [HP4]), fh = filt(hiss, [HP4]);
+    const out = new Array(frames).fill(false);
+    for (let k = 0; k < frames; k++) {
+      let a = 0, b = 0;
+      for (let i = k * F; i < (k + 1) * F; i++) { a += fc[i] * fc[i]; b += fh[i] * fh[i]; }
+      out[k] = a < b;
+    }
+    return out;
+  })();
+  const inQuietNoise = mask.map((q, k) => q && noiseOwns[k]);
+  const inQuietMusic = mask.map((q, k) => q && !noiseOwns[k]);
+  const red = (mk) => maskedBandDb(dirty, mk, [HP4]) - maskedBandDb(r.out[0], mk, [HP4], r.lat);
   row('hiss', '≥4 kHz RMS in quiet passages (dBFS)', maskedBandDb(dirty, mask, [HP4]), maskedBandDb(r.out[0], mask, [HP4], r.lat),
-    'in the loud passages: ' + N(maskedBandDb(dirty, mask.map((v) => !v), [HP4]), 1) + ' → ' + N(maskedBandDb(r.out[0], mask.map((v) => !v), [HP4], r.lat), 1));
-  row('hiss', 'analyser hissAmount', r.m.hissAmount, r.mo.hissAmount, r.dry.issues.join(',') + ' · dose ' + N(r.P.dehiss));
+    'where the noise owns the top end (' + inQuietNoise.filter(Boolean).length + ' of the ' + mask.filter(Boolean).length
+    + ' quiet frames): ' + N(red(inQuietNoise), 1) + ' dB · the quiet frames the music owns: ' + N(red(inQuietMusic), 2)
+    + ' dB · loud passages: ' + N(maskedBandDb(dirty, mask.map((v) => !v), [HP4]), 1) + ' → '
+    + N(maskedBandDb(r.out[0], mask.map((v) => !v), [HP4], r.lat), 1));
+  row('hiss', 'the size it measures, hissTiltStepDb (dB)', r.m.hissTiltStepDb, r.mo.hissTiltStepDb,
+    'the card prints this number · the music now stands ' + N(r.mo.hfSnrDb, 1) + ' dB above the top-end floor (was '
+    + N(r.m.hfSnrDb, 1) + ') · dose ' + N(r.P.dehiss, 3));
+  row('hiss', 'analyser hissAmount — a 0–1 gate that saturates', r.m.hissAmount, r.mo.hissAmount,
+    'tiltEvidence clamps at a step of 5.3 dB, so this cannot move on a file that is clearly hissy — the step above is the honest statement');
+  const re = U.enc(r.out, 320, U.WORK + '/accept-hiss-320.mp3')[0];
+  const rm = RSDSP.measure([re], SR);
+  row('hiss', 're-upload at 320 kbit/s → diagnosis', r.dry.issues.join(','), RP.diagnose(rm).issues.join(',') || 'healthy',
+    'step ' + N(rm.hissTiltStepDb, 2) + ' dB · card ' + RP.classify(rm).id
+    + ' — the export is still hissy, and truthfully so: a step of ~10 dB is a hiss, and no repair of this class removes 18 dB of noise without taking the music\'s top end with it');
 }
 mark('section 3');
 /* 3 ── mains hum ─────────────────────────────────────────────────────────── */
