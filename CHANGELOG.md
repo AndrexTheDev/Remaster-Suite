@@ -6,6 +6,31 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Measured — the de-clicker's shape discount is not a lever, and what its floor leaves
+
+**The floor note said the survivors could not be reached by the map; this round priced the other half
+of the same fire condition and measured what the floor actually costs.** Firing needs
+`k ≥ 1 − 0.5·amount` minus a *shape* credit — the discount a one-sided deviation gets — and on the
+three leftovers that credit is worth 0.007, because their `asym` (0.30–0.33) sits under the
+0.32…0.52 band. So the band was moved down to where they would collect it: **doubling its weight and
+moving it to 0.28…0.36 takes the kit from 4.37 % to 21.81 % and a clean master from 2.74 % to 20.20 %
+— five and seven times the price — and leaves 3 of 54 pops exactly where they were.** A second law
+(weight 0.50, band 0.25…0.45) reads 15.8 % / 13.5 % and still leaves all three. The arithmetic of the
+stage's own constants says no dose can help either: the knee wants ratio ≈ 2.22 at the automatic dose
+and ≈ 2.04 at the largest amount a profile can hand the stage (0.95, the cap), and the leftovers read
+2.03, 1.86 and 1.80 — the strongest one sits exactly on the edge of a full-strength dose, the other
+two below any dose that can be asked for.
+
+**And what stays is now measured rather than asserted.** In the acceptance tool's own window (4–12
+kHz, the popped 65 samples, the clean copy as the reference) the leftovers stand **6.1 dB worst /
+3.4 dB median over the clean copy** — they are spikes on a bed that is quiet there, which is exactly
+why the ratio under-reads them — while the pops the stage *does* repair land **9.0 dB under** it: a
+4 kHz prediction cannot put back the top end it replaced over the 0.33 ms in front of a spike and the
+1 ms behind it. That trade is the floor, and it is now pinned beside the map price: the audit row
+*the de-clicker's own floor* gained the shape price, the leftover count under it, and both levels
+above the clean copy (audit 316 → **320**). The acceptance matrix's crackle row prints what the
+leftovers are instead of a bare count. Stage unchanged; probes `dc2`–`dc4`.
+
 ### Fixed — the drum row read the off render 88 samples early
 
 **The matrix's own meter carried the bug the round before it had just fixed in the dsp suite: a

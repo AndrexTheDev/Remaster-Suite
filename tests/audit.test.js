@@ -1819,6 +1819,61 @@ section('audit · the de-clicker\'s own floor');
     'snare ' + num(near.snare) + ' → ' + num(reach.snare) + ' dB as the map moves down (' + num(near.master, 1) + ' → '
     + num(reach.master, 1) + ' % of the clean master rewritten)');
 
+  /* ── the *shape* half of the same fire condition ──────────────────────────
+   * The table above prices the map — how sure the detector has to be. The other
+   * half is the discount a one-sided deviation gets, and on the survivors it is
+   * worth 0.007, because their asym (0.30–0.33) sits under the 0.32…0.52 band.
+   * Moving that band down to where they would collect the full discount is the
+   * one lever the table does not cover, so it is measured here instead of
+   * assumed: it multiplies both prices and buys not one pop. The same two
+   * renders carry what the floor leaves behind, in the acceptance tool's own
+   * 4–12 kHz window (65 samples, the clean copy as the reference): the pops the
+   * gate cannot reach stand a few dB over it — they are spikes on a *quiet* bed,
+   * which is why the ratio under-reads them — while the pops it does repair land
+   * well *under* it, because a 4 kHz prediction cannot put back the top end it
+   * replaced. That trade is why the floor is written down rather than moved. */
+  const SRC_S = '      - 0.25 * amount * smoothstep(0.32, 0.52, asym);';
+  const SHAPE = [[SRC_S, '      - 0.5 * amount * smoothstep(0.28, 0.36, asym);']];
+  const rb = (hp, f, q) => {
+    const w = 2 * Math.PI * f / SR, c = Math.cos(w), s2 = Math.sin(w), al = s2 / (2 * q), a0 = 1 + al;
+    return hp
+      ? [(1 + c) / 2 / a0, -(1 + c) / a0, (1 + c) / 2 / a0, -2 * c / a0, (1 - al) / a0]
+      : [al / a0, 0, -al / a0, -2 * c / a0, (1 - al) / a0];
+  };
+  const win65 = (b, i) => { let e = 0; for (let k = -16; k <= 48; k++) { const j = i + k; if (j >= 0 && j < b.length) e += b[j] * b[j]; } return e; };
+  const onBed9 = (edits) => {
+    const Pr = H.loadProcessorEdited((edits || []).concat([[SRC_B, PATCH_B], [SRC_C, PATCH_C]]), SR);
+    const clean9 = bed(9000), dirty9 = H.addCrackle(clean9, 9, 0.85, 8);
+    const m9 = DSP.measure([dirty9], SR);
+    const P9 = Object.assign({}, H.DEFAULT_PARAMS, Presets.buildParams(Presets.classify(m9).id, m9, 0.7));
+    const N9 = dirty9.length, plan9 = new Float32Array(N9);
+    globalThis.__floor = (n, plan) => { const i = n - LOOK; if (i >= 0 && i < N9) plan9[i] = plan; };
+    const r9 = H.renderEx(Pr, [dirty9], P9);
+    globalThis.__floor = null;
+    const pos9 = posOf(dirty9, clean9);
+    const hit = (p) => Math.max(plan9[p], plan9[p + 1]) > 0.9;
+    return { r9, clean9, left9: pos9.filter((p) => !hit(p)), repaired9: pos9.filter(hit), n9: pos9.length };
+  };
+  const ship9 = onBed9(null), shape9 = onBed9(SHAPE);
+  const shapeCost = costOf(SHAPE);
+  ok(shapeCost.kit > 3 * shipped.kit && shapeCost.master > 3 * shipped.master,
+    'and moving the shape band down is not the lever either',
+    'kit ' + num(shipped.kit, 2) + ' → ' + num(shapeCost.kit, 2) + ' % of the kit · master '
+    + num(shipped.master, 2) + ' → ' + num(shapeCost.master, 2) + ' % of a clean master');
+  ok(shape9.left9.length >= ship9.left9.length,
+    'the full shape discount buys no pop back',
+    ship9.left9.length + ' of ' + ship9.n9 + ' left as shipped · ' + shape9.left9.length + ' of ' + shape9.n9 + ' with the band moved');
+  const bandOf = (x) => DSP.applyBiquad(DSP.applyBiquad(x, rb(true, 4000, 0.707)), rb(false, 12000, 0.707));
+  const bo9 = bandOf(ship9.r9.out[0]), bc9 = bandOf(ship9.clean9);
+  const ex9 = ship9.left9.map((p) => 10 * Math.log10((win65(bo9, p + ship9.r9.latency) + 1e-20) / (win65(bc9, p) + 1e-20))).sort((a, b) => b - a);
+  const fill9 = ship9.repaired9.map((p) => 10 * Math.log10((win65(bo9, p + ship9.r9.latency) + 1e-20) / (win65(bc9, p) + 1e-20))).sort((a, b) => b - a);
+  ok(ex9[0] < 8,
+    'what the gate cannot reach stays close to the clean copy',
+    'worst ' + num(ex9[0]) + ' dB, median ' + num(ex9[ex9.length >> 1]) + ' dB over it at the popped 65 samples');
+  ok(fill9[Math.floor(fill9.length / 2)] > -12,
+    'and the pops it does repair are filled rather than restored',
+    'the fill lands ' + num(fill9[Math.floor(fill9.length / 2)]) + ' dB under the clean copy (a 4 kHz prediction has no top end)');
+
   /* The *taste curve* is where that protection lives as well, and that is
    * measured rather than assumed. The de-clicker's amount is a repair *depth*
    * — unlike the de-clipper's, which is only the detector's threshold (see the

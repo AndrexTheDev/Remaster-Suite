@@ -1613,11 +1613,39 @@ class DeClicker {
      *   lowered to ≈ 1.9 (1.05/0.90)  kit snare −13.6 dB · 61.6 %           · 81.7 %
      *
      * (dsp.test.js holds the snare at −55 dB and the clean master is the audit's
-     * wide-band fixture). Reaching the quietest pops of that fixture therefore
-     * costs the snare 24 dB of the 55 it has and rewrites a third of a clean
-     * master, which is why the floor is written down here rather than moved:
-     * those pops are, in this statistic, indistinguishable from music, and the
-     * audit row `the de-clicker's own floor` re-measures all three numbers. */
+     * wide-band fixture.) The *shape* half of the same condition is priced too,
+     * because it is the one lever that table does not cover: the survivors read
+     * asym 0.30–0.33, under the 0.32…0.52 band, so their discount is worth
+     * 0.007 rather than the 0.18 it could be — and moving the band down to where
+     * they would collect it is not a lever either. Measured on the audit row's
+     * own bed (54 pops; the row re-measures all of this):
+     *
+     *   shape band 0.32…0.52 · weight 0.25 (shipped)   4.37 % of the kit ·  2.74 % of a clean master · 3 left
+     *   shape band 0.28…0.36 · weight 0.50            21.81 %           · 20.20 %               · 3 left
+     *
+     * — five times the kit price and seven times the master price for the same
+     * three pops. What they would have to *read* is arithmetic on this stage's
+     * own constants: firing needs `k ≥ 1 − 0.5·amount`, so the knee wants ratio
+     * ≈ 2.22 at the automatic dose and ≈ 2.04 at the largest amount a profile can
+     * hand the stage (0.95, the cap), while the leftovers read 2.03, 1.86 and
+     * 1.80 — the strongest sits exactly on the edge of a full-strength dose, the
+     * other two below any dose a profile can ask for. Reaching the quietest pops
+     * of that fixture therefore costs the snare 24 dB of the 55 it has and
+     * rewrites a third of a clean master, which is why the floor is written down
+     * here rather than moved: those pops are, in this statistic,
+     * indistinguishable from music.
+     *
+     * What the floor leaves is on the same row, measured with the acceptance
+     * tool's own window (4–12 kHz, the popped 65 samples, the clean copy as the
+     * reference): the pops the gate cannot reach stand 6.1 dB worst / 3.4 dB
+     * median *over* the clean copy — they are spikes on a bed that is quiet
+     * there, which is exactly why the ratio under-reads them — while the pops the
+     * stage does repair land 9.0 dB *under* it, because a 4 kHz prediction cannot
+     * put back the top end it replaced over the 0.33 ms it reaches in front of a
+     * spike and the 1 ms behind it. The floor is where those two numbers trade: a
+     * handful of clicks the statistic cannot separate from music, against a fifth
+     * of every clean master dulled by 9 dB per pop, and the row re-measures all of
+     * it. */
     const th = 1 - 0.5 * amount
       - 0.25 * amount * smoothstep(0.32, 0.52, asym);
     k = smoothstep(th, th + 0.30, k);

@@ -176,7 +176,9 @@ mark('section 1');
     return { med: 10 * Math.log10(rel[Math.floor(rel.length / 2)]), over: rel.filter((x) => x > 1).length, n: rel.length };
   };
   const d = at(dirty, 0), w = at(r.out[0], r.lat);
-  row('crackle', 'pop energy over the clean copy (median dB)', d.med, w.med, 'pops above it: ' + d.over + '/' + d.n + ' → ' + w.over + '/' + w.n);
+  row('crackle', 'pop energy over the clean copy (median dB)', d.med, w.med,
+    'pops above it: ' + d.over + '/' + d.n + ' → ' + w.over + '/' + w.n
+    + ' · what stays is the stage\'s own floor: the leftovers read a fast/slow ratio 1.86–2.03 against a knee that wants ≈2.22, and the audit row `the de-clicker\'s own floor` prices the move and measures how far they stand over the clean copy');
   row('crackle', 'analyser crackleIndex', r.m.crackleIndex, r.mo.crackleIndex,
     r.cls.id + ' · dose ' + N(r.P.declick));
   /* The user's own loop, on the app's own export: encode the finished file at
