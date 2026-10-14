@@ -1473,6 +1473,46 @@ class DeClicker {
     this.plan = new Float32Array(L);          // …and how far each of them is repaired
     this.mark = new Uint8Array(L);            // …and which came from the de-clipper
     this.prevIn = 0;                          // for the flat-top test below
+    /* ── the *third* witness: the roughness of the sample itself ───────────
+     * The two witnesses above are first-order — the size of the residual, and
+     * its one-sidedness — and that is where the stage's floor lives: a pop that
+     * is only twice the music's own 4 kHz activity reads ratio 1.9 and asym
+     * 0.31, exactly like the tallest peak of a band-limited bed, so the map
+     * cannot fire on it however carefully the knee is placed (measured on the
+     * acceptance fixture: three of 72 pops stay, and the audit's floor row shows
+     * that reaching them by moving the map costs the drum kit 24 dB of its
+     * 55 dB guard). What those two statistics do not ask is what the *waveform*
+     * is allowed to do between two samples. Content below 9 kHz has a hard
+     * ceiling on its second difference — |D2| ≤ (2·sin(π·f/fs))²·A, i.e. 0.35·A
+     * there — while a one-sample delta produces |D2| = 2a at its own sample
+     * whatever the bed is doing. Measured (probes tools/work/sp1.js, sp2.js,
+     * sp3.js), in σ of the *local* D2 over the 96 samples before the sample in
+     * hand:
+     *
+     *   the three survivors, four beds 5–12 kHz  8.3 … 11.4 σ
+     *   the pops the ratio already catches       12 … 30 σ
+     *   a drum machine + bed                     0.008 % of samples ≥ 5 σ
+     *   the audit's wide clean master            0.000 % ≥ 4 σ
+     *   the clipped hot master (§18)             0.001 % ≥ 4 σ, 0.000 % ≥ 5
+     *   a loud tape-hiss bed                     0.001 % ≥ 5 σ
+     *   the acceptance tool's performance        14 samples in 8 s ≥ 5 σ, 0 ≥ 8
+     *   a 200-sample square wave                 2 % (a square *is* a click train)
+     *
+     * The last line is the honest boundary, and it is the same one the burst
+     * fixture in the acceptance tool has always had: a signal made of sample-level
+     * steps is a train of clicks in every statistic here, and the stage repairs
+     * it. Everything else — noise at any bandwidth, a tone, a bass line, a
+     * clipped rail, a snare with a body and a tail — sits at 2–3 σ, because the
+     * statistic is a ratio to the *local* roughness of the same band, so it is
+     * scale-free and bandwidth-free by construction. */
+    this.prevIn2 = 0;                         // …and the one before that
+    this.plateauPrev = false;                 // …and whether those two were clip plateaus
+    this.reconPrev = false;
+    this.r2W = 96;                            // the σ window, 2 ms
+    this.r2ring = new Float64Array(this.r2W);
+    this.r2sum = 0;
+    this.r2i = 0;
+    this.r2count = 0;
     this.w = 0;
     this.inp = 0;
     this.dryOut = 0;                          // the input this stage is working from
@@ -1532,6 +1572,8 @@ class DeClicker {
     this.dHi = 0; this.dLo = 0;
     this.ring.fill(0); this.plan.fill(0); this.mark.fill(0);
     this.w = 0; this.inp = 0; this.dryOut = 0; this.prevIn = 0;
+    this.prevIn2 = 0; this.plateauPrev = false; this.reconPrev = false;
+    this.r2ring.fill(0); this.r2sum = 0; this.r2i = 0; this.r2count = 0;
     this.ref = 0;
     this.warmLeft = this.warm;
     this.seedMax = 0;
@@ -1544,7 +1586,12 @@ class DeClicker {
     return g < 0 ? 0 : g > 1 ? 1 : g;
   }
   tick(x, amount, reconstructed, clipLevel) {
-    if (amount <= 0.0001) { this.inp = x; this.dryOut = x; this.prevIn = x; return x; }
+    if (amount <= 0.0001) {
+      this.inp = x; this.dryOut = x;
+      this.prevIn2 = this.prevIn; this.prevIn = x;
+      this.plateauPrev = false; this.reconPrev = false;
+      return x;
+    }
     // ── 1 · the detector, on the sample that just arrived ──────────────────
     const pd = this.dp2.process(this.dp1.process(x));
     const d = x - pd;
@@ -1661,9 +1708,12 @@ class DeClicker {
      * here rather than moved: those pops are, in this statistic,
      * indistinguishable from music.
      *
-     * What the floor leaves is on the same row, measured with the acceptance
+     * What the floor leaves is on the same row — measured with the acceptance
      * tool's own window (4–12 kHz, the popped 65 samples, the clean copy as the
-     * reference): the pops the gate cannot reach stand 6.1 dB worst / 3.4 dB
+     * reference), and, since the third witness closed it, measured there on the
+     * *control* render with the witness switched off, so the numbers stay the
+     * price of the map rather than a description of the shipped stage: the pops
+     * the gate cannot reach stand 6.1 dB worst / 3.4 dB
      * median *over* the clean copy — they are spikes on a bed that is quiet
      * there, which is exactly why the ratio under-reads them — while the pops the
      * stage does repair land 9.0 dB *under* it, because a 4 kHz prediction cannot
@@ -1671,7 +1721,86 @@ class DeClicker {
      * spike and the 1 ms behind it. The floor is where those two numbers trade: a
      * handful of clicks the statistic cannot separate from music, against a fifth
      * of every clean master dulled by 9 dB per pop, and the row re-measures all of
-     * it. */
+     * it. — The *map* below still stands exactly as priced here; what closed the
+     * floor is not the map but the third witness above it, which by construction
+     * is not a band statistic and so does not have this ceiling. */
+    /* ── the third witness, on the same decision ────────────────────────────
+     * The second difference of the sample *one behind* the one in hand — which
+     * is what a causal statistic can know: x[p−2] − 2x[p−1] + x[p] is D2 at
+     * p−1, and p−1 is still 17 samples away from being emitted. The bar moves
+     * with the dose the same way the ratio's does (the dose asks how sure the
+     * detector has to be, not how much of a pop may stay): at the automatic
+     * 0.71 it sits at 4.9…6.9 σ, at a healthy card's 0.08 at 6.8…8.8 σ, and at
+     * full strength at 4.9…6.9 σ once the knee below has done its work. The
+     * width of that band is the whole trade, and it was swept against the
+     * stage's guards (probe tools/work/sp11.js; per 8 s of material, and the
+     * pops are the audit's four beds): The window needs its whole 96 samples before the
+     * statistic means anything, so the branch is off for the first 2 ms of a
+     * file — the same listening period the detector's own warm-up spends, for
+     * the same reason. It is deliberately *not* multiplied by the level gate
+     * above: that gate exists to make the ratio relative to the file's own
+     * activity, and this branch is already a ratio to the local activity of its
+     * own band. It *is* folded in **before the knee below**, and that placement
+     * is measured: a hi-hat's onset is a step in this statistic too (a 0.2 ms
+     * attack of a 7–17 kHz burst, against the σ of the quiet bed before it),
+     * and the knee is what keeps the stage off it — at a healthy card's dose the
+     * ratio's own confidence there buys 0.038 of a repair. Bypassing the knee
+     * moved the loudest of the performance fixture's 16 hits by 1.63 dB, which
+     * is the one thing this stage may not do (dsp.test.js holds it to 1.0 dB);
+     * through the knee it moves by less than 0.1 dB.
+     *
+     *   band             pops left   performance   kit snare   kit touched   clean master
+     *   5+3 … 8+4              3     0.52 dB       −62.1 dB      4.40 %        2.74 %
+     *   4.5+3 … 6.5+3          1     0.52 dB       −62.1 dB      4.85 %        2.74 %
+     *   4+3 … 6+3              0     0.52 dB       −62.1 dB      4.94 %        2.74 %
+     *   4.5+3 … 6+2            0     0.52 dB       −62.1 dB      4.94 %        2.74 %
+     *
+     * i.e. closing the floor completely costs half a percentage point of the kit
+     * being touched and moves nothing else — the snare, the performance's hits
+     * and the clean master read the same number to the digit at every band. */
+    const d2 = this.prevIn2 - 2 * this.prevIn + x;
+    if (this.r2count >= this.r2W && !this.plateauPrev && !this.reconPrev) {
+      const sigma = Math.sqrt(this.r2sum / this.r2W);
+      /* A sample that straddles the clip rail is the clip's own signature, not a
+       * click: clipping *creates* a sample-level corner (that is what the repair
+       * stage exists for), and the plateau test further down only ever sees the
+       * sample in its own hand. This witness looks three samples wide — the two
+       * before the one in hand and the one in hand — so the rail guard has to be
+       * three samples wide too. Measured: without it the branch wrote 4.3 dB more
+       * than it may into the *unclipped* part of the clipped fixtures (matrix,
+       * `…and where it must write nothing`); with it those rows are back to their
+       * pre-round values. */
+      let railed = false;
+      if (clipLevel > 0.02) {
+        railed = (x < 0 ? -x : x) >= clipLevel
+          || (this.prevIn < 0 ? -this.prevIn : this.prevIn) >= clipLevel
+          || (this.prevIn2 < 0 ? -this.prevIn2 : this.prevIn2) >= clipLevel;
+      }
+      if (!railed && sigma > 0) {
+        const kR = smoothstep(4 + 3 * (1 - amount), 6 + 3 * (1 - amount),
+          (d2 < 0 ? -d2 : d2) / sigma);
+        if (kR > k) k = kR;
+      }
+    }
+    /* ── …and digital silence does not fill the window ──────────────────────
+     * A look-ahead stage in front of this one emits `look` samples of *exact*
+     * zeros before the first real sample (measured: with the de-clipper engaged
+     * the de-clicker's input is 0.000000 for its first 272 samples and then
+     * jumps to full level — a step out of digital silence, which is a genuine
+     * click in this statistic and would be repaired as one). Audio at any level
+     * carries a floor — dither, tape, room — so exact zeros are not signal: they
+     * neither fill the window nor count towards it, and the branch simply waits
+     * for its 96 real samples. The same listening rule the detector's own
+     * warm-up follows, for the same reason. A pop written *into* digital silence
+     * is therefore not repaired; it is also 90 dB below anything audible. */
+    const silent = x === 0 && this.prevIn === 0 && this.prevIn2 === 0;
+    if (!silent) {
+      const sq = d2 * d2;
+      this.r2sum += sq - this.r2ring[this.r2i];
+      this.r2ring[this.r2i] = sq;
+      this.r2i = (this.r2i + 1) % this.r2W;
+      if (this.r2count < this.r2W) this.r2count++;
+    }
     const th = 1 - 0.5 * amount
       - 0.25 * amount * smoothstep(0.32, 0.52, asym);
     k = smoothstep(th, th + 0.30, k);
@@ -1693,6 +1822,7 @@ class DeClicker {
     // purpose, so it holds whether or not the de-clipper itself is engaged.
     let prevIn = this.prevIn;
     this.prevIn = x;
+    this.prevIn2 = prevIn;
     let plateau = false;
     if (clipLevel > 0.02) {
       const ax0 = x < 0 ? -x : x;
@@ -1708,6 +1838,8 @@ class DeClicker {
     // peaks are broadband by construction, and the local test just above,
     // which holds whether or not the de-clipper is engaged at all.
     this.mark[this.w] = (plateau || reconstructed) ? 1 : 0;
+    this.plateauPrev = plateau;
+    this.reconPrev = reconstructed;
     if (k > 0.02) {
       // a detection plans the whole window around itself, in front of the click
       // as much as behind it (that is what the look-ahead is for)

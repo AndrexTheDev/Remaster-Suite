@@ -1692,10 +1692,27 @@ section('audit · what the de-clicker leaves behind');
  *
  * i.e. reaching the three quietest pops of this fixture costs the snare 24 dB
  * of the 55 it has, and 30 % of the clean master is rewritten. That is the
- * whole trade, measured — so the de-clicker's floor is documented in the
- * worklet's own code and not moved, and this row is what would notice if a
- * later change moved it (any of these three numbers changing by more than a
- * couple of dB fails here). The four candidate *fills* for the window (the
+ * whole trade, measured — and it is why the *map* is not the lever.
+ *
+ * What closed the floor instead is a third witness, and this section is where
+ * both halves of it are pinned. The map asks how big a pop is next to its own
+ * recent average; the third witness asks what the *waveform* is allowed to do
+ * between two samples. Content below 9 kHz has a hard ceiling on its second
+ * difference — |D2| ≤ (2·sin(π·f/fs))²·A, 0.35·A there — while a one-sample
+ * delta produces |D2| = 2a at its own sample whatever the bed does. Measured in
+ * σ of the local D2 over the 96 samples before the sample in hand (probes
+ * tools/work/sp1.js … sp7.js): the three survivors read 8.3 … 11.4 σ in four
+ * different beds, the pops the ratio already catches 12 … 30 σ, and every guard
+ * fixture the suite has reads ≈3 — a drum machine 0.008 % of samples above 5 σ,
+ * the wide clean master 0.000 % above 4, the clipped master 0.000 % above 5,
+ * a loud tape-hiss bed 0.001 % above 5, and the acceptance tool's percussion
+ * performance 0 of 8 s above 8 σ.
+ *
+ * The rows below therefore measure *both* states: the same renders with the
+ * witness switched off (a one-line control, `if (false)` where the branch
+ * fires) — which is the floor as it was, the two or three pops in every bed —
+ * and with it on, where nothing is left. The price table above stays as the
+ * ratchet it always was: it is what would fail if a later round moved the map. The four candidate *fills* for the window (the
  * low-pass as shipped, the same filter fed the dry sample, 3- and 4-tap
  * polynomial extrapolation of the output) were measured the same way and every
  * one of them is worse than the shipped one — the table is in the worklet.
@@ -1723,27 +1740,40 @@ section('audit · the de-clicker\'s own floor');
     }
     return pos;
   };
+  /* the control: the same stage with the third witness switched off, so the rows
+   * below can say what it bought and not merely that the pops are gone */
+  const SRC_RW = '      if (!railed && sigma > 0) {';
+  const WITNESS_OFF = [[SRC_RW, '      if (false) {']];
   const Proc = H.loadProcessorEdited([[SRC_B, PATCH_B], [SRC_C, PATCH_C]], SR);
-  const leftBy = [];
-  let pops = 0, repairedMin = Infinity;
-  for (const lp of [5000, 7000, 9000, 12000]) {
-    const clean = bed(lp), dirty = H.addCrackle(clean, 9, 0.85, 8);
-    const m = DSP.measure([dirty], SR);
-    const P = Object.assign({}, H.DEFAULT_PARAMS, Presets.buildParams(Presets.classify(m).id, m, 0.7));
-    const N = dirty.length, planAt = new Float32Array(N);
-    globalThis.__floor = (n, plan) => { const i = n - LOOK; if (i >= 0 && i < N) planAt[i] = plan; };
-    H.renderEx(Proc, [dirty], P);
-    globalThis.__floor = null;
-    const pos = posOf(dirty, clean);
-    const left = pos.filter((p) => Math.max(planAt[p], planAt[p + 1]) <= 0.9);
-    pops = pos.length;
-    repairedMin = Math.min(repairedMin, pos.length - left.length);
-    leftBy.push(left);
-  }
-  const common = leftBy[0].filter((p) => leftBy.every((l) => l.some((q) => Math.abs(q - p) < 8)));
-  ok(repairedMin >= pops - 4 && common.length > 0 && common.length <= 4,
-    'the pops the gate does not reach are the same two or three in every bed',
-    repairedMin + ' of ' + pops + ' repaired in the sparsest bed, ' + common.length + ' left everywhere');
+  const ProcCtl = H.loadProcessorEdited([[SRC_B, PATCH_B], [SRC_C, PATCH_C]].concat(WITNESS_OFF), SR);
+  const bedsOf = (Pr) => {
+    const leftBy = [];
+    let pops = 0, repairedMin = Infinity;
+    for (const lp of [5000, 7000, 9000, 12000]) {
+      const clean = bed(lp), dirty = H.addCrackle(clean, 9, 0.85, 8);
+      const m = DSP.measure([dirty], SR);
+      const P = Object.assign({}, H.DEFAULT_PARAMS, Presets.buildParams(Presets.classify(m).id, m, 0.7));
+      const N = dirty.length, planAt = new Float32Array(N);
+      globalThis.__floor = (n, plan) => { const i = n - LOOK; if (i >= 0 && i < N) planAt[i] = plan; };
+      H.renderEx(Pr, [dirty], P);
+      globalThis.__floor = null;
+      const pos = posOf(dirty, clean);
+      const left = pos.filter((p) => Math.max(planAt[p], planAt[p + 1]) <= 0.9);
+      pops = pos.length;
+      repairedMin = Math.min(repairedMin, pos.length - left.length);
+      leftBy.push(left);
+    }
+    const common = leftBy[0].filter((p) => leftBy.every((l) => l.some((q) => Math.abs(q - p) < 8)));
+    return { leftBy, pops, repairedMin, common, leftTotal: leftBy.reduce((a, l) => a + l.length, 0) };
+  };
+  const shippedBeds = bedsOf(Proc), ctlBeds = bedsOf(ProcCtl);
+  ok(ctlBeds.repairedMin >= ctlBeds.pops - 4 && ctlBeds.common.length > 0 && ctlBeds.common.length <= 4,
+    'without the roughness witness the gate stops at the same two or three pops in every bed',
+    ctlBeds.repairedMin + ' of ' + ctlBeds.pops + ' repaired in the sparsest bed, ' + ctlBeds.common.length
+    + ' left everywhere (the control render)');
+  ok(shippedBeds.leftTotal === 0 && ctlBeds.leftTotal > 0,
+    'and with it the acceptance fixture’s floor is closed — in every bed',
+    ctlBeds.leftTotal + ' pops left across the four beds without the witness, ' + shippedBeds.leftTotal + ' with it');
   /* what reaching them would cost, on the two fixtures that guard it */
   const kit = (() => {
     const seconds = 12, out = new Float32Array(SR * seconds), hits = [];
@@ -1854,22 +1884,31 @@ section('audit · the de-clicker\'s own floor');
     const hit = (p) => Math.max(plan9[p], plan9[p + 1]) > 0.9;
     return { r9, clean9, left9: pos9.filter((p) => !hit(p)), repaired9: pos9.filter(hit), n9: pos9.length };
   };
-  const ship9 = onBed9(null), shape9 = onBed9(SHAPE);
+  const ship9 = onBed9(null), ctl9 = onBed9(WITNESS_OFF), shape9 = onBed9(SHAPE.concat(WITNESS_OFF));
   const shapeCost = costOf(SHAPE);
   ok(shapeCost.kit > 3 * shipped.kit && shapeCost.master > 3 * shipped.master,
     'and moving the shape band down is not the lever either',
     'kit ' + num(shipped.kit, 2) + ' → ' + num(shapeCost.kit, 2) + ' % of the kit · master '
     + num(shipped.master, 2) + ' → ' + num(shapeCost.master, 2) + ' % of a clean master');
-  ok(shape9.left9.length >= ship9.left9.length,
+  ok(shape9.left9.length >= ctl9.left9.length,
     'the full shape discount buys no pop back',
-    ship9.left9.length + ' of ' + ship9.n9 + ' left as shipped · ' + shape9.left9.length + ' of ' + shape9.n9 + ' with the band moved');
+    ctl9.left9.length + ' of ' + ctl9.n9 + ' left with the map as shipped · ' + shape9.left9.length + ' of '
+    + shape9.n9 + ' with the band moved (both as controls, the witness off)');
   const bandOf = (x) => DSP.applyBiquad(DSP.applyBiquad(x, rb(true, 4000, 0.707)), rb(false, 12000, 0.707));
   const bo9 = bandOf(ship9.r9.out[0]), bc9 = bandOf(ship9.clean9);
-  const ex9 = ship9.left9.map((p) => 10 * Math.log10((win65(bo9, p + ship9.r9.latency) + 1e-20) / (win65(bc9, p) + 1e-20))).sort((a, b) => b - a);
+  const ex9 = ctl9.left9.map((p) => 10 * Math.log10((win65(bo9, p + ship9.r9.latency) + 1e-20) / (win65(bc9, p) + 1e-20))).sort((a, b) => b - a);
   const fill9 = ship9.repaired9.map((p) => 10 * Math.log10((win65(bo9, p + ship9.r9.latency) + 1e-20) / (win65(bc9, p) + 1e-20))).sort((a, b) => b - a);
   ok(ex9[0] < 8,
     'what the gate cannot reach stays close to the clean copy',
-    'worst ' + num(ex9[0]) + ' dB, median ' + num(ex9[ex9.length >> 1]) + ' dB over it at the popped 65 samples');
+    'worst ' + num(ex9[0]) + ' dB, median ' + num(ex9[ex9.length >> 1]) + ' dB over it at the popped 65 samples (control)');
+  /* …and where the witness does reach, the same window over the *shipped* render
+   * says what is left of the pops the floor used to keep: every one of them is
+   * now under the clean copy, not over it. */
+  const left9 = ship9.repaired9.map((p) => 10 * Math.log10((win65(bo9, p + ship9.r9.latency) + 1e-20) / (win65(bc9, p) + 1e-20))).sort((a, b) => b - a);
+  ok(left9[0] < 0,
+    'and with the witness every pop it reaches ends below the clean copy',
+    'loudest ' + num(left9[0]) + ' dB, median ' + num(left9[left9.length >> 1]) + ' dB over it (was '
+    + num(ex9[0]) + ' dB at the loudest of the control’s leftovers)');
   ok(fill9[Math.floor(fill9.length / 2)] > -12,
     'and the pops it does repair are filled rather than restored',
     'the fill lands ' + num(fill9[Math.floor(fill9.length / 2)]) + ' dB under the clean copy (a 4 kHz prediction has no top end)');

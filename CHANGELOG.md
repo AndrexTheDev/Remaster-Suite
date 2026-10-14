@@ -6,6 +6,61 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Fixed — the de-clicker's floor: the pops a band statistic cannot see, and what closed them
+
+**Round 10 ended with a documented floor: three of the crackles fixture's 72 pops survive the
+automatic dose, and moving the detector's map to reach them costs the drum kit 24 dB of its 55 dB
+guard.** That is still true of the *map* — the survivors read a fast/slow ratio 1.86–2.03 against a
+knee that wants ≈ 2.22, i.e. in that statistic they are music. But the ratio is a **band** statistic:
+it asks how big the residual is next to its own recent average, and a pop quieter than the bed's own
+top end has no size there. The *waveform* does not have that problem. Content below 9 kHz has a hard
+ceiling on its second difference — |D2| ≤ (2·sin(π·f/fs))²·A, **0.35·A** there — while a one-sample
+delta produces |D2| = 2a at its own sample whatever the bed is doing, so the ratio of the two is
+scale-free and bandwidth-free by construction.
+
+**The third witness is that ratio, measured causally** (probes `tools/work/sp1.js` … `sp11.js`; the
+σ over the 2 ms *before* the sample in hand, so the stage's 0.35 ms of look-ahead is enough):
+
+| population | D2 in σ of the local roughness |
+|---|---|
+| the three survivors, in four beds (5–12 kHz) | **8.3 … 11.4 σ** |
+| the pops the ratio already catches | ≈ 12 σ at the quietest, ≈ 31 σ at the median |
+| a drum machine + bed | 0.008 % of samples above 5 σ |
+| the audit's wide clean master | 0.000 % above 4 σ |
+| the clipped hot master (§18) | 0.000 % above 5 σ |
+| a loud tape-hiss bed | 0.001 % above 5 σ |
+| the matrix's own percussion performance | 0 of 8 s above 8 σ |
+
+**It is folded in *before* the dose-dependent knee, and both halves of that are measured.** A hi-hat's
+onset is a step in this statistic too — 52 σ, because it rises out of the quiet bar before it — and the
+knee is what keeps the stage off it: bypassing the knee moved the worst of the performance fixture's
+16 hits by **1.63 dB**, through it by 0.1 dB. The band was then swept against everything the stage is
+guarded by (probe sp11, per 8 s of material):
+
+| witness band | pops left (four beds) | performance, worst hit | kit snare | kit touched | clean master |
+|---|---|---|---|---|---|
+| 5+3 … 8+4 σ | 3 | 0.52 dB | −62.1 dB | 4.40 % | 2.74 % |
+| 4.5+3 … 6.5+3 σ | 1 | 0.52 dB | −62.1 dB | 4.85 % | 2.74 % |
+| **4+3 … 6+3 σ** | **0** | 0.52 dB | −62.1 dB | 4.94 % | 2.74 % |
+
+i.e. closing the floor costs half a percentage point of the kit being touched and moves nothing else —
+the snare, the performance's hits and the clean master read the same number to the digit at every
+band. Two rules came out of the same measurements and are as much a part of the witness as the band:
+it **waits for 96 real samples**, because a look-ahead stage in front of it emits 272 samples of
+*exact* zeros and a step out of digital silence is a genuine click in this statistic (measured: the
+pre-declicker input is 0.000000 for 272 samples and then jumps to full level); and it is **three
+samples wide**, because clipping *creates* a sample-level corner — without that the branch wrote
+4.3 dB more than it may into the *unclipped* part of the clipped fixtures.
+
+**Delivered, measured:** the matrix's section 1 row reads **72/72 → 0/72** pops above the clean copy
+(was 3/72), the audit's four-bed probe reads **54/54 in every bed** (was 51–52 of 54 with the same two
+or three left in every bed), and the kit, snare, performance, wide-master, dropout and clipped-master
+rows are unchanged. The audit's `the de-clicker's own floor` section now measures **both states side
+by side** — the same renders with the witness switched off are the control that keeps the old numbers
+honest (the floor reappears exactly as documented, 51 of 54 in the sparsest bed), and the pop-band rows
+are read from the control so the price table stays the price of the *map* (326 → 335 assertions,
+incl. the round's earlier export-ceiling pins). The matrix stays at 119 rows / 31 classes.
+
 ### Fixed — the export's ceiling, through the codec: the promise is about the file the user keeps
 
 **The last stage holds the *render* to the platform's true-peak target, and the app says so. The file

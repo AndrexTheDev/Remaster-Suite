@@ -192,7 +192,7 @@ mark('section 1');
   const d = at(dirty, 0), w = at(r.out[0], r.lat);
   row('crackle', 'pop energy over the clean copy (median dB)', d.med, w.med,
     'pops above it: ' + d.over + '/' + d.n + ' → ' + w.over + '/' + w.n
-    + ' · what stays is the stage\'s own floor: the leftovers read a fast/slow ratio 1.86–2.03 against a knee that wants ≈2.22, and the audit row `the de-clicker\'s own floor` prices the move and measures how far they stand over the clean copy');
+    + ' · nothing above it: the three pops the fast/slow ratio cannot see (it reads 1.86–2.03 against a knee that wants ≈2.22, i.e. music to that statistic) are caught by the check on what the *waveform* may do between two samples — a one-sample delta produces |D2| = 2a whatever the bed does, while content below 9 kHz is bounded at 0.35·A — and the row is what would notice if that branch ever stopped firing (the audit\'s `the de-clicker\'s own floor` measures both states side by side, control included)');
   row('crackle', 'analyser crackleIndex', r.m.crackleIndex, r.mo.crackleIndex,
     r.cls.id + ' · dose ' + N(r.P.declick));
   /* The user's own loop, on the app's own export: encode the finished file at
@@ -1041,7 +1041,7 @@ mark('section 17');
   const pe = popE(upload, 0), pw = popE(r.out[0], r.lat);
   row('worn record (all at once)', 'crackle: pop energy over the clean copy (median dB)', pe.med, pw.med,
     'pops above it: ' + pe.over + '/' + at.length + ' → ' + pw.over + '/' + at.length + ' · crackleIndex '
-    + N(r.m.crackleIndex) + ' → ' + N(r.mo.crackleIndex) + ' · section 1 reads 72/72 → 3/72 under its own chain, so the rest of the chain costs the de-clicker nothing');
+    + N(r.m.crackleIndex) + ' → ' + N(r.mo.crackleIndex) + ' · section 1 reads 72/72 → 0/72 under its own chain, so the rest of the chain costs the de-clicker nothing');
   const mask = quietMask(clean, 0.5);
   row('worn record (all at once)', 'hiss: ≥4 kHz RMS in the quiet (dBFS)', maskedBandDb(upload, mask, [HP4]), maskedBandDb(r.out[0], mask, [HP4], r.lat),
     'tilt step ' + N(r.m.hissTiltStepDb) + ' → ' + N(r.mo.hissTiltStepDb) + ' dB over ' + mask.filter(Boolean).length + ' quiet frames');
