@@ -13,6 +13,54 @@ thresholds sat in the tone stages (the glue's and the warmth's), all of them wri
 full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
 else may move.
 
+### Fixed — a mains harmonic that faked a rumble
+
+* **The rumble measurement notched the mains out to half an octave past each band, and a 2-pole
+  filter does not stop at half an octave.** The harmonics in between leaked: measured on a clean bed
+  with one line at −30.5 dBFS, 100 Hz read **+20.0 dB** of infra excess, 150 Hz +13.5, 200 Hz +9.0,
+  250 Hz +5.9, 300 Hz +2.6 — and on a bed 10 dB drier, 30.1 / 23.4 / 18.5. So a mains harmonic of a
+  recording **with no rumble** was read as rumble and the chain was asked for a 24 Hz high-pass: a
+  repair the file did not need, which is the failure this round is about, in the other direction.
+  The analysis now cuts the mains once, at the front, with one comb of constant-Q notches shared by
+  the three low-band chains, and the reach is the measured gain of the chains themselves (a pure
+  line at *f*, as HP → LP leaves it: −14.1 dB at 100 Hz and −21.0 at 150 in the 20–45 Hz band;
+  −2.4 / −1.7 / −1.7 / −2.4 / −3.1 / −5.3 / −7.6 at 100/120/150/180/200/250/300 in the 90–203 Hz
+  reference band). It covers every harmonic of both grids from the fundamentals to 420 Hz, and it is
+  *fewer* biquads than the three banks it replaces. Measured after it: a line at 50, 60, 100, 120,
+  150, 200, 250, 300, 350, 400 or 420 Hz reads 0.5–2.0 dB, against 1.6 dB for the bed with no line
+  at all — and a realistic hum (50…250 Hz, −8 dB per harmonic, −30 dBFS) on a record that *has* a
+  rumble leaves the verdict where it was (16.5 → 16.3 dB, guard 22.4 Hz; before the comb the same
+  hum read 14.7). Two rows in the audit hold it: 'a mains line does not hide the rumble underneath
+  it' and 'and a mains harmonic cannot fake one' (six frequencies, worst 1.1 dB).
+* **What is left is measured and stated**: at 500 Hz the reference band is only 16 dB down, so a
+  line there still reads −16.4 dB of excess — a harmonic stops mattering past 420 Hz only because it
+  would have to sit within 16 dB of the fundamental. And a line that *wanders* (vinyl and tape
+  wobble move it 0.2–2 %, far more than a 2.5 Hz notch follows) raises both bands by ~11 dB while
+  the ratio does not move: a clean bed reads −0.1 dB and a rumbly one 14.5. A steady line is the
+  case that fakes a rumble; a wandering one is self-cancelling. Both numbers are in the code.
+
+### Fixed — the loop's own rumble meter read the hum repair
+
+* **The row measuring the bottom end used 95–105 Hz as its reference — the second harmonic of a
+  50 Hz mains line.** The chain's hum repair takes that line out, so the row read its own reference
+  moving: measured, the export read 12.5 dB against a control of 10.8 while the app's own statistic
+  said the bottom end had not moved at all (guard 0). The reference is now **82–94 Hz**, beside the
+  line rather than on it, and the meter skips the ±5 Hz neighbourhood of every mains harmonic in
+  both bands — the same exclusion the app's comb does, for the same reason. The same fixture now
+  reads **9.0 → 8.4 dB against a control of 8.9**: honest about a rumble the chain left alone *and*
+  about why (below).
+* **A fixture whose rumble is a whisper reads like a coin flip, and it is.** The worn record's
+  turntable noise is 33.5 dB under its own bed, i.e. right at the foot of the guard's decision
+  (measured: 4.12 dB of excess for the upload, 5.2 for the source it was encoded from, against a
+  knee that starts at 4.5 — the 128 kbit/s codec discards about a decibel of a noise floor that far
+  below the music). Two measured facts decide what to do about it, and neither is a threshold to
+  move: the guard would not have helped *anyway* (a 24 Hz two-pole high-pass takes 4 dB off a rumble
+  that sits at 20–35 Hz: measured 12.25 → 7.67 on the same fixture with its rumble 12 dB louder),
+  and the same fixture with the guard armed converges — the export re-reads 2.26 dB, i.e. the loop
+  does not re-report a rumble it removed. The row is left showing the truth, and the gap it exposes
+  (a rumble *above* the corner of the guard is not repairable with a high-pass at all) is the next
+  item rather than a number to tune.
+
 ### Fixed — a line that hid the bottom of the record
 
 * **A 50 Hz mains line walked straight into the reference band of the rumble measurement, and a

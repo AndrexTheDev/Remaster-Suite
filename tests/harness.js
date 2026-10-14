@@ -74,6 +74,12 @@ const DEFAULT_PARAMS = {
  */
 function renderEx(Processor, input, params, blockSize) {
   const bs = blockSize || 128;
+  /* `input` is a *list* of channels. Handed a bare Float32Array — the shape
+   * `U.enc(...)[0]` and `U.dec(...)` look like after an index — this function
+   * used to map over the *samples*, allocating a full-length array per sample
+   * and dying of an out-of-memory abort with no JS frame in the trace. It cost
+   * half an hour once; it says so now. */
+  if (typeof input[0] === 'number') throw new TypeError('renderEx: input must be an array of channels, got a bare sample array');
   const proc = new Processor({ processorOptions: { channels: input.length } });
   const frames = input[0].length;
   const out = input.map((c) => new Float32Array(frames));

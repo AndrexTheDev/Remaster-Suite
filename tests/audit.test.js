@@ -1330,6 +1330,20 @@ section('audit · the bottom of the record');
   ok(humOnly.db < rattle.db - 8 && humOnly.hz < 19,
     'while a line on its own is not read as a rumble',
     'a flat bed with the same hum reads ' + num(humOnly.db) + ' dB → guard ' + num(humOnly.hz) + ' Hz');
+  /* The other half of the same mistake, and the one that costs a repair the
+   * file did not need: the harmonic *above* the band. Measured before the comb
+   * that now cuts them, one line at −30.5 dBFS on a clean bed read +20.0 dB of
+   * infra excess at 100 Hz, +13.5 at 150, +9.0 at 200, +5.9 at 250 and +2.6 at
+   * 300 — the card called a recording with no rumble rumbly and asked for a
+   * 24 Hz high-pass. The comb reaches to 420 Hz; these six frequencies are the
+   * ones a mains harmonic actually lands on, and none of them may move the
+   * verdict any more. */
+  const harm = [100, 150, 200, 250, 300, 400].map((f) => ({ f, r: look(H.mix([bed, H.tone(f, SR, SEC, 0.030)])) }));
+  const worst = harm.slice().sort((x, y) => y.r.db - x.r.db)[0];
+  ok(harm.every((h) => h.r.db < rattle.db - 8 && h.r.hz < 3),
+    'and a mains harmonic cannot fake one',
+    harm.map((h) => h.f + ' Hz ' + num(h.r.db)).join(' · ') + ' dB (bed alone ' + num(clean[0][1].db)
+    + ', rattle ' + num(rattle.db) + ') · worst ' + worst.f + ' Hz → guard ' + num(worst.r.hz) + ' Hz');
 }
 
 /* What the de-clicker is *for*: on material with real pops, the pops have to

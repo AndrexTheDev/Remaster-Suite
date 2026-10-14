@@ -37,9 +37,20 @@ const rms = (a, from, to) => {
  * signal: the bin is one realisation of a noise process, so its variance is
  * ~100 % and two measurements of the same file differ by decibels. */
 const hann = (N) => { const w = new Float64Array(N); for (let i = 0; i < N; i++) w[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / N); return w; };
+/* …and it never reads a mains line. The reference band of the rumble row below
+ * is 95–105 Hz, which is where a 50 Hz grid's *second harmonic* sits — so the
+ * chain's own hum repair moved the row: measured on the worn fixture, the export
+ * read 12.5 dB against a control of 10.8, and the app's own statistic on the
+ * same file says the bottom end did not move (the chain asked for no guard). The
+ * row was measuring the hum notch taking 100 Hz out of its own reference. The
+ * app has cut the mains out of these two bands since this round (one comb in
+ * front of the band filters, see dsp-utils); this meter now does the same, at
+ * the same ±5 Hz, for the same reason. */
+const MAINS = [50, 60, 100, 120, 150, 180, 200, 240, 250, 300];
 const bandE = (seg, w, f1, f2) => {
   let e = 0;
   for (let f = f1; f <= f2; f += 1) {
+    if (MAINS.some((m) => Math.abs(f - m) <= 5)) continue;
     let re = 0, im = 0;
     for (let i = 0; i < seg.length; i++) {
       const v = seg[i] * w[i];
@@ -295,14 +306,18 @@ function run(sc) {
     const w = hann(N), rel = [];
     for (let s = 0; s < segs; s++) {
       const seg = x.subarray(s * N, (s + 1) * N);
-      const lo = bandE(seg, w, 17, 33), mid = bandE(seg, w, 95, 105);
+      /* the reference is 82-94 Hz, *beside* the 100 Hz mains line and not on it:
+       * 95-105 Hz is where a 50 Hz grid's second harmonic sits, so a reference
+       * there reads the chain's own hum repair as a change in the bottom end
+       * (see the note on bandE above). */
+      const lo = bandE(seg, w, 17, 33), mid = bandE(seg, w, 82, 94);
       if (lo > 0 && mid > 0) rel.push(10 * Math.log10(lo / mid));
     }
     rel.sort((a, b) => a - b);
     return rel.length ? rel[Math.floor(rel.length / 2)] : 0;
   };
-  row('rumble: 18–32 Hz vs 100 Hz', rumbleDb(upload), rumbleDb(re, out.latency), 'dB', rumbleDb(ctrl),
-    'medians of ' + Math.floor(upload.length / Math.round(SR * 0.5)) + ' half-second windowed frames');
+  row('rumble: 18–32 Hz vs 82–94 Hz', rumbleDb(upload), rumbleDb(re, out.latency), 'dB', rumbleDb(ctrl),
+    'medians of ' + Math.floor(upload.length / Math.round(SR * 0.5)) + ' half-second windowed frames, both bands off the mains');
   /* The codec's own loss: the decode against the signal that went *into* the
    * encoder (not against the bed — in this band the fixture is mostly hiss, and a
    * row measured against the bed would be reading the de-hisser, not the codec). */

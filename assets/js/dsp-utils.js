@@ -953,50 +953,89 @@
       pa.setHighpass(sr, 200, 0.707); pb.setHighpass(sr, 200, 0.707);
       // ── the bands the bottom of the record is measured in ────────────────
       // Two poles each way would be enough for a band *energy* — except at the
-      // one place that matters: a 2-pole low pass at 45 Hz is only 2 dB down at
+      // one place that matters: a 2-pole low pass at 45 Hz is only 4 dB down at
       // 50 Hz, so the mains line sits inside the "20-45 Hz" band at nearly full
       // level. Measured, that is not a detail: on a garage fixture that is
       // high-passed at 150 Hz and has no bottom end at all, the 50 Hz line made
       // the band read 6.2 dB of "infra excess", and with the line notched out it
-      // reads -16.4 dB. So every band carries a narrow notch (Q 40, −60 dB — 1.2
-      // Hz wide, half a decibel at 45 Hz) on the mains frequency of *both* grids
-      // and on every harmonic of theirs that falls inside the band.
-      // The margin is the point: a 2-pole high pass at 90 Hz passes the 50 Hz
-      // line 10 dB down and a 2-pole low pass at 45 Hz passes it 4 dB down, so
-      // the harmonics that have to go are the ones *outside* the band as well as
-      // inside it. Half an octave of margin either side, and every mains
-      // harmonic that lands in it gets a notch (Q 20, 2.5 Hz wide at 50 Hz).
+      // reads -16.4 dB. So the analysis cuts the mains out before it measures.
       //
-      // …but half an octave is not a margin against a 2-pole roll-off: half an
-      // octave below 90 Hz is 60 Hz, so the *60 Hz* grid's fundamental was
-      // notched out of the 90-203 Hz reference band and the *50 Hz* grid's was
-      // not — and a 2-pole high pass at 90 Hz passes 50 Hz at only -10.6 dB
-      // (measured on the band's own chain: -10.6 with the shipped notch list,
-      // -10.7 with no notches at all, -220 with a notch at 50). On the workflow
-      // fixture that is not a detail: the same record measured +8.5 dB of
-      // infra excess without its hum and -12.0 dB with it, because the 0.030
-      // line leaked straight into the reference band and lifted it 22 dB while
-      // the 20-45 Hz band did not move. The margin below a band never goes
-      // under the mains fundamental itself.
-      const mkNotches = (f1, f2) => {
+      // It cuts it once, at the front — one comb of constant-Q notches (Q 20,
+      // −60 dB at the centre, 2.5 Hz wide at 50 Hz) per channel, shared by the
+      // three low-band chains. It used to notch each band separately and only
+      // out to half an octave past the band edges, which is not a margin against
+      // a 2-pole roll-off, and that was wrong in both directions, measured:
+      //
+      //   • *below* a band: half an octave under 90 Hz is 60 Hz, so the 60 Hz
+      //     grid's fundamental was notched out of the 90-203 Hz reference band
+      //     and the 50 Hz grid's was not — and a 2-pole high pass at 90 Hz
+      //     passes 50 Hz at -10.6 dB (measured on the chain: -10.6 with the
+      //     shipped notch list, -10.7 with no notches at all, -220 with one at
+      //     50). Same record, layer by layer: +8.5 dB of infra excess with
+      //     rumble and hiss, -12.0 dB with the hum added, the reference band up
+      //     22 dB while the 20-45 Hz band did not move. A hum *hid* the rumble.
+      //   • *above* a band: the harmonics between the half-octave margin and the
+      //     filters' actual reach. On a clean bed, one line at -30.5 dBFS:
+      //     100 Hz reads +20.0 dB of "excess", 150 Hz +13.5, 200 Hz +9.0,
+      //     250 Hz +5.9, 300 Hz +2.6, and on a bed 10 dB drier 30.1 / 23.4 /
+      //     18.5 — a mains harmonic of a recording that has no rumble *asked
+      //     for a high-pass*, because the chain was told to trust that number.
+      //
+      // The reach is set by the chain's own measured gain (a pure line at f, as
+      // HP → LP leaves it, dB):
+      //
+      //        f      50     60    100    120    150    180    200    250    300    400    600
+      //   20-45    -4.1   -6.2  -14.1  -17.1  -21.0  -24.1  -25.9  -29.8  -33.0  -38.0  -45.0
+      //  90-203  -10.6   -7.9   -2.4   -1.7   -1.7   -2.4   -3.1   -5.3   -7.6  -12.1  -18.9
+      //
+      // so the comb covers every harmonic of both grids from the fundamentals up
+      // to 420 Hz — inside the reference band they arrive at 0 to -3 dB, and at
+      // 100-300 Hz the 20-45 Hz band is still within 33 dB of them. Measured
+      // after the comb, one line at -30.5 dBFS on a clean bed reads 0.5-2.0 dB
+      // of excess at 50, 60, 100, 120, 150, 200, 250, 300, 350, 400 and 420 Hz
+      // (the bed with no line reads 1.6), where before 100 Hz read 20.0 and
+      // 150 Hz 13.5 — and on a bed 10 dB drier, where the same harmonic used to
+      // read 30.1, it reads 1.5.
+      //
+      // The reach is where it stops being *reachable*: at 500 Hz the reference
+      // band is 16 dB down, so a line there still reads -16.4 dB of "excess"
+      // (measured — it hides a rumble rather than faking one) and a 10th
+      // harmonic would have to sit within 16 dB of the fundamental, i.e. the
+      // mains would have to be a square wave. Notching to 1.2 kHz would close
+      // even that with ~25 more biquads per channel; it is not worth the
+      // analysis time for a line no recording has.
+      //
+      // …and one measured property that is *not* repaired here, because it is
+      // not a repair: a line that wanders — vinyl and tape wobble move it by
+      // 0.2-2 %, far more than a 2.5 Hz notch can follow. Measured with a
+      // 50…250 Hz hum wobbling ±1 % at 3 Hz: both bands rise by ~11 dB
+      // (20-45: -66.1 → -55.8, 90-203: -67.7 → -55.5) while the *ratio* does
+      // not move at all — a clean bed reads -0.1 dB of excess and a rumbly one
+      // 14.5 dB, against 1.6 and 16.5 with the line steady. A steady line is
+      // the case that fakes a rumble; a wandering one is self-cancelling. A
+      // comb of three notches per harmonic (+0.75 %) would buy 12 dB of
+      // suppression on a ±1 % wander and costs 0.3-0.5 dB of reference-band
+      // energy, i.e. a recalibration; a tracking or spectral estimator would be
+      // the real answer. Neither is needed for the verdict as measured.
+      const mkComb = () => {
         const out = [];
-        const lo = Math.min(f1, 50) / 1.5;
         for (const mains of [50, 60]) {
-          for (let h = 1; h * mains <= f2 * 1.5; h++) {
-            const f = h * mains;
-            if (f >= lo) { const n = new Biquad(); n.setNotch(sr, f, 20); out.push(n); }
+          for (let h = 1; h * mains <= 420; h++) {
+            const n = new Biquad();
+            n.setNotch(sr, h * mains, 20);
+            out.push(n);
           }
         }
         return out;
       };
-      const kk = mkNotches(20, 45), ll = mkNotches(45, 90), rr = mkNotches(90, 203);
+      const kk = mkComb();
       const ka = new Biquad(), kb = new Biquad();     // 20-45 Hz
       ka.setHighpass(sr, 20, 0.707); kb.setLowpass(sr, 45, 0.707);
       const la = new Biquad(), lb = new Biquad();     // 45-90 Hz
       la.setHighpass(sr, 45, 0.707); lb.setLowpass(sr, 90, 0.707);
       const ra = new Biquad(), rb = new Biquad();     // 90-203 Hz
       ra.setHighpass(sr, 90, 0.707); rb.setLowpass(sr, 203, 0.707);
-      filters.push({ a, b, ma, mb, pa, pb, ka, kb, la, lb, ra, rb, kk, ll, rr });
+      filters.push({ a, b, ma, mb, pa, pb, ka, kb, la, lb, ra, rb, kk });
       frames.push({ raw: new Float64Array(total), hf: new Float64Array(total), mid: new Float64Array(total),
         prog: new Float64Array(total), low: new Float64Array(total), bass: new Float64Array(total),
         ref: new Float64Array(total) });
@@ -1024,12 +1063,13 @@
         const hf = f.b.process(f.a.process(v));
         const md = f.mb.process(f.ma.process(v));
         const pg = f.pb.process(f.pa.process(v));
-        let vl = f.kb.process(f.ka.process(v));
-        for (let q = 0; q < f.kk.length; q++) vl = f.kk[q].process(vl);
-        let vb = f.lb.process(f.la.process(v));
-        for (let q = 0; q < f.ll.length; q++) vb = f.ll[q].process(vb);
-        let vf = f.rb.process(f.ra.process(v));
-        for (let q = 0; q < f.rr.length; q++) vf = f.rr[q].process(vf);
+        // the three low bands read the signal with the mains combed out of it —
+        // one pass over the comb, shared, instead of one bank per band
+        let vc = v;
+        for (let q = 0; q < f.kk.length; q++) vc = f.kk[q].process(vc);
+        const vl = f.kb.process(f.ka.process(vc));
+        const vb = f.lb.process(f.la.process(vc));
+        const vf = f.rb.process(f.ra.process(vc));
         const qr = v * v, qh = hf * hf, qm = md * md, qp = pg * pg;
         const ql = vl * vl, qb = vb * vb, qf = vf * vf;
         r.sr += qr - r.raw[r.i]; r.raw[r.i] = qr;
