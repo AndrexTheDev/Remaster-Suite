@@ -13,6 +13,35 @@ thresholds sat in the tone stages (the glue's and the warmth's), all of them wri
 full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
 else may move.
 
+### Measured — the hiss class's ceiling, and the three key fixes that are not one
+
+* After this round's two fixes the class reads **18.35 → 8.39 dB** of tilt step (54 % of the hiss
+  removed) and the export reads 7.66 dB. What is left is bounded, and it is measured:
+  in the frames the noise owns, the noise is **32.4 dB** above the clean copy's own top end (the
+  acceptance fixture has a ground truth — the bed is known), the analyser's file-level step says
+  **18.35 dB** (its own calibration: 17.5 dB on the loop's fixture), the card grants a cap of
+  **17.35**, the frame's tilt key asks **13.9** and the ride delivers **8.8**.
+* **Why the key asks 13.9 and not 18.35**: its 1.45 kHz reference band is inflated by the noise's
+  own body — measured against the known bed, the reference in those frames is **+16.1 dB**, the key
+  reads HF/MID 11.6 dB where the noise's own tilt is 27.7. In the frames the music owns the
+  correction term is **−0.00 dB**, so the contamination is exactly where the repair is.
+* **Three formulations to repair the key, all rejected on measurement**:
+  (1) a *level key* alone asks 2.9–7.6 dB inside the loud and music-owned frames where the tilt key
+  correctly asks 0 — and on this fixture the level cannot separate the classes at all (the frame's
+  top end over the floor: noise **1.30**, music **1.10**), i.e. it would dull music;
+  (2) *inverting the two bands* (`P_MID = (HF² − N²)/10^(tiltRef/10)` — the one algebraically
+  identifiable formulation) is degenerate: **3.9 dB** in the noise-owned frames against **7.6 dB**
+  in the loud ones, the wrong way round, because the programme's tilt is not constant across frames
+  and the two meters disagree by ~1.6 dB;
+  (3) *aligning the key with the analyser's quantity*: the analyser's quiet-frame median tilt is
+  **15.82 dB** against the stage's own **11.35 dB** in the same-band frames — a 4.5 dB gap in
+  aggregation and frame set rather than in meters, and an ask raised by an unexplained offset is not
+  a fix.
+* The remaining lever is therefore a **policy** question, not a defect: the cap (the frame needs
+  32 dB, the calibrated analysis grants 18, the profile caps at 17.3). Pinned in the acceptance
+  header so the next round does not re-derive it. acceptance 57 rows, exit 0 →
+  `tools/work/acceptance-v2ad.txt`.
+
 ### Measured — where the dull-top class's line sits, and what the chain does with it
 
 * Sweeping the low-pass corner of the same bed (19 kHz → 5 kHz) and asking the app: `dullIndex` goes

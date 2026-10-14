@@ -226,6 +226,29 @@ mark('section 2');
  *     that this is enough: a step of 8.4 dB is still a hiss, the export reads it,
  *     and the re-upload row says so instead of leaving the gate at 1.00 to imply
  *     nothing happened.
+ *
+ * The class's *ceiling* is measured here too, so the next round does not re-derive it. In
+ * the frames the noise owns, the noise is **32.4 dB** above the clean copy's own top end
+ * (this fixture has a ground truth: the bed is known), the analyser's file-level step says
+ * **18.35 dB** (its own calibration: 17.5 dB on the workflow fixture), the card grants a cap
+ * of **17.35**, the frame's tilt key asks **13.9** and the ride delivers **8.8** — the hiss
+ * comes out 54 % removed, not gone. Three ways to make the key ask what the frame needs were
+ * measured, and all three are rejected:
+ *   · *a level key alone* (ask = how far the top end sits above the measured floor) asks
+ *     **2.9–7.6 dB inside the loud and music-owned frames** where the tilt key correctly asks
+ *     0 — on this fixture the level cannot separate the classes at all (the frame's top end
+ *     over the floor: noise **1.30**, music **1.10**), so it would dull music;
+ *   · *inverting the two bands* (`P_MID = (HF² − N²)/10^(tiltRef/10)`, the one formulation
+ *     that is algebraically identifiable) is degenerate here — **3.9 dB** in the noise-owned
+ *     frames against **7.6 dB** in the loud ones, i.e. the wrong way round, because the
+ *     programme's tilt is not constant across frames and the two meters disagree by ~1.6 dB;
+ *   · *aligning the key with the analyser's quantity*: the analyser's quiet-frame median tilt
+ *     is **15.82 dB** against the stage's own **11.35 dB** in the same-band frames — a 4.5 dB
+ *     gap in aggregation and frame set, not in meters, and raising an ask by an unexplained
+ *     offset is not a fix.
+ * What is left is a **policy** question, not a bug: the cap. The frame needs 32 dB, the
+ * analyser's calibrated bound grants 18, the card's profile caps at 17.3 — and a cap is what
+ * stops a repair from turning a severely hissy transfer into a dull one.
  * ------------------------------------------------------------------------- */
 {
   const clean = bed(9000, 0.7);
