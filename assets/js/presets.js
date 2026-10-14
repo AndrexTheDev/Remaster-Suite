@@ -1307,6 +1307,20 @@
     // repair stages (de-hiss, de-click) engage a little earlier than the
     // creative ones — but never before the slider has left zero
     const repair = (x) => x * (0.35 + 0.65 * amt) * on;
+    /* The de-hisser's amount is a *measurement*, not a taste: the law already
+     * hands it the tilt step it found (capped by the card) and zero when the
+     * evidence is not there, so the intensity curve was scaling a number that
+     * has nothing to do with intensity — 0.830 of it at the default p = 0.7.
+     * It follows the `fix` policy the hum notch and the measured resonance
+     * notches already follow (see the assembly below), measured on the acceptance
+     * hiss fixture: in the frames the noise owns the band came down 7.69 →
+     * **8.79 dB** and the tilt step the card prints 10.18 → **8.39 dB**, against
+     * 0.13 → 0.20 dB on the frames the music owns; both clean-bed fixtures still
+     * measure a tilt step under 0.25 dB and a dose of exactly 0. The de-clicker
+     * and the de-clipper are *not* moved here: their amounts carry the same
+     * argument but their risk is the music's transients, and that is its own
+     * round (their rows are green as they stand). */
+    const repairMeasured = (x) => x * smoothstep(0, 0.20, p);
     // Measured defects are not a matter of taste: once the slider has left zero,
     // hum, boxiness and a collapsed image are fixed by the *measurement* — a
     // mains notch shallower than the hum leaves the hum, and one deeper than it
@@ -1328,7 +1342,7 @@
       subRatio: a.subRatio,
       exciter: a.exciter * amt,
       air: a.air * amt,
-      dehiss: repair(a.dehiss),
+      dehiss: repairMeasured(a.dehiss),
       // the de-clipper's own detector runs on the *measured* plateau level, so
       // it stays dormant (amount 0) on anything that was not measured as
       // clipped, whatever the slider says

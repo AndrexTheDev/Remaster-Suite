@@ -13,6 +13,25 @@ thresholds sat in the tone stages (the glue's and the warmth's), all of them wri
 full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
 else may move.
 
+### Fixed — a measured repair was still being scaled by the intensity curve
+
+* **The de-hisser's dose is its measurement, and the taste curve was scaling it.** `repair()` multiplies
+  every repair by `0.35 + 0.65·p^0.85` — **0.830** at the default `p = 0.7` — so the law's own value of
+  **0.920** reached the stage as **0.764**. The policy for a measured repair already existed next door:
+  the hum notch and the measured resonance notches run on `fix()` — "either measured or they are not, and
+  a slider at 100 % must not invent them". The de-hisser now follows it (`repairMeasured`), the slider
+  still gating it to zero below 20 %, and the card's cap still deciding how much the evidence earns.
+* **Measured on the acceptance fixture**: in the frames the noise owns the band comes down **8.79 dB**
+  (was 7.69) and the tilt step the card prints goes 10.18 → **8.39 dB**; the frames the music owns pay
+  **0.20 dB** (was 0.13); both clean-bed fixtures — a dull one low-passed at 7 kHz, a bright one at
+  19 kHz — still measure a tilt step under 0.25 dB and a dose of exactly **0**.
+* **The section's own rows move with it**: quiet-passage ≥4 kHz −33.39 → **−38.66 dBFS**, inside the
+  frames the noise owns **8.8 dB** (5.8 at the start of the round), the music now stands 28.9 dB above
+  the top-end floor (17.3 on the input), and the re-uploaded export reads a tilt step of **7.66 dB**
+  where the upload read 18.35 — the app still names `hiss`, truthfully, with half the defect left.
+* The de-clicker and the de-clipper are **not** moved: their amounts carry the same argument but their
+  risk is the music's transients, and their rows are green as they stand. That is its own round.
+
 ### Fixed — the de-hisser's gate was slower than the pops it was protecting against
 
 * **The 250 ms closing time was justified by a measurement of a chain that no longer exists.** The
