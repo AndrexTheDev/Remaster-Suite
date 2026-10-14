@@ -82,6 +82,31 @@ const sideRatio = (ch) => {
   for (let i = 0; i < ch[0].length; i++) { const s = ch[0][i] - ch[1][i], m = ch[0][i] + ch[1][i]; sm += s * s; mm += m * m; }
   return 10 * Math.log10(sm / Math.max(mm, 1e-20));
 };
+/** Runs of same-sign samples that are equal to their neighbour to within 1e-4
+ * of the file's peak and sit within 0.2 % of it: a *flat top*, counted by this
+ * tool's own walk. Two rules, both of them the physics and not a convenience:
+ * the samples have to keep the sign (a plateau does not cross zero — without
+ * this the counter merges the two opposite clipped crests either side of a zero
+ * crossing, and on the noise fixture it read 7.8 % where the truth is 4.2 %),
+ * and the tolerance is 25× tighter than the app's own detector uses, so the
+ * smooth top of a restored arc — whose samples differ by ~2e-3 of the peak at
+ * 997 Hz — cannot land in a run here, while a clipped plateau (identical to the
+ * last bit) always does. Reported as per-mille of the file plus the longest run,
+ * so both the population and the worst case are on the row. */
+function flatSpans(sig, tol) {
+  let pk = 0;
+  for (let i = 0; i < sig.length; i++) { const a = Math.abs(sig[i]); if (a > pk) pk = a; }
+  const lim = pk * 0.998, T = (tol === undefined ? 1e-4 : tol) * pk;
+  let inRun = 0, runs = 0, samples = 0, longest = 0;
+  for (let i = 0; i < sig.length; i++) {
+    const x = sig[i], a = Math.abs(x);
+    const flat = a >= lim && (inRun === 0 || (x * sig[i - 1] > 0 && Math.abs(a - Math.abs(sig[i - 1])) <= T));
+    if (flat) inRun++;
+    else { if (inRun >= 2) { runs++; samples += inRun; if (inRun > longest) longest = inRun; } inRun = 0; }
+  }
+  if (inRun >= 2) { runs++; samples += inRun; if (inRun > longest) longest = inRun; }
+  return { runs, samples, longest, permille: 1000 * samples / Math.max(1, sig.length), peak: pk };
+}
 
 /* ── the chain ──────────────────────────────────────────────────────────── */
 function run(chans, over) {
@@ -191,14 +216,44 @@ mark('section 4');
   row('rumble', 'below 20 Hz vs 100 Hz (dB)', bandSumDb(dirty, 10, 19) - bandSumDb(dirty, 90, 110), bandSumDb(r.out[0], 10, 19, r.lat) - bandSumDb(r.out[0], 90, 110, r.lat), '');
 }
 mark('section 5');
-/* 5 ── clipping ──────────────────────────────────────────────────────────── */
+/* 5 ── clipping ────────────────────────────────────────────────────────────
+ * Two meters, and a row that used to compare two things that cannot be.
+ *
+ * The defect's own statistic is a *pair*: the share of samples sitting in flat
+ * runs at the file's top, and the peak the run length implies is missing — the
+ * two numbers the diagnosis acts on (`clipFlatRatio` + `clipOvershootDb`, whose
+ * product is the evidence). Neither alone is a verdict, measured on this very
+ * fixture: the smooth top of a *restored* arc is flat enough to read as 2–3
+ * sample runs (with the tonal stages off, 7.17 % of the file and an implied
+ * peak of 0.07 dB — and evidence 0.00), while a real plateau reads 42.01 % in
+ * 11-sample runs and 2.05 dB (evidence 0.73). The rows print both numbers.
+ *
+ * The plateau error, which the engine test uses, is a *phase ruler* and cannot
+ * compare two different chains: rotating the original by half a sample reads
+ * −31.9 dB on the tone fixture and by three samples −16.0, i.e. the whole range
+ * these rows cover — and every EQ stage rotates phase, while the exciter adds
+ * harmonics by design. Measured on the tone with the shipped parameters: the
+ * clipped file −23.46, the chain without the de-clipper −13.40, with it −15.24;
+ * the same file through a repair-only chain −23.46 → −31.87. So a dry-vs-
+ * finished comparison here reports the chain's colouring, not the repair, and
+ * the verdict has to be a one-parameter control inside the chain that actually
+ * runs — which is what the first row now is. And where it still reads *up*
+ * (noise, kick + bass) that is the metric, not the stage: the true depth of a
+ * noise crest cannot be recovered from its run length, the detector's own
+ * fallback is capped at +3 dB, and no reconstruction can be closer than that
+ * guess — the flat-top pair and the counter are the verdict for those two.
+ * ------------------------------------------------------------------------- */
 function plateausOf(sig, rail) {
   const set = new Uint8Array(sig.length);
   const lim = rail * 0.999;
   for (let i = 0; i < sig.length; i++) if (Math.abs(sig[i]) >= lim) set[i] = 1;
   return set;
 }
-/** best-fit scale over the plateau samples, error against the original */
+/** best-fit scale over the plateau samples, error against the original.
+ * Read the number with its alignment: it is a *phase ruler* on tonal material
+ * (a half-sample rotation of the original alone reads −31.9 dB at 997 Hz, three
+ * samples −16.0), so it may only ever compare two renders that differ in one
+ * parameter — never the dry file with a chain that applies EQ. */
 function plateauError(orig, sig, mask, lat) {
   let ss = 0, so = 0, oo = 0, n = 0;
   for (let i = 0; i < orig.length; i++) {
@@ -229,8 +284,24 @@ function clipCase(tag, orig, rail, note) {
   const r = run([clipped]);
   const mask = plateausOf(clipped, rail);
   const dryDry = plateauError(orig, clipped, mask);
-  row('clipping (' + tag + ')', 'error at the plateaus vs the original (dB)', dryDry, plateauError(orig, r.out[0], mask, r.lat),
-    'declip ' + N(r.P.declip) + ' at plateau ' + N(db(rail), 1) + ' dBFS · best-fit scale, as in the engine test');
+  /* the verdict, one parameter apart, inside the chain that actually shipped */
+  const noDeclip = H.renderEx(Processor, [clipped], Object.assign({}, r.P, { declip: 0 }));
+  row('clipping (' + tag + ')', 'error at the plateaus vs the original, full chain, de-clipper off / on (dB)',
+    plateauError(orig, noDeclip.out[0], mask, noDeclip.latency), plateauError(orig, r.out[0], mask, r.lat),
+    'one parameter apart · declip ' + N(r.P.declip) + ' at plateau ' + N(db(rail), 1) + ' dBFS · the clipped file alone reads '
+    + N(dryDry, 2) + ' dB, which is *not* the comparison — and on the two non-periodic fixtures the repair legitimately moves '
+    + 'this number *up*: how deep a noise peak went is not knowable from its run length (the detector’s own fallback, capped at '
+    + '+3 dB), so only the pair and the counter below are the verdict there');
+  row('clipping (' + tag + ')', 'flat samples at the top, the share the diagnosis reads (%)',
+    100 * r.m.clipFlatRatio, 100 * r.mo.clipFlatRatio,
+    'implied missing peak ' + N(r.m.clipOvershootDb, 2) + ' → ' + N(r.mo.clipOvershootDb, 2) + ' dB · evidence '
+    + N(r.m.clipEvidence, 2) + ' → ' + N(r.mo.clipEvidence, 2) + ' · longest run ' + r.m.clipMaxRun + ' → ' + r.mo.clipMaxRun
+    + ' samples (what is left is an arc’s top, not a rail) · the pair is the verdict, not the share');
+  const spIn = flatSpans(clipped), spOut = flatSpans(r.out[0]);
+  row('clipping (' + tag + ')', 'flat samples, own counter (per mille of the file)',
+    spIn.permille, spOut.permille,
+    spIn.runs + ' → ' + spOut.runs + ' runs of same-sign samples equal to 1e-4 of the peak, longest '
+    + spIn.longest + ' → ' + spOut.longest + ' · 25× tighter than the detector’s own tolerance, so a restored arc cannot land in one');
   // the repair chain alone, one parameter apart — the de-clipper's own verdict
   const REP = { power: 1, autoLevel: 0, tpCeil: 6, declip: 0, declipLevel: r.P.declipLevel || -0.1,
     declick: r.P.declick, dehiss: r.P.dehiss, deess: r.P.deess, hum: r.P.hum || 0, hum2: r.P.hum2 || 0, hum3: r.P.hum3 || 0 };

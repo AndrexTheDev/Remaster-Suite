@@ -581,6 +581,21 @@ H.section('engine · de-clipper on a clipped master');
     'the clipping buzz (third harmonic) drops with it',
     h3(off.out[0], 0).toFixed(1) + ' → ' + h3(on.out[0], on.latency).toFixed(1) + ' dB below the fundamental');
 
+  // …and the *detector* that decides whether a file is clipped has to agree
+  // with the ear, or the app calls its own repaired export clipped. Both halves
+  // of its pair move: the share of samples in flat runs at the top drops by two
+  // orders of magnitude, and the peak the run length implies is missing drops
+  // from 2 dB to a tenth of one — which is what the evidence is made of. (The
+  // share alone proves nothing: the smooth top of a *restored* arc reads as
+  // 2–3-sample runs too, which is why the pair and not the share is quoted.)
+  const statOf = (o, lat) => { const st = RSDSP.flatTopStep([o.out[0].slice(lat)], SR); return st.value(); };
+  const sOff = statOf(off, 0), sOn = statOf(on, on.latency);
+  H.ok(sOn.flatRatio < sOff.flatRatio * 0.02 && sOn.overshootDb < 0.2 && sOn.evidence < 0.02,
+    'and the diagnosis reads it as repaired: flat share and implied missing peak both collapse',
+    'flat ' + (100 * sOff.flatRatio).toFixed(2) + ' → ' + (100 * sOn.flatRatio).toFixed(2) + ' %, implied '
+    + sOff.overshootDb.toFixed(2) + ' → ' + sOn.overshootDb.toFixed(2) + ' dB, evidence '
+    + sOff.evidence.toFixed(2) + ' → ' + sOn.evidence.toFixed(2));
+
   // the de-clicker must leave the repaired arc alone — and, more importantly,
   // must leave a plateau alone when the de-clipper is *off*, which is the
   // regression this section exists for

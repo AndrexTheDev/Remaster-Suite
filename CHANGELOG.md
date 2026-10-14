@@ -13,6 +13,40 @@ thresholds sat in the tone stages (the glue's and the warmth's), all of them wri
 full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
 else may move.
 
+### Fixed — the report compared a clipped file with a finished render, and what it printed was the EQ's phase
+
+* **§5's first row compared two things that cannot be compared.** The plateau error (the metric the
+  engine test uses) is a *phase ruler* on tonal material: rotating the original by **half a sample**
+  reads −31.9 dB on the tone fixture and by **three samples** −16.0 — the whole range the row covers.
+  Every EQ stage rotates phase and the exciter adds harmonics by design, so a finished render's own
+  colouring floor sits ~10 dB above what the de-clipper contributes: measured with the shipped
+  parameters, the clipped tone reads −23.46, the chain *without* the de-clipper −13.40, with it
+  −15.24. As printed, the row said the chain had made the plateaus ~8 dB *worse* than the clipped
+  file, i.e. the opposite of what happened.
+* **The verdict is now a one-parameter control inside the chain that runs** — the shipped parameters
+  with `declip` at zero — and where the waveform is knowable it comes out the right way (tone
+  −13.40 → −15.24). Where it still reads *up* (noise, kick + bass) that is the metric, not the stage:
+  how deep a noise crest went cannot be recovered from its run length (the detector's own fallback is
+  capped at +3 dB) and no reconstruction can be closer than that guess.
+* **The defect's own statistic is on the row again, as the pair the diagnosis actually reads** — the
+  share of samples in flat runs at the top, and the peak the run length implies is missing. Tone
+  **42.01 % / 2.05 dB, evidence 0.73** → **0.85 % / 0.07 dB, evidence 0.00**. Neither is a verdict
+  alone, and both directions are measured: with the tonal stages off, a *restored* arc's smooth top
+  reads 7.17 % of flat samples and 0.07 dB implied, while a clipped noise file's finished render
+  still reads a 1.40 dB implied peak at a 0.001 % share.
+* **An independent counter, which caught a bug in itself.** Runs of same-sign samples equal to within
+  1e-4 of the peak (25× tighter than the detector's own tolerance): tone 15 952 runs / 160 256
+  samples → **0 runs / 0 samples**, longest 11 → 0; noise 6 762 → 0; kick + bass 6 359 → 0. On the
+  tone it counts exactly the app's 15 952 runs and the same longest run (11). The first version left
+  the sign rule out and read 7.8 % on the noise fixture where the truth is 4.2 % — it merged two
+  opposite clipped crests across a zero crossing.
+* The repair-only reference was re-examined for the same reason and **kept**: its finished render
+  reads 7.6 % of flat samples, but the independent counter finds 0 runs there and the evidence is
+  0.00 — those are a restored arc's tops, not plateaus.
+* New dsp row pinning the pair at engine level (`declip` off → on, the SOLO fixture): flat
+  42.15 % → 0.13 %, implied 2.07 → 0.08 dB, evidence 0.73 → 0.00. dsp 126 → 127; acceptance
+  47 → 53 rows.
+
 ### Fixed — the report's "squashed master" row tested a file the app called healthy
 
 * **No fixture in either tool exercised the `squashed` class.** The acceptance row is named after the
