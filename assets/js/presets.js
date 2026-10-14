@@ -1391,7 +1391,35 @@
      *     it is already saturated where it matters: identical plateau error from
      *     dose 0.05 to 1.0 on the tonal contract fixture and within 0.02 dB on a
      *     hard-clipped noise fixture, so "as measured" would be a no-op that
-     *     only lowers the evidence bar the dsp suite just pinned. */
+     *     only lowers the evidence bar the dsp suite just pinned.
+     *
+     * The de-esser belongs in the first group for the same reason and was the
+     * last one still in the second: its amount is `0.85 · sibNeed · headroom`,
+     * and `sibNeed` is the law's own reading of the file — the departure of the
+     * loudest frames from the file's balance, which is zero when no such
+     * departure was measured. The curve was taking **0.830** of it, and the
+     * stage under-delivered the rest, so the app's own output came back to it
+     * still sibilant: on §10's burst fixture the 7 kHz band of the loudest 20 %
+     * of frames came down **2.61 dB**, the scan the dose is computed from
+     * 5.46 → 3.26 dB, and the 320 kbit/s export was diagnosed `sibilance` again
+     * with **0.614** of dose asked for it (probe `tools/work/sib11.js`). As
+     * measured (0.850 at the default) the same rows read **3.06 dB**,
+     * **5.46 → 2.61 dB**, and the export reads **healthy** at 0.226 — under the
+     * law's 0.30 naming threshold, which the curved dose missed by a factor of
+     * two. The same file's own demand on the input is unchanged (the dose is the
+     * measurement); what changes is that the stage now spends it.
+     *
+     * The stage's *reference* is the second half of that deficit and is measured
+     * but **not** shipped: `slowDb` is a ~2 s mean that the bursts themselves
+     * raise, so the per-frame target reads 0.45 where the file's own departure
+     * says 0.79. Holding the reference while a burst window is open (probe
+     * `sib11.js`, variant `freeze`) takes the export's dose 0.260 → **0.055** and
+     * the scan → 2.41 — at the price of nearly doubling the de-esser's move on
+     * a *continuous* "s" (the loudest 20 % of frames −5.25 → **−6.43 dB** on the
+     * audit's own sibilant, a file whose every frame is a burst, so the
+     * reference never learns a body). That trade is not yet bounded by
+     * measurement here and is left where it is on purpose.
+     */
     const repairMeasured = (x) => x * smoothstep(0, 0.20, p);
     // Measured defects are not a matter of taste: once the slider has left zero,
     // hum, boxiness and a collapsed image are fixed by the *measurement* — a
@@ -1464,7 +1492,10 @@
       // not switch on at 2 %), the de-esser and the bass-mono stage are
       // amounts, and the corrective EQ follows `amt` like every other band.
       infraHP: num(fix(a.infraHP), 0),
-      deess: num(repair(a.deess), 0),
+      // …and the de-esser's is a measurement too: `sibNeed` is zero unless the
+      // scan measured a departure, so the intensity curve was scaling the
+      // file's own reading (see the paragraph above `repairMeasured`).
+      deess: num(repairMeasured(a.deess), 0),
       bassMono: num(fix(a.bassMono), 0),
       glueTime: num(a.glueTime, 0.5),
       hissF: num(clamp(a.hissF, 2000, 8000), 3200),

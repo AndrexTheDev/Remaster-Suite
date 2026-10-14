@@ -6,6 +6,57 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Fixed — the de-esser was handed a measurement and spent 0.830 of it
+
+**The amount is the law's reading of the file, and the intensity curve was taking a sixth of it — the
+last repair stage still doing that.** The de-esser's dose is `0.85 · sibNeed · headroom`; `sibNeed` is
+the measured departure of the file's loudest frames from the file's own balance, and it is zero when no
+departure was measured, so the curve was scaling a number that has nothing to do with taste. (The
+de-hisser's amount stopped being scaled for exactly this reason one round ago; the de-clicker's and the
+de-clipper's are repair *depths* and stay on the curve, measured — see *Measured — the two repair stages
+that stay on the taste curve* below.) What the wrong scaling left behind was visible in the app's *own*
+export: on acceptance §10's burst fixture the chain was spending 0.706 where the law had handed out
+0.850, and the 320 kbit/s export came back diagnosed `sibilance`, asking **0.614** of dose for itself
+against 0.706 on the input — the demand had fallen by a sixth for a repair that had moved the bursts
+2.6 dB.
+
+Measured with the curve removed (probe `tools/work/sib11.js`, reproduced on the shipped source by
+`tools/work/sib12.js`):
+
+* the bursts lose the band: the acceptance row that owns this fixture (7.8 kHz over the twelve burst
+  windows) moves **5.9 → 6.9 dB**, and the probe's paired 7 kHz frame meter over the file's loudest
+  frames **2.61 → 3.06 dB**;
+* the scan the dose is computed from — the same quantity the card names the defect with — falls
+  5.46 → **2.43 dB**, more than half of the departure inside one pass (the curved dose left 3.26);
+* the app's own 320 kbit/s export reads **healthy** and asks **0.226** of dose where the card starts
+  naming `sibilance` at 0.255; the chain's own output asks **0.260**, and the row prints that too;
+* the file that needs it more gets it too: the audit's continuous "s" (excess 5.79 dB) reads **0.558**
+  of dose (0.463 curved) and the acceptance row that carries it — 7 kHz in the frames where the input
+  is loudest — moves **5.0 dB** where the paired meter read 4.4 at the curved dose;
+* nothing new is named and nothing clean is ducked: `sibNeed` is zero without a departure, and every
+  null fixture — clean beds, the phrased organ, the cymbal wash, hi-hats at 3/s — still measures a dose
+  of **exactly 0** (audit 316 green, dsp 146 → **150** with this round's four pins).
+
+Two meters in the matrix were reading their own subject wrong, and this round fixed both because the
+rows above run through them: the counter-case row sorted *each* file's own frames and took its loudest
+20 % — a different population inside the de-essed file, so it read **2.8 → 2.9 dB** for a move the
+paired meter puts at **4.4 → 5.0 dB** — and the export-honesty comparison treated the literal token
+`healthy` as a defect, so the first fixture whose export came back clean read *the encode itself adds
+healthy* (and a *repaired defect* could be reported as "back" as `healthy`). The frames are chosen on
+the input and both columns are read on them; the token is filtered out of both comparisons.
+
+What is *not* claimed: the chain's own output still asks **0.260** on this fixture — 2 % over the naming
+line, at a scan of 2.43 dB against the 0.7–1.0 dB a clean recording reads — and a file whose bursts are
+closer together than the stage's 140 ms hold is not repaired in its own terms at all: at 4/s the scan
+reads 6.39 → **6.17** at the full 0.850 dose, because a duck that covers the whole file moves the median
+balance as much as the peak balance and the scan is the *difference* (probe `tools/work/sib14.js`). Two
+levers were measured and **not** shipped, both recorded where they were measured: a shorter hold does
+not help (30 ms reads 6.25 and the delivered band move shrinks with it, `sib15.js`), and holding the
+stage's own reference while a burst window is open — so it learns the body instead of the burst, which
+is what its ~2 s mean is currently lifted by — takes the exported dose 0.260 → **0.055** and the scan to
+2.41, at the price of nearly doubling the de-esser's move on a continuous "s" (loudest 20 % of frames
+−5.25 → **−6.43 dB**, a file whose every frame is a burst).
+
 ### Fixed — the de-hisser asked for a cut it could not deliver
 
 **The repair was 26 % of its own request where the defect lives.** The stage splits the signal at the
@@ -384,7 +435,9 @@ repair, and a clean pop-free master with sibilant vocals would have been next.
   "As measured" would therefore be a no-op that lowers the evidence bar for weak runs, so it stays on
   the curve too, and the dsp suite now pins the invariance (0.05 / 0.72 / 0.90 / 1.0 within 0.05 dB).
 * Both verdicts are written into `presets.js` where `repairMeasured` is defined — the de-hisser is the
-  one repair whose amount is a depth *and* a measurement, and it is the only one moved. dsp 127 → 128,
+  one repair whose amount is a depth *and* a measurement, and it is the only one moved. (It was for one
+  round: the **de-esser**'s amount is `0.85 · sibNeed · headroom` — a measurement too — and it moved in
+  the round that follows; see the top of this block.) dsp 127 → 128,
   audit 309 → 310.
 
 ### Fixed — the key measured a *different* band than the analysis it follows

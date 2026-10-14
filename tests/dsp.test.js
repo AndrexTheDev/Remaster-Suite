@@ -204,6 +204,122 @@ H.section('engine · de-hiss, dosed by the measurement');
     off.p50.toFixed(1) + ' → ' + on.p50.toFixed(1) + ' dB');
 }
 
+H.section('engine · de-esser, the dose it is handed is the dose it spends');
+{
+  // The de-esser's amount is `0.85 · sibNeed · headroom` — the law's own reading
+  // of the file, and zero when the scan measured no departure — so like the
+  // de-hisser's it is a measurement, not a taste. It was the last stage still
+  // going through the intensity curve, which took 0.830 of it at the default,
+  // and what that left behind was visible in the app's *own* export: on this
+  // fixture the export came back diagnosed `sibilance` asking 0.614 of dose for
+  // itself against 0.706 on the input (probe tools/work/sib11.js). The four
+  // numbers below are the change's whole claim, and the last two are its
+  // counter-case — a file that needs the stage must still get a move out of it.
+  const SEC = 8;
+  let clean = H.filter(RSDSP, H.pink(SR, SEC, 0.40, 31), SR, 'lp', 9000, 0.60);
+  const env = H.songEnvelope(SR, SEC, 0.35);
+  for (let i = 0; i < clean.length; i++) clean[i] *= env[i];
+  clean = H.normalize(clean, 0.7);
+  const dirty = Float32Array.from(clean);
+  const Fb = Math.round(SR * 0.12);
+  const shaped = H.filter(RSDSP, H.noise(SR * 0.12, 1, 1, 77), SR, 'hp', 5200, 0.707);
+  for (let burst = 0; burst < 12; burst++) {
+    const at = Math.round(SR * (0.35 + burst * 0.6));
+    for (let i = 0; i < Fb; i++) {
+      const j = at + i;
+      if (j >= dirty.length) break;
+      const A = Math.round(SR * 0.025);
+      const att = i < A ? 0.5 - 0.5 * Math.cos(Math.PI * i / A) : 1;
+      dirty[j] += 0.55 * att * Math.exp(-i / (Fb * 0.5)) * shaped[i] * (1 + 0.4 * Math.sin(i * 0.7));
+    }
+  }
+  const sig = H.normalize(dirty, 0.72);
+  const met = RSDSP.measure([sig], SR);
+  const law = Object.assign({}, H.DEFAULT_PARAMS, RP.buildParams('auto', met, 0.7));
+
+  // 1 ── the curve: the same fixture at three intensities gets one dose
+  const at = (p) => Object.assign({}, H.DEFAULT_PARAMS, RP.buildParams('auto', met, p));
+  const doses = [0.35, 0.7, 0.95].map((p) => at(p).deess);
+  H.ok(met.sibPeakDb > 4.5 && Math.max(...doses) - Math.min(...doses) < 0.01 && doses[0] > 0.7,
+    'the de-esser\'s dose is the measurement, not the intensity curve',
+    'scan ' + met.sibPeakDb.toFixed(2) + ' dB · dose ' + doses.map((v) => v.toFixed(3)).join(' / ')
+    + ' at p = 0.35 / 0.7 / 0.95 (the curve took 0.830 of it before)');
+
+  // 2 ── the sound: the "s" bursts' own band comes down
+  const burstBand = (x, lat) => {
+    const b = new RSDSP.Biquad(); b.setBandpass(SR, 7800, 1.2);
+    const y = new Float32Array(x.length);
+    for (let i = 0; i < x.length; i++) y[i] = b.process(x[i]);
+    let e = 0, n = 0;
+    for (let burst = 0; burst < 12; burst++) {
+      const from = Math.round(SR * (0.35 + burst * 0.6)) + Math.round(SR * 0.03);
+      for (let i = 0; i < SR * 0.06; i++) { const j = from + i + (lat || 0); if (j < y.length) { e += y[j] * y[j]; n++; } }
+    }
+    return 10 * Math.log10(e / Math.max(1, n) + 1e-20);
+  };
+  const r = H.renderEx(Processor, [sig], law);
+  const dry = burstBand(sig, 0), wet = burstBand(r.out[0], r.lat);
+  H.ok(dry - wet > 3, 'the bursts lose the band the defect lives in',
+    dry.toFixed(1) + ' → ' + wet.toFixed(1) + ' dBFS in 7.8 kHz over the 12 bursts');
+
+  // 3 ── and the indicator moves with it: the scan the dose is computed from,
+  //      and the dose the *next* upload of this output would ask for
+  const out = RSDSP.measure(r.out, SR);
+  const ask = RP.buildParams('auto', out, 0.7).deess;
+  H.ok(met.sibPeakDb - out.sibPeakDb > 2.5 && ask < 0.3,
+    'the scan falls with the repair, and the repair is finished by its own measure',
+    'scan ' + met.sibPeakDb.toFixed(2) + ' → ' + out.sibPeakDb.toFixed(2) + ' dB (card '
+    + (RP.diagnose(out).issues.join(',') || 'healthy') + ') · the next upload asks ' + ask.toFixed(3)
+    + ' against 0.255 where the card names it');
+
+  // 4 ── the counter-case: a file whose "s" never stops still gets its move
+  let base = H.normalize(H.filter(RSDSP, H.pink(SR, SEC, 0.3, 71), SR, 'lp', 4000, 0.707), 0.4);
+  let z = H.normalize(H.filter(RSDSP, H.filter(RSDSP, H.noise(SR, SEC, 1, 75), SR, 'hp', 5200, 0.707), SR, 'lp', 9000, 0.707), 0.4);
+  const env2 = H.songEnvelope(SR, SEC, 0.25);
+  const unending = Float32Array.from(base);
+  for (let i = 0; i < unending.length; i++) unending[i] += z[i] * env2[i];
+  const sus = H.normalize(unending, 0.8);
+  const sm = RSDSP.measure([sus], SR);
+  const sLaw = Object.assign({}, H.DEFAULT_PARAMS, RP.buildParams('auto', sm, 0.7));
+  /* the dose the intensity curve spent on this file *is* in the record: the
+   * acceptance matrix's §10 row printed 0.463 for it before this round, against
+   * the 0.558 the law asks — the same 0.830 fraction. Paired here, so the claim
+   * is "further than the curve took it", measured on one meter. */
+  const curved = Object.assign({}, sLaw, { deess: 0.463 });
+  const inS = H.renderEx(Processor, [sus], Object.assign({}, sLaw, { deess: 0 }));
+  const onS = H.renderEx(Processor, [sus], sLaw);
+  const onC = H.renderEx(Processor, [sus], curved);
+  /* The frames are chosen on the input and then read on both renders: a de-essed
+   * file's own "loudest 20 %" is a different population (the duck flattens the
+   * distribution), and a meter that re-sorts each file under-reads the move it
+   * is meant to show. */
+  const loud20 = (chans, lat, ref, refLat) => {
+    const run1 = (x, l) => {
+      const b = new RSDSP.Biquad(); b.setBandpass(SR, 7000, 0.9);
+      const out = [];
+      for (let k = 0; k * 480 < x.length; k++) {
+        let e = 0;
+        for (let i = 0; i < 480; i++) { const v = b.process(x[k * 480 + i]); e += v * v; }
+        out.push(e / 480);
+      }
+      return out;
+    };
+    const a = run1(ref, refLat), b2 = run1(chans[0].subarray(lat || 0), 0);
+    const sorted = a.slice().sort((x, y) => y - x);
+    const cut = sorted[Math.max(0, Math.floor(sorted.length * 0.2) - 1)];
+    let sum = 0, take = 0;
+    for (let i = 0; i < Math.min(a.length, b2.length); i++) if (a[i] >= cut) { sum += b2[i]; take++; }
+    return 10 * Math.log10(sum / Math.max(1, take) + 1e-20);
+  };
+  const zero = loud20([sus], 0, sus, 0);
+  const moved = zero - loud20(onS.out, onS.lat, sus, 0);
+  const before = zero - loud20(onC.out, onC.lat, sus, 0);
+  H.ok(sm.sibExcessDb > 3 && sLaw.deess > 0.4 && moved > before + 0.4,
+    'a continuous "s" (the file that needs it) is moved further than the curve moved it',
+    'excess ' + sm.sibExcessDb.toFixed(2) + ' dB · dose 0.463 → ' + sLaw.deess.toFixed(3)
+    + ' · 7 kHz of the loudest 20 % ' + before.toFixed(1) + ' → ' + moved.toFixed(1) + ' dB down');
+}
+
 H.section('engine · de-hiss, the floor regime delivers what was measured');
 {
   // The split cannot deliver the amount it asks for, and the reason is

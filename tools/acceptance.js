@@ -255,7 +255,8 @@ mark('section 2');
  *     is now applied as measured instead of being scaled by the intensity curve
  *     (0.35 + 0.65·p^0.85 = 0.830 at the default p = 0.7, which turned the law's
  *     0.920 into 0.764). Together, on this fixture: the frames the noise owns went
- *     **5.8 → 10.3 dB** of band, the step this card prints **18.35 → 5.82 dB**, and
+ *     **5.8 → 10.3 dB** of band and the step this card printed **5.82 dB** — the shelf below then
+ *     takes the same two numbers to **12.1 dB** and **0.00 dB** — and
  *     the frames the music owns moved 0.02 → 1.12 dB (they are quiet frames where
  *     the noise still contributes a dB or so — the calibrated answer, not a
  *     mistake). Both clean-bed fixtures still measure a dose of exactly 0.
@@ -328,8 +329,9 @@ mark('section 2');
   const rm = RSDSP.measure([re], SR);
   row('hiss', 're-upload at 320 kbit/s → diagnosis', r.dry.issues.join(','), RP.diagnose(rm).issues.join(',') || 'healthy',
     'step ' + N(rm.hissTiltStepDb, 2) + ' dB · amount ' + N(rm.hissAmount) + ' · card ' + RP.classify(rm).id
-    + ' — the tilt no longer explains the verdict on the export: ' + witnesses(rm)
-    + ', and the floor the level term reads is what is left of an 18 dB hiss');
+    + ' — the tilt is *not* what names the export any more (0.00): ' + witnesses(rm)
+    + '. What is left is the deficit: the export\'s top end still stands ' + N(rm.hissDeficitDb, 2)
+    + ' dB above where the music predicts it, which matches the 4–6 dB of floor the deepest pauses still carry over the clean copy (probe hiss24) — an honest bound, not a missed repair');
 }
 mark('section 3');
 /* 3 ── mains hum ─────────────────────────────────────────────────────────── */
@@ -641,13 +643,40 @@ mark('section 10');
    * pays for the mistake. */
   row('sibilance', 'analyser crackleIndex — sibilance is not clicks', r.m.crackleIndex, r.mo.crackleIndex,
     'before the duty gate acceptance v2aj named "crackle" on this fixture and the chain spent 0.512 of de-click dose on it · dose now ' + N(r.P.declick) + ', the floor the profile uses for material with no clicks (0.078)');
+  /* ── the dose the stage was handed, and the dose it spent ─────────────────
+   * The stage's amount is `0.85 · sibNeed · headroom` — the law's own reading of
+   * the file, zero unless a departure was measured — and it was the last one
+   * still going through the intensity curve, which took **0.830** of it at the
+   * default. The row that showed a repair was unfinished was this section's own
+   * re-upload: the app's export came back diagnosed `sibilance` with **0.614**
+   * of dose asked for it against 0.706 on the input, i.e. the demand had fallen
+   * by a sixth for a repair that had moved the bursts 2.6 dB. Measured with the
+   * curve removed (probe `tools/work/sib11.js`), the same chain takes the 7 kHz
+   * band of the loudest frames down **3.06 dB** instead of 2.61, the scan the
+   * dose is computed from falls 5.46 → **2.61 dB** instead of 3.26, and the
+   * export reads `healthy` at **0.226** — under the 0.255 where the card starts
+   * naming it. The same argument the de-hisser's amount got, applied to the
+   * stage that was still missing it.
+   *
+   * What is *not* claimed: the chain's own output still asks **0.260** on this
+   * fixture — 2 % over the naming line, at a scan of 2.43 dB against the
+   * 0.7–1.0 dB a clean recording reads — and a file whose bursts are closer
+   * together than the stage's 140 ms hold is not repaired in its own terms at
+   * all: at 4/s the scan reads 6.39 → **6.17** at the full 0.850 dose, because a
+   * duck that covers the whole file moves the file's median balance as much as
+   * its peak balance, and the scan is the *difference* (probe `sib14.js`; a
+   * shorter hold does not help — 30 ms reads 6.25, and the delivered band move
+   * shrinks with it, probe `sib15.js`). That is the next round's problem, stated
+   * where it was measured. */
   row('sibilance', 'level inside the “s” bursts (dBFS)', burstBand(norm), burstBand(r.out[0], r.lat), 'a third of every burst, 33–100 ms in');
   row('sibilance', '7 kHz p95/p30 across the file (dB)', p95p30(norm), p95p30(r.out[0], r.lat),
     'sibExcess ' + N(r.m.sibExcessDb, 1) + ' → ' + N(r.mo.sibExcessDb, 1) + ' · deess ' + N(r.P.deess) + ' · ' + r.dry.issues.join(','));
   const re = U.enc(r.out, 320, U.WORK + '/accept-sibilance-320.mp3')[0];
   const rm = RSDSP.measure([re], SR);
   row('sibilance', 're-upload at 320 kbit/s → diagnosis', r.dry.issues.join(','), RP.diagnose(rm).issues.join(',') || 'healthy',
-    'card ' + r.cls.id + ' → ' + RP.classify(rm).id + ' · deess on the export ' + N(RP.buildParams('auto', rm, 0.7).deess));
+    'card ' + r.cls.id + ' → ' + RP.classify(rm).id + ' · the scan the dose is computed from ' + N(r.m.sibPeakDb)
+    + ' → ' + N(r.mo.sibPeakDb) + ' dB on the chain\'s own output, which asks ' + N(RP.buildParams('auto', r.mo, 0.7).deess, 3)
+    + ' (the card names `sibilance` from 0.255 up) — the export asks ' + N(RP.buildParams('auto', rm, 0.7).deess, 3) + ' and reads healthy');
   /* ── the other kind of sibilant, and why the guard above cannot just be a
    * stronger burst test ───────────────────────────────────────────────────────
    * The fixture above is *bursts*: a singer's "s" comes and goes, which is what
@@ -661,7 +690,8 @@ mark('section 10');
    * 12 kHz) like a vocal, where §20's wash and organ are broadband or fall away
    * between phrases. The two rows are the counter-case to §20's two "not
    * sibilance" rows, and the second is measured by an independent meter: the
-   * file's own 7 kHz band in the loudest 20 % of its frames. */
+   * file's own 7 kHz band in the frames where the *input* is loudest — one frame
+   * set, both columns read on it. */
   const unending = (() => {
     const base = H.normalize(H.filter(RSDSP, H.pink(SR, SEC, 0.3, 71), SR, 'lp', 4000, 0.707), 0.4);
     let z = H.filter(RSDSP, H.filter(RSDSP, H.noise(SR, SEC, 1, 75), SR, 'hp', 5200, 0.707), SR, 'lp', 9000, 0.707);
@@ -672,25 +702,33 @@ mark('section 10');
     return H.normalize(out, 0.8);
   })();
   const ru = run([unending]);
-  const loud20 = (sig) => {
+  /* …and the *frames* are chosen on the input, not separately on each file:
+   * sorting a de-essed file's own frames picks a different population out of it
+   * (the duck flattens the distribution, so its "loudest 20 %" reaches down into
+   * frames the input never had there) and the row then under-reads the very move
+   * it exists to show — 2.8 → 2.9 dB where the paired meter reads 4.4 → 5.1 dB
+   * on the same two renders (probe tools/work/sib11.js). */
+  const loud20 = (sig, ref) => {
     const b = filt(sig, [bq('BP', 7000, 0.9)]);
-    const F = Math.round(SR * 0.01), lv = [];
-    for (let k = 0; k + F < b.length; k += F) {
-      let e = 0;
-      for (let i = 0; i < F; i++) e += b[k + i] * b[k + i];
-      lv.push(10 * Math.log10(e / F + 1e-20));
+    const r = filt(ref, [bq('BP', 7000, 0.9)]);
+    const F = Math.round(SR * 0.01), lv = [], rv = [];
+    const n = Math.min(b.length, r.length);
+    for (let k = 0; k + F < n; k += F) {
+      let e = 0, re = 0;
+      for (let i = 0; i < F; i++) { e += b[k + i] * b[k + i]; re += r[k + i] * r[k + i]; }
+      lv.push(e / F); rv.push(re / F);
     }
-    lv.sort((a, b2) => b2 - a);
-    const take = Math.max(1, Math.round(lv.length * 0.2));
-    let sum = 0;
-    for (let i = 0; i < take; i++) sum += Math.pow(10, lv[i] / 10);
-    return 10 * Math.log10(sum / take);
+    const sorted = rv.slice().sort((a, b2) => b2 - a);
+    const cut = sorted[Math.max(0, Math.floor(sorted.length * 0.2) - 1)];
+    let sum = 0, take = 0;
+    for (let i = 0; i < lv.length; i++) if (rv[i] >= cut) { sum += lv[i]; take++; }
+    return 10 * Math.log10(sum / Math.max(1, take) + 1e-20);
   };
   row('sibilance', 'a continuous “s”: scan ungated vs with the shape test (dB)', N(ru.m.sibRawDb, 2), N(ru.m.sibPeakDb, 2),
     'its median 7 kHz/2.6 kHz balance is already +2.34 dB (a singer who never stops) and the audit suite pins this file twice (deess ' + N(ru.P.deess, 3)
     + ' > 0.4, sibSustained === 1) · the two files §20 reports as *not* sibilance are the ones this path must not take: their top end is not band-limited (the wash) or their headroom moves with the phrases (the organ)');
   row('sibilance', 'a continuous “s” through the chain: 7 kHz of the loudest 20 % of frames (dBFS)',
-    N(loud20(unending), 1), N(loud20(ru.out[0].subarray(ru.lat)), 1),
+    N(loud20(unending, unending), 1), N(loud20(ru.out[0].subarray(ru.lat), unending), 1),
     'the de-esser at dose ' + N(ru.P.deess, 3) + ' on the file that needs it — and the same chain never ducks the band on §20\'s wash and organ (tests/dsp.test.js measures both directions through the engine)');
 }
 
@@ -1090,8 +1128,14 @@ mark('section 19');
  * It covers every class *by construction*: the entry is recorded in `run()`, so
  * a class that forgets its own export row still shows up here. */
 for (const e of EXPORTS) {
-  const back = e.dry.filter((x) => e.exp.includes(x) && !e.wet.includes(x));
-  const codec = e.exp.filter((x) => !e.dry.includes(x) && !e.wet.includes(x));
+  /* `healthy` is a *token in the list*, not an absence of one (`diagnose`
+   * pushes it when nothing else fired), so it has to be filtered out of both
+   * comparisons — without this the first fixture whose export comes back
+   * perfectly healthy reads "the encode itself adds healthy", and a repaired
+   * defect could be "back" as `healthy`. */
+  const names = (a) => a.filter((x) => x !== 'healthy');
+  const back = names(e.dry).filter((x) => names(e.exp).includes(x) && !names(e.wet).includes(x));
+  const codec = names(e.exp).filter((x) => !names(e.dry).includes(x) && !names(e.wet).includes(x));
   row('export honesty', e.cls + ': input → re-upload at 320 kbit/s',
     e.dry.join(',') || 'healthy', e.exp.join(',') || 'healthy',
     (back.length ? '**a repaired defect is back on the export: ' + back.join(',') + '**' : 'no repaired defect returns')
