@@ -329,11 +329,30 @@
     //    encoded a low-bitrate file — including this app's own 320 kbit/s
     //    export, which was the complaint that started the round — while a wall
     //    at 7.5 kHz (below the old cliff search's floor) was invisible.
+    // …and both branches ask for the *size* of what they found, not just its
+    // location. Measured, that distinction is the whole difference between the
+    // app naming its own export and staying quiet about it:
+    //
+    //   · branch 1 — the cliff the search reports must be a cliff. The search
+    //     returns the window with the largest drop anywhere in 4–19.5 kHz, and a
+    //     smooth −12 dB/octave programme still has a largest window (measured: a
+    //     bright pink bed 6.1 kHz @ 2.4 dB, a cassette sim 5.1 kHz @ 2.6, a
+    //     vinyl sim 15.1 kHz @ 4.6). `brickwall` is that drop measured on the
+    //     same definition a codec wall is measured with (9 dB); requiring it
+    //     keeps every measured codec (its cliffDb is 42–74 dB) and drops the
+    //     slope-only cases;
+    //   · branch 2 — a bandwidth ceiling is a codec's only when the spectrum
+    //     *falls off a cliff at it*: measured, the fall over the 1.6 kHz above
+    //     the ceiling is 39–55 dB for a real encoder wall (96 kbit/s: 52.2,
+    //     128: 39.4) against 10–20 dB for a medium's slope and 24.6 dB for the
+    //     app's own 320 export after its de-hisser took the hiss out of the top
+    //     octave. The threshold sits at 32 dB, inside that gap.
+    const brickwall = clamp(m.brickwall || 0, 0, 1);
     const cliff = m.cliffHz || 0;
-    if (cliff > 0 && cliff < 17000) return true;
+    if (cliff > 0 && cliff < 17000 && brickwall > 0) return true;
     const cut = m.hfCutoff || 0;
     const dull = clamp(Math.max(m.dullIndex || 0, m.topLoss || 0), 0, 1);
-    return cut > 0 && cut < 17000 && dull < 0.6;
+    return cut > 0 && cut < 17000 && dull < 0.6 && (m.cutDropDb || 0) >= 32;
   }
 
   function classify(m) {

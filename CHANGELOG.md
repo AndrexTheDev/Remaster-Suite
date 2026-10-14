@@ -13,6 +13,28 @@ thresholds sat in the tone stages (the glue's and the warmth's), all of them wri
 full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
 else may move.
 
+### Fixed — the app called its own export a codec problem
+
+* **`codecLoss` asked only *where* a file's top end ends, never how steeply.** The card's
+  "chopped-off highs (codec)" is driven by a measured ceiling below 17 kHz plus a dullness guard, and
+  the app's own 320 kbit/s export satisfied both — because the *de-hisser had just done its job*: on
+  a worn record the top octave is largely hiss, and taking the hiss down lowers the measured ceiling
+  (`hfCutoff` 15 381 → 13 898 Hz) without touching the encoder's wall at 18.9 kHz. Measured across
+  the population, the fall over the 1.6 kHz *above* the ceiling separates the two kinds of ceiling
+  cleanly — a real bitrate wall loses **39–55 dB** there (96 kbit/s: 52.2, 128: 39.4, 64: 53.9, 32:
+  53.0, 24: 55.1) against **10–20 dB** for a medium's own slope (the worn record 15.3, its 128 kbit/s
+  upload 16.9, a vinyl sim 11.2, a cassette sim 10.4) and 24.6 dB for the de-hissed export. Both of
+  `codecLoss`'s branches now ask for the size as well as the location: the cliff branch requires the
+  cliff to *be* a cliff (`brickwall` > 0 on the same 9 dB definition a codec wall is measured with),
+  and the ceiling branch requires the fall at the ceiling to be ≥ 32 dB. Result, end to end: the
+  app's own 320 export is diagnosed **"hiss"** instead of "hiss, codec"; the worn upload reads
+  crackle, hiss, hum (the wall at 19 kHz removed nothing audible — the medium ends first); the
+  acceptance suite's own codec fixtures converge — the 64 kbit/s round trip now re-uploads to
+  **healthy** (was "codec") and the 32 kbit/s one to **"dullTop"** (was "dullTop, codec"), so the app
+  no longer tells the user to fix the wall it just fixed; and every real wall (24–64 kbit/s, the
+  low-bitrate sims) keeps its name. The new audit section 'a ceiling is not a bitrate' builds both
+  ceilings within a kilohertz of each other so the rows measure steepness and nothing else.
+
 ### Measured — what the de-clicker does when nothing is wrong
 
 * **"The stage touches N % of the file" is a meaningless sentence without its threshold and its

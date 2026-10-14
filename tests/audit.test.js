@@ -1587,6 +1587,64 @@ section('audit · a room, not a note');
   const mo = DSP.measure(r.out, SR);
   ok((mo.resoExcessDb || 0) < 1, 'the analyser agrees the resonance is gone', 'resoExcess ' + num(mo.resoExcessDb) + ' dB');
 }
+/* An honest verdict about a top end: a *ceiling* is not a *wall*.
+ *
+ * `codecLoss` decides whether the card may say "chopped-off highs (codec)", and
+ * it used to ask only *where* the file's top end ends (`hfCutoff` below 17 kHz)
+ * and whether the file is dull (dullIndex/topLoss below 0.6). Measured, both
+ * halves can be true of a file no codec ever touched — and they were true of the
+ * app's *own* 320 kbit/s export, because the de-hisser had just taken down a hiss
+ * that was carrying the top octave:
+ *
+ *   the worn record, pre-encode      hfCutoff 15381 · fall at the ceiling 15.3 dB · card: (codec)
+ *   the same, its 128 kbit/s upload  hfCutoff 15545 · fall 16.9 dB
+ *   the chain's own 320 export       hfCutoff 13898 · fall 24.6 dB · card said "hiss, codec"
+ *   a real 96 kbit/s encode          hfCutoff 19998 · fall 52.2 dB
+ *   a real 128 kbit/s encode         hfCutoff 14982 · fall 39.4 dB
+ *   a real 64/32/24 kbit/s encode    fall 53.9 / 53.0 / 55.1 dB · all named "codec"
+ *
+ * The fall over the 1.6 kHz above the ceiling therefore separates the two
+ * populations — 39–55 dB for a bitrate against 10–25 dB for a medium's slope —
+ * and both of `codecLoss`'s branches now ask for the *size* of what they found,
+ * not only its location. The pair below is built so that the two ceilings land
+ * within a kilohertz of each other, so the rows measure the steepness and
+ * nothing else; the 24.6 dB export is in the header because measuring it needs
+ * an encoder (see tools/workflow-check.js, whose card now reads "hiss").
+ */
+section('audit · a ceiling is not a bitrate');
+{
+  const SR = 48000, SEC = 12;
+  const num = (v, d) => (typeof v === 'number' && isFinite(v) ? v.toFixed(d === undefined ? 1 : d) : String(v));
+  const lp = (x, f, q) => { const w = 2 * Math.PI * f / SR, c = Math.cos(w), sn = Math.sin(w), al = sn / (2 * (q || 0.707)), n = 1 + al;
+    return DSP.applyBiquad(x, [(1 - c) / 2 / n, (1 - c) / n, (1 - c) / 2 / n, -2 * c / n, (1 - al) / n]); };
+  const hp = (x, f, q) => { const w = 2 * Math.PI * f / SR, c = Math.cos(w), sn = Math.sin(w), al = sn / (2 * (q || 0.707)), n = 1 + al;
+    return DSP.applyBiquad(x, [(1 + c) / 2 / n, -(1 + c) / n, (1 + c) / 2 / n, -2 * c / n, (1 - al) / n]); };
+  const env = H.songEnvelope(SR, SEC, 0.30);
+  let bed = lp(H.pink(SR, SEC, 0.40, 31), 9000, 0.55);
+  for (let i = 0; i < bed.length; i++) bed[i] *= env[i];
+  bed = H.normalize(bed, 0.62);
+  /* a worn record's top octave is hiss, and that is what a ceiling is measured
+   * against — so the fixture has to have it */
+  const hissy = H.mix([bed, H.mul(hp(H.noise(SR, SEC, 1, 21), 3000, 0.6), 0.014)]);
+  const medium = H.normalize(lp(hissy, 14000, 0.7), 0.70);            // the medium's own slope
+  const wall = H.normalize(lp(lp(lp(lp(hissy, 15500), 15500), 15500), 15500), 0.70);   // a bitrate's wall
+  const look = (sig) => {
+    const m = DSP.measure([sig], SR);
+    return { m, cards: Presets.diagnose(m).issues, cut: m.hfCutoff || 0, drop: m.cutDropDb || 0 };
+  };
+  const med = look(medium), wal = look(wall);
+  ok(med.cut > 0 && wal.cut > 0 && Math.abs(med.cut - wal.cut) < 1500,
+    'a medium\'s ceiling and a bitrate\'s wall can sit at the same frequency',
+    'the medium ends at ' + num(med.cut, 0) + ' Hz, the wall at ' + num(wal.cut, 0) + ' Hz');
+  ok(med.drop < 30 && wal.drop > 45, '…and what tells them apart is how steeply they fall',
+    'over the 1.6 kHz above the ceiling: the medium loses ' + num(med.drop) + ' dB, the wall ' + num(wal.drop) + ' dB');
+  ok(!med.cards.includes('codec'), 'the medium\'s ceiling is not named a codec', 'the card says "' + (med.cards.join(', ') || 'nothing') + '"');
+  ok(wal.cards.includes('codec'), 'while the wall is', 'the card says "' + wal.cards.join(', ') + '"');
+  ok((med.m.brickwall || 0) === 0 && (wal.m.brickwall || 0) > 0,
+    'and the cliff detector agrees about which one is a cliff',
+    'brickwall ' + num(med.m.brickwall, 2) + ' vs ' + num(wal.m.brickwall, 2));
+}
+
 section('audit · codecs');
 {
   const SR = 48000;

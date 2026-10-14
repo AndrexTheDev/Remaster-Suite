@@ -249,6 +249,36 @@
   }
 
   /**
+   * How far the spectrum falls in the 1.6 kHz *above* a measured ceiling.
+   *
+   * `hfCutoff` says *where* a file's top end ends; on its own that is a
+   * location, and a location is not a defect. Measured on the app's own
+   * material: the ceiling of a worn record sits at 13.8–16.8 kHz with 10–20 dB
+   * of fall above it (a medium's slope into its own noise floor), a real
+   * encoder wall sits at 6–16.5 kHz with **39–55 dB** of fall (the encoder
+   * removes everything above it), and the app's own 320 kbit/s export — whose
+   * de-hisser took down a hiss that had been carrying the top octave — lands at
+   * 13.9 kHz with **24.6 dB**, i.e. between the two. That number is what
+   * separates "the medium ends here" from "a bitrate removed this", and it is
+   * what `codecLoss` in presets.js reads before it calls a ceiling a codec.
+   *
+   * @param {object} spec spectrum from `spectrum()`
+   * @param {number} cutHz the measured ceiling (0 = none)
+   * @returns {number} drop in dB over the next 1.6 kHz (0 when there is no ceiling)
+   */
+  function cutDropDb(spec, cutHz) {
+    if (!(cutHz > 0)) return 0;
+    const sm = smoothSpec(spec, 3);
+    const df = spec.freq[1] - spec.freq[0];
+    const pick = (f) => {
+      let v = -200;
+      for (let k = 0; k < spec.n; k++) if (Math.abs(spec.freq[k] - f) < df * 0.6) v = Math.max(v, sm[k]);
+      return v;
+    };
+    return pick(cutHz) - pick(Math.min(cutHz * 1.6, 19900));
+  }
+
+  /**
    * Spectral slope in dB/octave measured between two reference bands.
    */
   function slopeDbPerOct(spec, lowF, highF) {
@@ -2094,6 +2124,7 @@
         resoExcessDb: resonances.length ? resonances[0].excessDb : 0,
         hfRagged: raggedHi,
         hfCutoff: cut,
+        cutDropDb: cutDropDb(spec, cut),          // how steeply the top end falls at that ceiling
         correlation: cor.value(),
         // ── per-song detail (everything below is measured on *this* file) ──
         ispDb: isp.value(),                       // estimated true peak
