@@ -628,6 +628,32 @@
     const infraDb = clamp(m.infraExcessDb || 0, 0, 26);
     const infraNeed = smoothstep(4.5, 11, infraDb) * smoothstep(0.12, 0.45, conf)
       * (1 - 0.5 * clamp(m.humScore || 0, 0, 1));
+    /* What this cannot do, measured, because the guard is a cascade of four
+     * 2-pole high passes at its corner and it *costs* something: a sustained
+     * music note in the bottom end. On one bed with a rumble ladder and a
+     * club-style 35 Hz note (all measured through the chain, bands from the
+     * app's own statistic unless said otherwise):
+     *
+     *   rumble at 0 dB rel.   8-20 Hz 54.9 → 26.1 · 20-35 54.8 → 45.8 · music 30-45 -3.2 dB
+     *   a sustained 35 Hz note (no rumble): the statistic reads 10.8 dB of
+     *   "excess" — above the knee — and the guard costs the note 3.7 dB.
+     *
+     * Three candidate witnesses that would tell the two apart were measured and
+     * each fails, so do not re-derive them:
+     *   · level — the quiet passage's 20-45 Hz against the level the music
+     *     reaches (loud 90-203): monotone in rumble level, and the 35 Hz note
+     *     reads -10.2 where a full-scale rumble reads -21.6. The note is
+     *     *louder* than the rumble;
+     *   · stationarity — loud frames against quiet frames: note 6.8 vs 10.8,
+     *     rumble 10.1 vs 16.3. Both negative, 3 dB apart;
+     *   · tonality — the peakiness of the quiet frames' 20-45 Hz band over six
+     *     narrow probes: a full-scale rumble 5.3 dB, the note 7.1 dB. 1.8 dB.
+     * A sustained sub-bass note and a turntable floor are the same thing to
+     * every measurement the app owns. The guard is right to engage, and its
+     * cost is the price of the repair on a file that has a bottom end at all —
+     * which is why the arm threshold stays where the clean population says it
+     * separates (measured: the club note reads 10.8 dB of "excess" and a pink
+     * bed 1.6), rather than being raised until no music can ever trip it. */
 
     // An out-of-phase bottom: the channels are correlated in the mids but
     // *cancel* below 200 Hz. Only stereo material can have it, and only when

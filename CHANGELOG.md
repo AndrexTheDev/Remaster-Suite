@@ -13,6 +13,20 @@ thresholds sat in the tone stages (the glue's and the warmth's), all of them wri
 full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
 else may move.
 
+### Measured — what the sub-sonic guard cannot do
+
+* **A sustained music note in the bottom end and a turntable floor are the same thing to every
+  measurement the app owns**, and that is now measured rather than assumed. The guard is four 2-pole
+  high passes at its corner; on one bed with a rumble ladder and a club-style 35 Hz note it takes a
+  full-scale rumble's 8–20 Hz band down 28.8 dB and its 20–35 Hz band 9.0 dB for 3.2 dB of the
+  music's 30–45 Hz — and it costs a *sustained 35 Hz note* 3.7 dB, because the note reads 10.8 dB of
+  "excess" (above the knee that a pink bed clears at 1.6). Three candidate witnesses that would tell
+  a drone from a rumble were measured and each fails: **level** (the note reads −10.2 dB against the
+  level the music reaches, a full-scale rumble −21.6 — the note is *louder*), **stationarity** (loud
+  minus quiet: note −4.0 dB, rumble −6.2) and **tonality** (peakiness over six narrow probes: a
+  full-scale rumble 5.3 dB, the note 7.1 — 1.8 dB apart). The arm threshold therefore stays where the
+  clean population says it separates, and the cost stays recorded in the code rather than tuned away.
+
 ### Fixed — a clean master was read as a *cracked* one
 
 * **The crackle statistic's window selection was absolute, and on tonal material
