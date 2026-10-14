@@ -203,19 +203,24 @@ mark('section 2');
  * the repair moves it by 1 dB):
  *   · *where* the repair acts. The quiet mask is 53 of 400 frames, and in 48 of
  *     them the top end is the noise's own — measured, not asserted: the clean
- *     copy's ≥4 kHz sits below the hiss's. There the band comes down 5.8 dB; in
- *     the 5 quiet frames the music owns, and in the loud passages, it moves 0.02
+ *     copy's ≥4 kHz sits below the hiss's. There the band comes down 7.7 dB; in
+ *     the 5 quiet frames the music owns, and in the loud passages, it moves 0.13
  *     and 0.28 dB — those are the numbers that have to stay near zero;
  *   · *how much of the key's ask is applied*. In the noise-owned frames the tilt
- *     key reads 13.99 dB, the smoothed cut reaches 11.5 dB, and the amount that
- *     leaves the stage is 0.764 × that = 8.8 dB (energy-weighted 6.2, because
- *     the gate opens in 8 ms and closes over 250 ms). The 0.764 is the intensity
- *     curve — every repair is multiplied by 0.35 + 0.65·p^0.85, i.e. 0.830 at
- *     the default p = 0.7 — so the slider itself is worth +1.25 dB on those
- *     frames (measured: 5.85 → 7.10 dB of band at dose 1.0). What is *not*
- *     claimed here is that this is enough: a step of 10 dB is still a hiss, and
- *     the re-upload row says so instead of leaving the gate at 1.00 to imply
- *     nothing happened.
+ *     key reads 13.9 dB, the smoothed cut reaches 13.6 dB, and the amount that
+ *     leaves the stage is 0.764 × that ≈ 10.4 dB (energy-weighted 7.7, because
+ *     the gate still opens in 8 ms). The 0.764 is the intensity curve — every
+ *     repair is multiplied by 0.35 + 0.65·p^0.85, i.e. 0.830 at the default
+ *     p = 0.7 — so the slider itself is worth +1.6 dB on those frames (measured:
+ *     7.69 → 9.28 dB of band at dose 1.0, the tilt step 10.18 → 7.46). The
+ *     closing time is 60 ms as of this round and used to be 250: the *lag*, not
+ *     the ask, was halving the repair (the amount that reached the output went
+ *     6.06 → 7.94 dB of band when the close went 250 → 60 ms, with ≤0.2 dB on the
+ *     frames the noise does not own and no change at all in either pop witness —
+ *     see HISS_CLOSE_MS for the four-way measurement). What is *not* claimed
+ *     here is that this is enough: a step of 10 dB is still a hiss, and the
+ *     re-upload row says so instead of leaving the gate at 1.00 to imply nothing
+ *     happened.
  * ------------------------------------------------------------------------- */
 {
   const clean = bed(9000, 0.7);

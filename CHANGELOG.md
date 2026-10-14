@@ -13,6 +13,38 @@ thresholds sat in the tone stages (the glue's and the warmth's), all of them wri
 full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
 else may move.
 
+### Fixed — the de-hisser's gate was slower than the pops it was protecting against
+
+* **The 250 ms closing time was justified by a measurement of a chain that no longer exists.** The
+  constant's own comment said a fast key lets a pop slam the gate — "measured on a worn record with 108
+  injected pops, the chain left 38 HF frames above 15 dB of crest against 3 with the de-hisser off".
+  That was taken with the de-hisser *in front* of the de-clicker. The order has since been turned
+  around ("noise repair, most impulsive first"), a pop no longer reaches this key as a bare spike: the
+  level term vetoes the tilt term's spike anyway (a burst drives `e` above t1, so `lvl` → 1 and
+  `cutLevel` → 0, and the *smaller* of the two wins), and the de-clicker repairs what is left behind it.
+  Re-measured on the same fixture the old claim used — a vinyl simulation with 108 injected pops — the
+  pop witnesses are identical at 60 ms, at 250 ms and with the de-hisser switched off: the HF crest
+  witness is **101 frames on the upload and 1 after the chain**, and the independent pop meter (its own
+  RBJ 4 kHz band at the fixture's own pop positions) reads **−15.66 dB** over the clean copy.
+* **What the lag still cost was the repair itself** — measured on the hiss fixtures at the doses the law
+  asks for, in the band the repair owns:
+
+  | close | hiss-owned band | music-owned | loud |
+  |---|---|---|---|
+  | 250 ms (as it was) | 6.06 dB | −0.02 dB | −0.24 dB |
+  | 120 ms | 7.26 dB | +0.07 dB | −0.24 dB |
+  | **60 ms (as it is now)** | **7.94 dB** | **+0.18 dB** | **−0.23 dB** |
+  | 30 ms | 8.32 dB | +0.30 dB | −0.23 dB |
+
+  On the acceptance fixture the section's own rows move with it: the quiet passages' ≥4 kHz goes
+  −33.39 → **−38.20 dBFS** (was −37.24), **7.7 dB** inside the frames the noise owns (was 5.8), the tilt
+  step 18.35 → **10.18 dB** (was 11.16), the music-owned frames 0.13 dB (was 0.02). The slider is worth
+  +1.6 dB of band on the frames the noise owns (7.69 → 9.28 dB, tilt step 10.18 → 7.46), and the internal
+  arithmetic now closes: the key asks 13.9 dB and the smoothed cut reaches **13.6** (it reached 11.5) —
+  the lag, not the ask, was halving the repair. 30 ms buys another 0.4 dB for another 0.1 dB of music;
+  60 ms is the knee. The comment, the constant, the README's stage table, the engine test's note and the
+  acceptance section's header all carry these numbers instead of the retired argument.
+
 ### Fixed — the report printed a hiss gate that cannot move, and never re-uploaded the export
 
 * **`hissAmount` is a 0–1 gate, not a size — and it saturates at a step of 5.3 dB**

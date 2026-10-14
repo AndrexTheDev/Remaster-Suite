@@ -737,21 +737,40 @@ const HISS_DECIM = 8;
  * How fast the de-hisser's gate may *follow its own key*.
  *
  * Both are time constants on the correction (the dB the gate takes out), applied
- * at the decimated update rate. Closing — the gate deciding "this top end is
- * noise" — is deliberately slow: the key is a 2048-sample (43 ms) sliding RMS of
- * 4–16 kHz, and a vinyl pop is a broadband burst whose energy *dominates that
- * window* out of all proportion to its length (twenty samples at full scale
- * against 2048 of music at −34 dB: +14 dB of apparent tilt for 43 ms). A gate
- * that follows its key sample-by-sample therefore slams shut at every pop and
- * opens again when the pop leaves the window: measured on a worn record with 108
- * injected pops, the chain left 38 HF frames above 15 dB of crest against 3 with
- * the de-hisser off, because every pop came out as a 43 ms *hole* with broadband
- * edges instead of a repaired click. Slow closing costs nothing on the thing the
- * gate is for — hiss is stationary, and the 43 ms a real noise floor takes to be
- * recognised is inaudible — while opening has to stay fast, because opening is
- * what keeps a musical transient from being dulled.
+ * at the decimated update rate. Closing is slower than opening — but it used to
+ * be 250 ms on an argument about *pops*: the key is a 2048-sample (43 ms)
+ * sliding RMS of 4–16 kHz, and a pop is a broadband burst whose energy
+ * *dominates that window* out of all proportion to its length (twenty samples at
+ * full scale against 2048 of music at −34 dB: +14 dB of apparent tilt for 43 ms),
+ * so a gate that follows its key sample-by-sample slams shut at every pop and
+ * leaves a 43 ms hole: measured then, 38 HF frames above 15 dB of crest against 3
+ * with the de-hisser off.
+ *
+ * That measurement was taken with the de-hisser *in front* of the de-clicker.
+ * Since the order was turned around ("noise repair, most impulsive first" — see
+ * process()), a pop no longer reaches this key as a bare spike: the level term
+ * vetoes the tilt term's spike anyway (a burst drives `e` above t1, lvl → 1,
+ * cutLevel → 0, and the *smaller* of the two wins), and the de-clicker repairs
+ * what is left *behind* this stage. Re-measured on the same fixture the old
+ * claim used — a vinyl simulation with 108 injected pops — the pop witnesses are
+ * identical at 60 ms, at 250 ms and with the de-hisser switched off: the HF crest
+ * witness is 101 frames on the upload and **1** after the chain, and the
+ * independent pop meter (its own RBJ 4 kHz band at the fixture's own pop
+ * positions) reads **−15.66 dB** over the clean copy. What the closing lag still
+ * costs is the repair itself — measured on the hiss fixtures at the doses the
+ * law asks for, as the band the repair owns:
+ *
+ *   close      100 ms of gate lag    hiss-owned band   music-owned   loud
+ *   250 ms      (as it was)                  6.06 dB      −0.02 dB   −0.24 dB
+ *   120 ms                                   7.26         +0.07      −0.24
+ *    60 ms      (as it is now)               7.94         +0.18      −0.23
+ *    30 ms                                   8.32         +0.30      −0.23
+ *
+ * — +1.9 dB of the noise for ≤0.2 dB of the music's own top end in frames the
+ * noise does not own, and nothing else moves. Opening has to stay fast (8 ms):
+ * opening is what keeps a musical transient from being dulled.
  */
-const HISS_CLOSE_MS = 250;
+const HISS_CLOSE_MS = 60;
 const HISS_OPEN_MS = 8;
 /**
  * The band the top end is compared with when looking for hiss (700 Hz – 3 kHz).
@@ -906,9 +925,11 @@ class DeHiss {
       // The correction the key asks for…
       const cutTarget = Math.min(cutTilt, Math.max(cutLevel - 6, 0));
       // …and the correction the gate is *allowed* to have taken so far: closing
-      // slowly (a pop must not punch a hole — see HISS_CLOSE_MS), opening
-      // quickly (a transient must not be dulled). The steady state is the same
-      // number the key asked for, so a measured tilt still means what it says.
+      // over HISS_CLOSE_MS (60 ms — the pops this used to protect against are
+      // repaired by the de-clicker in front of this stage, and the lag is what
+      // costs the repair its depth), opening quickly (a transient must not be
+      // dulled). The steady state is the same number the key asked for, so a
+      // measured tilt still means what it says.
       const rate = cutTarget > this.cutDb
         ? 1 - Math.exp(-HISS_DECIM / (this.sr * HISS_CLOSE_MS * 0.001))
         : 1 - Math.exp(-HISS_DECIM / (this.sr * HISS_OPEN_MS * 0.001));

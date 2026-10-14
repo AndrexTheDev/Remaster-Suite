@@ -260,8 +260,9 @@ H.section('engine · the de-hisser does not undo the de-clicker');
   // fixture came out with 6 pops above the clean copy; behind, with 0.
   //
   // The de-hisser's own gate also has to survive the pops it now sees *after*
-  // the repair: it closes slowly (250 ms — hiss is stationary, nothing about it
-  // is fast) and opens fast (8 ms — a musical transient must not be dulled),
+  // the repair: it closes over 60 ms (the pops are the de-clicker's, and the
+  // closing lag is what costs the repair its depth — see HISS_CLOSE_MS) and
+  // opens fast (8 ms — a musical transient must not be dulled),
   // and its "nothing to attenuate" branch is a continuous crossfade instead of a
   // step at the last 0.1 % of its range.
   const env = H.songEnvelope(SR, 8, 0.05);          // quiet passages for the hiss to sit in
