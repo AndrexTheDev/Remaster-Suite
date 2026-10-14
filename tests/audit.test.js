@@ -1396,6 +1396,51 @@ section('audit · what the de-clicker leaves behind');
     num(med(rel)) + ' dB over the bed, from ' + num(before) + ' dB before the chain');
   ok(left.length === 0, '…and leaves nothing that is both over the bed and above −50 dBFS',
     left.length ? left.map((v, k) => num(v)).join(', ') : 'the loudest survivor is ' + num(Math.max.apply(null, abs)) + ' dBFS, ' + num(med(abs)) + ' dBFS median');
+  /* ── the other half of the contract, and the user's own third requirement:
+   * a clean file has to survive essentially bit-unchanged. The stage now only
+   * asks a *shape*-dependent share of the ratio's confidence (see the worklet's
+   * DeClicker), so the question "what does it do when nothing is wrong" has to
+   * be measured rather than argued. Measured on a clean wide-band master
+   * against the same render with the stage off, aligned to each side's own
+   * latency:
+   *
+   *   dose 0.08, what a healthy card asks   0.06 % of samples over 0.002 · rms Δ −51 dB · HF 6–12 kHz −0.00 dB
+   *   dose 0.30                             0.09 %                     · rms Δ −32 dB · HF −0.00 dB
+   *   dose 0.60, the ceiling                1.65 %                     · rms Δ −23 dB · HF −0.04 dB
+   *
+   * A quoted "the stage touches N % of the file" is only meaningful with its
+   * threshold and its dose beside it — the 60 % figure that once looked alarming
+   * on a healthy card was a 2e-5 threshold at a dose of 0.6. */
+  const wide = (() => {
+    let w = H.filter(DSP, H.pink(SR, SEC, 0.42, 61), SR, 'hp', 30, 0.707);
+    for (const f of [180, 3200, 6400, 11000]) {
+      const t = H.tone(f, SR, SEC, 0.05);
+      for (let i = 0; i < w.length; i++) w[i] += t[i] * (0.6 + 0.4 * Math.sin(2 * Math.PI * 0.5 * i / SR));
+    }
+    return H.normalize(H.filter(DSP, w, SR, 'lp', 19000, 0.7), 0.80);
+  })();
+  const stage = (amount) => H.renderEx(H.loadProcessor(SR), [wide], { power: 1, autoLevel: 0, declick: amount });
+  const off = stage(0), on = stage(0.08), maxDose = stage(0.60);
+  const moved = (r) => {
+    let n = 0, sum = 0, cnt = 0;
+    for (let i = 0; i < wide.length; i++) {
+      const a = r.out[0][i + r.latency], b = off.out[0][i + off.latency];
+      if (a === undefined || b === undefined) break;
+      const d = a - b, ad = d < 0 ? -d : d;
+      if (ad > 0.002) n++;
+      sum += d * d; cnt++;
+    }
+    return { pct: 100 * n / cnt, rmsDb: 20 * Math.log10(Math.sqrt(sum / cnt) / 0.1) };
+  };
+  const m08 = moved(on), m60 = moved(maxDose);
+  const hfOf = (r) => { const b = DSP.applyBiquad(r.out[0].subarray(r.latency), DSP.biquadHP(SR, 6000, 0.707));
+    let e = 0; for (let i = 0; i < b.length; i++) e += b[i] * b[i]; return 10 * Math.log10(e / b.length); };
+  ok(m08.pct < 0.2 && m08.rmsDb < -40 && Math.abs(hfOf(on) - hfOf(off)) < 0.05,
+    'and on clean material the automatic dose is a no-op',
+    num(m08.pct, 2) + ' % of samples over 0.002 · rms Δ ' + num(m08.rmsDb) + ' dB · 6 kHz+ ' + num(hfOf(on) - hfOf(off), 2) + ' dB');
+  ok(m60.pct < 3 && Math.abs(hfOf(maxDose) - hfOf(off)) < 0.1,
+    '…and even dosed to its ceiling it does not dull the file',
+    num(m60.pct, 2) + ' % over 0.002 · rms Δ ' + num(m60.rmsDb) + ' dB · 6 kHz+ ' + num(hfOf(maxDose) - hfOf(off), 2) + ' dB');
 }
 /* A room ring is a *filter* around a frequency; a sustained note is a single
  * partial. The resonance scan only asks whether a bin stands ≥ 3 dB above its

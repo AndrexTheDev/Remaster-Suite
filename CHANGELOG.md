@@ -13,6 +13,21 @@ thresholds sat in the tone stages (the glue's and the warmth's), all of them wri
 full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
 else may move.
 
+### Measured — what the de-clicker does when nothing is wrong
+
+* **"The stage touches N % of the file" is a meaningless sentence without its threshold and its
+  dose beside it**, and one that read badly — a healthy card's dose touching 60 % of a clean
+  bed — turned out to be a `2e-5` threshold at a dose of 0.6, i.e. the wrong pair of numbers
+  quoted together. Measured properly, on a clean wide-band master against the same render with the
+  stage off, aligned to each side's own latency: at **dose 0.08** (what a healthy card asks) **0.06 %
+  of samples move more than 0.002**, the RMS deviation is **−51 dB** and the 6 kHz+ band is unchanged
+  to 0.00 dB; at **0.30** it is 0.09 % and −32 dB; at the **0.60 ceiling** 1.65 % and −23 dB with
+  0.04 dB of HF. So the stage is a no-op until it is asked for a dose only a worn record asks for,
+  and even at the ceiling it does not dull the file. Both halves are now rows in the audit
+  ('and on clean material the automatic dose is a no-op', '…and even dosed to its ceiling it does
+  not dull the file'), and the meaning of the kit's own touched threshold is written beside it in
+  `tests/dsp.test.js`.
+
 ### Measured — what the sub-sonic guard cannot do
 
 * **A sustained music note in the bottom end and a turntable floor are the same thing to every

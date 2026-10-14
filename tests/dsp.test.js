@@ -451,6 +451,19 @@ H.section('engine · de-clicker on a lossy rip');
   }
   H.ok(worstSnare < -55, "a snare's attack is left alone (worst hit, 2 ms window)",
     worstSnare.toFixed(1) + ' dB below the hit');
+  /* The threshold here is 0.002 absolute, which is -50 dB relative to a master
+   * at 0.6 and is the same one the exposure question is asked with below. Its
+   * meaning depends on the dose, and that is measured rather than assumed (on a
+   * clean wide-band master, against the same render with the stage off):
+   *
+   *   dose 0.08 (what a healthy card asks)   0.06 % of samples · rms Δ -51 dB · HF 6-12 kHz -0.00 dB
+   *   dose 0.30                              0.09 %            · rms Δ -32 dB · HF -0.00 dB
+   *   dose 0.60 (the ceiling)                1.65 %            · rms Δ -23 dB · HF -0.04 dB
+   *
+   * i.e. the stage is a no-op on clean material until it is asked for a dose
+   * only a worn record asks for, and even at the ceiling the HF bands move by
+   * 0.04 dB. A quoted "touched" percentage is only meaningful with its
+   * threshold and its dose beside it. */
   H.ok(touched < kit.sig.length * 0.08, 'and only a small part of the kit is touched at all',
     (100 * touched / kit.sig.length).toFixed(2) + ' % of samples');
 }
