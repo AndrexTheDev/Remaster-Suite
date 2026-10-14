@@ -1004,7 +1004,14 @@
      * silent (34–58 Hz −96.7 → −95.9 dBFS) while the tone curve wrote into the
      * same empty band. With a hole measured, the corner moves up to where the
      * bass band is, so the octave it derives is one the recording can actually
-     * carry (200 Hz → 100 Hz). */
+     * carry. Measured on the acceptance weak-bass fixture with the corner at
+     * 240 Hz: the tracker locks onto ~150 Hz (the strongest periodicity left in
+     * that band), so the derived octave lands at 75 Hz — the 34–58 Hz band
+     * reads −96.7 → **−85.6 dBFS**, i.e. 11 dB out of digital silence, and the
+     * 60–200 Hz band moves 0.7 dB. The stage is dosed as a *sub*: it sits under
+     * the band it was derived from (SUB_CAP 0.70 × dose × drive ≈ −14 dB
+     * relative to it), which is why the band the row measures moves less than
+     * the band the repair works in. */
     a.subSrc = 95 + 145 * (1 - D.subHole);
     if (D.subPresentDb > 2.5) a.sub *= 0.4;             // already humps there
     if (m.correlation !== undefined && m.correlation < 0.25) a.sub *= 0.7;

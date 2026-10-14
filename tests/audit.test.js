@@ -946,6 +946,33 @@ section('audit · presets and parameters');
   });
   ok(untouched.length === 0, 'every declared parameter is driven by the law',
     untouched.join(', ') || 'all ' + (declared.length - 1) + ' reachable');
+  /* …and the reverse direction, which is a different fault with a different
+   * symptom: a parameter can be declared in the descriptor list, written by the
+   * law, plumbed through the harness — and then never *read* by the worklet, in
+   * which case it is indistinguishable from a working one until the row that
+   * measures what it does moves. `subSrc` was exactly that: declared,
+   * emitted by the law (95 at a clean bottom, up to 240 on one that is empty),
+   * read at the call site as `p.subSrc` — and never assigned in the parameter
+   * block, so it was always `undefined`, `setSource(undefined || 95)` fell back
+   * to the design corner and the sub synthesiser stayed silent on every file
+   * whose bottom octave is empty. Measured on the acceptance weak-bass fixture
+   * (high-passed at 200 Hz): sub ticked 384 000 times with the 240 Hz corner
+   * *asked for* and ran at `srcHz 95`, its gate shut (median 0.0000, p90
+   * 0.0000) because a 95 Hz low pass on that file has nothing above its own
+   * noise gate. The row that measures the repair read −9.30 → −8.77 dB, i.e.
+   * nothing happened, which is the only place the fault was visible. The check
+   * below reads the worklet's own source: every parameter in the descriptor
+   * list must appear in a `g('name'` read. */
+  const wsrc = require('fs').readFileSync(require('path').join(__dirname, '..', 'assets', 'worklets', 'remaster-processor.js'), 'utf8');
+  const declaredNames = (wsrc.match(/k\('([A-Za-z0-9_]+)'/g) || []).map((t) => t.slice(3, -1));
+  const readNames = new Set((wsrc.match(/g\('([A-Za-z0-9_]+)'/g) || []).map((t) => t.slice(3, -1)));
+  /* the twelve corrective-EQ bands are read in a loop as `g('eq' + b, 0)`, so a
+   * literal-name scan cannot see them — the concatenated read is the check */
+  const loopRead = /g\('eq'\s*\+/.test(wsrc);
+  const neverRead = declaredNames.filter((n2) => !readNames.has(n2) && !(loopRead && /^eq\d+$/.test(n2)));
+  ok(neverRead.length === 0 && declaredNames.length > 40,
+    'and every declared parameter is actually read by the worklet',
+    neverRead.length ? 'never read: ' + neverRead.join(', ') : 'all ' + declaredNames.length + ' declared parameters are read');
 
   // 0 % must produce a completely inactive chain
   const zero = Presets.buildParams('auto', DSP.measure([sims.garage], 48000), 0);
@@ -1330,6 +1357,46 @@ section('audit · the bottom of the record');
   ok(humOnly.db < rattle.db - 8 && humOnly.hz < 19,
     'while a line on its own is not read as a rumble',
     'a flat bed with the same hum reads ' + num(humOnly.db) + ' dB → guard ' + num(humOnly.hz) + ' Hz');
+  /* …and the *repair* for a bottom that is not there has to run. `subSrc` tells the
+   * synthesiser where to look for the fundamental; on a file whose bottom octave
+   * is empty the corner has to move up, and for one release it did not: the
+   * parameter was declared and emitted by the law but never read in the
+   * worklet's parameter block, so `setSource(undefined || 95)` fell back to the
+   * design corner and the stage was silent on exactly the files it exists for
+   * (see the reverse-parameter row in 'presets and parameters' — this is the
+   * functional half of that check, because a parameter that is *read* can still
+   * gate itself shut). Measured on this fixture: with the corner asked for and
+   * delivered, the 34–58 Hz band rises 11 dB out of digital silence
+   * (−96.7 dBFS, where the source has nothing at all). */
+  {
+    const thin = H.normalize(hp2(hp2(bed, 200), 200), 0.7);
+    const mThin = DSP.measure([thin], SR);
+    const Q = Presets.buildParams(Presets.classify(mThin).id, mThin, 0.7);
+    const Proc = H.loadProcessor(SR);
+    const off = H.renderEx(Proc, [thin], Object.assign({}, Q, { sub: 0 }));
+    const on = H.renderEx(Proc, [thin], Q);
+    /* the band is measured the way the acceptance row measures it — a sum of
+     * eight Goertzel probes across 34–58 Hz — and not with a band-pass filter:
+     * a Q-0.5 filter at 46 Hz is ~90 Hz wide and reads the 60–90 Hz slope of
+     * the very high-pass the fixture was built with, which is 62 dB above the
+     * band the row is about (−34.1 against −96.7 dBFS for the same signal). */
+    const lowB = (r) => {
+      const sig = r.out[0].subarray(r.latency);
+      let e = 0;
+      for (let k = 0; k < 8; k++) {
+        const f = 34 * Math.pow(58 / 34, k / 7);
+        const w2 = 2 * Math.PI * f / SR;
+        let re = 0, im = 0;
+        for (let i = 0; i < sig.length; i++) { re += sig[i] * Math.cos(w2 * i); im += sig[i] * Math.sin(w2 * i); }
+        const a = 2 * Math.sqrt(re * re + im * im) / sig.length;
+        e += a * a;
+      }
+      return 10 * Math.log10(e / 8 + 1e-20);
+    };
+    ok(Q.subSrc > 200 && lowB(on) - lowB(off) > 6,
+      'and a recording with an empty bottom octave gets one back',
+      'corner asked for ' + num(Q.subSrc, 0) + ' Hz · 34–58 Hz ' + num(lowB(off)) + ' → ' + num(lowB(on)) + ' dBFS with the synthesiser on');
+  }
   /* The other half of the same mistake, and the one that costs a repair the
    * file did not need: the harmonic *above* the band. Measured before the comb
    * that now cuts them, one line at −30.5 dBFS on a clean bed read +20.0 dB of

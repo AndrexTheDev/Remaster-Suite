@@ -2428,6 +2428,19 @@ class RemasterProcessor extends AudioWorkletProcessor {
     pr.bypass = g('bypass', 0);
     pr.sub = g('sub', 0);
     pr.subRatio = g('subRatio', 0.5);
+    /* …and the corner the synthesizer tracks at. Declared in the descriptor
+     * list and read at the call site, but never *assigned* here until this
+     * line: `p.subSrc` was undefined, `setSource(undefined || 95)` fell back to
+     * the design corner, and the whole "a recording whose bottom octave is
+     * empty tracks at its octave instead" repair never ran in the worklet. The
+     * audit's parameter check found the *descriptor* and the harness found no
+     * fault, because a parameter that is declared, plumbed and then read as
+     * undefined is indistinguishable from one that works — until the row that
+     * measures what it does moves (the acceptance "weak bass" row read −9.30 →
+     * −8.77 dB on a fixture high-passed at 200 Hz, i.e. nothing happened).
+     * tests/audit.test.js now checks the reverse direction as well: every
+     * declared parameter must be read. */
+    pr.subSrc = g('subSrc', 95);
     pr.exciter = g('exciter', 0);
     pr.air = g('air', 0);
     pr.dehiss = g('dehiss', 0);

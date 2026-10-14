@@ -13,6 +13,30 @@ thresholds sat in the tone stages (the glue's and the warmth's), all of them wri
 full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
 else may move.
 
+### Fixed — a declared parameter the worklet never read (and the silent stage behind it)
+
+* **`subSrc` was declared, written by the law, plumbed through the harness, read at its call site —
+  and never assigned.** The sub-harmonic synthesiser's "look for the fundamental at 95 Hz, unless the
+  bottom octave is *empty*, in which case move the corner up to where the bass band is" repair (added
+  two rounds ago, with a measured justification in the code) therefore never ran in the worklet:
+  `p.subSrc` was `undefined`, `setSource(undefined || 95)` fell back to the design corner, and the
+  stage was silent on exactly the files it exists for. Measured with the worklet instrumented at the
+  sub's own call site, on a recording high-passed at 200 Hz with the 240 Hz corner *asked for*: the
+  stage ticked 384 000 times with `srcHz 95`, its gate shut (median 0.0000, p90 0.0000) because a
+  95 Hz low-pass on that file has nothing above its own noise gate, and its output was zero. The
+  only place the fault was visible was the row that measures what the stage does — the acceptance
+  weak-bass row read −9.30 → −8.77 dB, i.e. nothing happened. With the read in place: `srcHz 240`,
+  the gate open (median 1.0000), the tracked note ~150 Hz, the derived octave at 75 Hz, and the
+  **34–58 Hz band rises from −96.7 to −85.6 dBFS — 11 dB out of digital silence** (the source has
+  *nothing* there), while the band the row measures, 60–200 Hz, moves 0.7 dB because a sub sits
+  under the band it was derived from (SUB_CAP 0.70 × dose × drive ≈ −14 dB relative to it). The
+  repair is honest about its own size and the code says so.
+* **The reverse-direction check is now a test**: every parameter in the worklet's descriptor list
+  must appear in a `g('name'` read (the twelve EQ bands are read in a loop, which the check knows).
+  This is the class of fault that no other check could see — a declared, wired, never-read parameter
+  looks exactly like a working one until the row that measures its effect moves. It found `subSrc`
+  to be the only one of the 58.
+
 ### Fixed — the app called its own export a codec problem
 
 * **`codecLoss` asked only *where* a file's top end ends, never how steeply.** The card's
