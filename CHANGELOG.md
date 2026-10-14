@@ -13,7 +13,30 @@ thresholds sat in the tone stages (the glue's and the warmth's), all of them wri
 full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
 else may move.
 
-### Fixed — a mains harmonic that faked a rumble
+### Fixed — a clean master was read as a *cracked* one
+
+* **The crackle statistic's window selection was absolute, and on tonal material
+  that selection *was* the statistic.** `crackleStep` cuts the 8.5 kHz+ band into 20 ms windows and reads
+  their crest factors — but it only counted windows above an absolute `rms > 1e-5`, and it took the
+  global term from the single largest peak in the whole file. On a sustained tone the 8.5 kHz band is
+  nearly empty: the only windows that passed were the ones the analysis's *own* high-pass rings in at
+  sample 0, and the 98th percentile of three windows is the second-highest of them. Measured: a pink
+  bed read **0.075**, the same bed with three sustained sub-bass tones on it **0.175**, a plain 1 kHz
+  sine **0.108** (against 0.000 for white noise). The 0.175 cleared the classifier's own "there is
+  crackle here" gate (0.06), and together with the bottom end (read as rumble) it put a **clean,
+  tonal master into the vinyl profile**: measured end to end on that file, a **0.45** de-click dose
+  on material with no clicks, a 24 Hz sub-sonic guard, a card naming "rumble, crackle", and 2.2 dB of
+  level lost. Two fixes, both measured: the window selection is now *relative* to the file's own
+  typical HF window (within ~26 dB of the median — scale-invariant by construction, and the statistic
+  is scale-invariant by measurement: 0.004 at 0, −10, −20 and −30 dB), and the global term is the
+  **third** largest window peak, not the largest, because crackle is a repeated event. The same set
+  now reads 0.004 / 0.004 / 0.000 / 0.000, while real crackle is untouched: a garage sim 0.817, a
+  vinyl sim 0.956, the worn-record fixture 1.000. Every threshold that reads this number (0.06 in the
+  classifier, 0.08 on the card, the dose knee at 0.03…0.40) sits in the gap that opened between
+  0.008 and 0.817 — nothing was re-tuned, the measurement was fixed. The clean tonal master is now a
+  general profile with a 0.08 dose and a card that names only the bottom end it has.
+
+### Fixed — the loop's own rumble meter read the hum repair
 
 * **The rumble measurement notched the mains out to half an octave past each band, and a 2-pole
   filter does not stop at half an octave.** The harmonics in between leaked: measured on a clean bed

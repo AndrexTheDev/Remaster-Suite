@@ -1412,6 +1412,85 @@ section('audit · what the de-clicker leaves behind');
  * notch at 0 dB (their ceiling table had no `box` key at all, and `undefined × n`
  * is NaN, which `num()` turns into 0).
  */
+/* The crackle statistic is the one number three things act on: the classifier's
+ * "is this a worn record", the card's "there is crackle", and the de-clicker's
+ * dose. So its floor has to be the file, not the analysis — and it was not.
+ *
+ * Measured, before and after the two fixes in `crackleStep` (its window
+ * selection is now relative to the file's own typical HF window, and its global
+ * term is the third largest window peak rather than the largest, because crackle
+ * is a *repeated* event):
+ *
+ *   a pink bed                          0.075 → 0.004
+ *   the same bed + three sub-bass tones 0.175 → 0.004
+ *   a 1 kHz sine                        0.108 → 0.000
+ *   white noise                         0.000 → 0.000
+ *   a cassette sim                      0.022 → 0.000
+ *   a low-bitrate sim                   0.026 → 0.008
+ *   a garage sim                        0.779 → 0.817
+ *   a vinyl sim                         0.993 → 0.956
+ *   the worn-record fixture             1.000 → 1.000
+ *
+ * The 0.175 mattered: it passes the classifier's own "there is crackle here"
+ * gate (0.06), and together with a sub-bass bottom read as rumble it put a
+ * *clean, tonal* master into the vinyl profile — measured end to end, a 0.45
+ * de-click dose on material with no clicks, the sub-sonic guard, and a card
+ * naming "rumble, crackle". After the fix the same file is a general profile
+ * with a 0.08 dose and a card that names only the bottom end it actually has.
+ * Every threshold that reads this number (0.06 in the classifier, 0.08 on the
+ * card, the dose knee at 0.03…0.40) sits in the gap the statistic now opens
+ * between 0.008 and 0.817 — nothing was re-tuned, the measurement was fixed.
+ */
+section('audit · the crackle statistic\'s own floor');
+{
+  const SR = 48000, SEC = 12;
+  const num = (v, d) => (typeof v === 'number' && isFinite(v) ? v.toFixed(d === undefined ? 3 : d) : String(v));
+  const idx = (sig) => DSP.crackleDetect([sig], SR).index;
+  const scale = (sig, db) => { const g = Math.pow(10, db / 20); const o = new Float32Array(sig.length); for (let i = 0; i < sig.length; i++) o[i] = sig[i] * g; return o; };
+  let bed = H.filter(DSP, H.pink(SR, SEC, 0.40, 31), SR, 'lp', 9000, 0.55);
+  const env = H.songEnvelope(SR, SEC, 0.30);
+  for (let i = 0; i < bed.length; i++) bed[i] *= env[i];
+  bed = H.normalize(bed, 0.62);
+  /* the case that was being read as a cracked record: a clean master with a
+   * sustained bottom end */
+  const club = (() => {
+    const c = Float32Array.from(bed);
+    for (const [f, a] of [[35, 0.16], [70, 0.05], [105, 0.02]]) {
+      const t = H.tone(f, SR, SEC, a);
+      for (let i = 0; i < c.length; i++) c[i] += t[i] * (0.15 + 0.85 * env[i]);
+    }
+    return H.normalize(c, 0.7);
+  })();
+  const clean = [['a pink bed', bed], ['the same bed + sub-bass tones', club], ['a 1 kHz sine', H.tone(1000, SR, SEC, 0.5)],
+    ['white noise', H.noise(SR, SEC, 0.3, 5)], ['a cassette sim', H.cassetteSim(DSP, SR, SEC)],
+    ['a low-bitrate sim', H.lowBitrateSim(DSP, SR, SEC)]];
+  const cracked = [['a garage sim', H.garageSim(DSP, SR, SEC)], ['a vinyl sim', H.vinylSim(DSP, SR, SEC)]];
+  ok(clean.every(([, sg]) => idx(sg) < 0.02), 'no clean recording is read as a cracked one',
+    clean.map(([t, sg]) => t + ' ' + num(idx(sg))).join(' · '));
+  ok(cracked.every(([, sg]) => idx(sg) > 0.8), 'while the fixtures with real crackle keep their index',
+    cracked.map(([t, sg]) => t + ' ' + num(idx(sg))).join(' · '));
+  const gates = [0.06, 0.08];
+  ok(gates.every((g) => clean.every(([, sg]) => idx(sg) < g) && cracked.every(([, sg]) => idx(sg) > g)),
+    'the gates that read this number sit in the gap it opens',
+    'the gates ' + gates.join(' and ') + ' lie between ' + num(Math.max(...clean.map(([, sg]) => idx(sg))))
+    + ' and ' + num(Math.min(...cracked.map(([, sg]) => idx(sg)))));
+  /* every term is a ratio inside a window and the selection is relative, so the
+   * statistic itself is invariant to the file's level */
+  ok([0, -10, -20, -30].every((db) => Math.abs(idx(scale(bed, db)) - idx(bed)) < 0.002)
+    && [0, -20].every((db) => Math.abs(idx(scale(cracked[1][1], db)) - idx(cracked[1][1])) < 0.01),
+    'and the whole statistic is invariant to the file\'s level',
+    'the bed at 0/−10/−20/−30 dB reads ' + [0, -10, -20, -30].map((db) => num(idx(scale(bed, db)))).join(' / ')
+    + '; the vinyl sim at 0/−20 dB ' + [0, -20].map((db) => num(idx(scale(cracked[1][1], db)))).join(' / '));
+  /* …and the consequence, which is what the user sees: the card and the chain */
+  const m = DSP.measure([club], SR);
+  const cls = Presets.classify(m);
+  const P = Presets.buildParams(cls.id, m, 0.7);
+  const issues = Presets.diagnose(m).issues;
+  ok(cls.id === 'general' && P.declick < 0.15 && !issues.includes('crackle'),
+    'so a clean tonal master is not handed the worn-record chain',
+    cls.id + ' · de-click dose ' + num(P.declick) + ' · the card says ' + (issues.join(', ') || 'nothing') + ' · index ' + num(idx(club)));
+}
+
 section('audit · a room, not a note');
 {
   const SR = 48000, SEC = 12;

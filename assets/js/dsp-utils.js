@@ -793,11 +793,39 @@
    *
    * A vinyl pop, a digital glitch or a tape dropout is a *tall, narrow* spike,
    * so it stands out in the crest factor (peak ÷ RMS) of the 8.5 kHz+ band —
-   * regardless of how loud the music is. We take the 98th percentile of the
-   * per-window crest factors, which is immune to a single stray event but reacts
-   * immediately to real crackle.
+   * regardless of how loud the music is. The 98th percentile of the per-window
+   * crest factors is immune to a single stray event but reacts immediately to
+   * real crackle, and the *global* term (a quarter of the index) is the third
+   * largest window peak, not the largest: crackle is a repeated event.
    *
    * Reference values: clean music ≈ 13 dB · light crackle ≈ 20 dB · worn vinyl ≈ 24 dB+.
+   *
+   * Two measurements decide which windows are allowed to speak, and both were
+   * wrong once (see the gate in value() and the rank in the global term):
+   *
+   *   · the selection is *relative* — a window counts when its HF energy is
+   *     within ~26 dB of the file's own typical HF window. The absolute
+   *     rms > 1e-5 it used to be *was* the statistic on tonal material: only
+   *     the windows the analysis's own 8.5 kHz high-pass rings in at the start
+   *     passed it, and the 98th percentile of three windows is the
+   *     second-highest of them;
+   *   · the index is scale-invariant, by construction (every term is a ratio
+   *     inside a window) and by measurement — the same fixtures at 0, −10, −20
+   *     and −30 dB read 0.004 / 0.004 / 0.004 / 0.004 (a pink bed), 0.000 …
+   *     0.000 (a 1 kHz sine), 0.956 at every level (a vinyl sim) — so the
+   *     selection has to be too.
+   *
+   * The population it separates, measured (index): a pink bed 0.004, the same
+   * bed with three sustained sub-bass tones on it 0.004, a 1 kHz sine 0.000,
+   * white noise 0.000, a cassette sim 0.000, a low-bitrate sim 0.008 — and a
+   * garage sim 0.817, a vinyl sim 0.956, the worn-record fixture 1.000. Before
+   * the two fixes the same set read 0.075 / 0.175 / 0.108 / 0.000 / 0.022 /
+   * 0.026 — and the 0.175 was enough to pass the classifier's own "there is
+   * crackle here" gate (0.06) and hand a *clean, tonal* master the vinyl
+   * chain: a 0.45 de-click dose on material with no clicks, the sub-sonic
+   * guard, and a card naming "rumble, crackle". With the statistic honest the
+   * same file is a general profile, dose 0.08, and the card names only what is
+   * actually there.
    */
   function crackleStep(channels, sr, winSec) {
     const [b0, b1, b2, a1, a2] = biquadHP(sr, 8500, 0.707);
@@ -806,7 +834,10 @@
     let units = 0;
     for (const k of per) units += k;
     const state = channels.map(() => ({ z1: 0, z2: 0 }));
-    const st = { crests: [], peaks: [], gPeak: 0, gSum: 0, gCount: 0, pops: 0 };
+    /* Per window: its HF energy and its HF peak. The *selection* of which
+     * windows carry the statistic is made in value(), against the file's own
+     * HF level — see the gate there. */
+    const st = { ms: [], peak: [], crests: [], peaks: [], gPeak: 0, gSum: 0, gCount: 0, pops: 0 };
     const step = stepRange('crackle', units, units * win * 1.6, (from, to) => {
       let base = 0;
       for (let c = 0; c < channels.length; c++) {
@@ -830,13 +861,10 @@
             }
             st.gSum += ms; st.gCount += win;
             if (peak > st.gPeak) st.gPeak = peak;
+            st.ms.push(ms); st.peak.push(peak);
             st.peaks.push(peak);
             const rms = Math.sqrt(ms / win);
-            if (rms > 1e-5) {
-              const cf = peak / rms;
-              st.crests.push(cf);
-              if (cf > 4.5) st.pops++;
-            }
+            if (rms > 1e-12) st.crests.push(peak / rms);   // which of these count is decided in value()
           }
         }
         base = end;
@@ -845,8 +873,59 @@
     return {
       step,
       value() {
+        /* ── which windows carry this statistic ─────────────────────────────
+         * A window counts when its HF energy is within ~26 dB of the file's own
+         * *typical* HF window (5 % of the median). The gate used to be an
+         * absolute rms > 1e-5, and on material whose HF is nearly nothing —
+         * a sustained tone, a sub-bass drone, a sine test signal — that gate is
+         * the whole statistic: only the few windows the 8.5 kHz high-pass rings
+         * in at the start pass it, and the 98th percentile of three windows is
+         * the second-highest of them. Measured: a plain 1 kHz sine read 0.108 of
+         * "crackle", and a bed of pink noise with three sustained low tones on
+         * it read 0.175 against 0.075 for the same bed without them — enough to
+         * pass the classifier's own "there is crackle here" gate (0.06) and put
+         * a *clean, tonal* master into the vinyl profile, where the chain then
+         * applied a 0.45 de-click dose and a sub-sonic guard to material with no
+         * clicks and no rumble (measured end to end: 2.2 dB of level and 3.5 dB
+         * of its 35 Hz note, with the card naming "rumble, crackle").
+         * A relative gate is scale-invariant by construction: the statistic is
+         * unchanged when the file is scaled (measured: the same fixture at 0,
+         * −10, −20 and −30 dB reads 0.075 / 0.075 / 0.075 / 0.075 and a vinyl
+         * sim 0.993 at every level), so the selection has to be too. */
+        const sortedMs = st.ms.slice().sort((a, b) => a - b);
+        const hfMed = sortedMs.length ? sortedMs[Math.floor(sortedMs.length * 0.5)] : 0;
+        const gate = Math.max(hfMed * 0.05, 1e-20);
+        const crests = [], peakKept = [];
+        let gSum = 0, gCount = 0, gPeak = 0;
+        for (let i = 0; i < st.ms.length; i++) {
+          if (st.ms[i] <= gate) continue;
+          gSum += st.ms[i]; gCount += win;
+          if (st.peak[i] > gPeak) gPeak = st.peak[i];
+          peakKept.push(st.peak[i]);
+          const rms = Math.sqrt(st.ms[i] / win);
+          crests.push(st.peak[i] / rms);
+        }
+        st.crests = crests;
+        for (const cf of crests) if (cf > 4.5) st.pops++;
+        st.peaks = peakKept.length ? peakKept : st.peaks;
+        st.gSum = gSum; st.gCount = gCount; st.gPeak = gPeak;
         const grms = Math.sqrt(st.gSum / Math.max(1, st.gCount));
-        const globalCrestDb = 20 * Math.log10(st.gPeak / (grms + 1e-12));
+        /* …and the global term is the *third* largest window peak, not the
+         * largest. Crackle is a repeated event: one pop in a file is an edit, a
+         * splice or a hiccup, and the largest peak of an ordinary recording is
+         * the analysis filter's own settling transient — the 8.5 kHz high-pass
+         * starts cold on sample 0, and its ring is the tallest peak in every
+         * clean file (measured: the median bed's global crest is 15.5 dB and the
+         * only window above its steady crest is window 0; a plain 1 kHz sine
+         * reads a *3.0 dB* crest in 599 windows of 600 and 17.0 dB in the first).
+         * With a rank-3 statistic the same bed reads 11.3 dB and the sine 3.0,
+         * while dense crackle — where most windows are pops — is untouched:
+         * measured, the worn upload reads 30.6 → 30.9 dB and the vinyl sim
+         * 21.9 → 22.1. The weight is unchanged, so what this buys is precision:
+         * a single glitch click in a clean master no longer contributes a
+         * quarter of the crackle index on its own. */
+        const peakRank = st.peak.length >= 3 ? st.peak.slice().sort((a, b) => b - a)[2] : st.gPeak;
+        const globalCrestDb = 20 * Math.log10(peakRank / (grms + 1e-12));
         st.crests.sort((a, b) => a - b);
         const p98 = st.crests.length ? st.crests[Math.min(st.crests.length - 1, Math.floor(st.crests.length * 0.98))] : 1;
         const med = st.crests.length ? st.crests[Math.floor(st.crests.length * 0.5)] : 1;
