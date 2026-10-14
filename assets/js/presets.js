@@ -644,7 +644,28 @@
      * (≥ 2 dB) may still add to the dose, up to the size of the correction
      * itself, so a file that is both bursty and uniformly bright is treated
      * harder; it can never *become* the evidence. */
-    const sibDb = clamp((m.sibPeakDb || 0) + 2 * smoothstep(2, 8, m.sibExcessDb || 0), 0, 16);
+    /* …and the bonus may only scale a *proven burst*. The paragraph above says
+     * the median statistic can never become the evidence, and it could: a
+     * sustained cymbal wash (an acceptance fixture — a bright wash over a quiet
+     * bed) reads `sibExcessDb` +5.07 with a scan of 0.00, and at 2 × 0.58 that
+     * was 1.16 dB of `sibDb` — enough, on a slightly brighter file, to name
+     * `sibilance` and duck the top end of material whose only property is that
+     * it is made of cymbals. The bonus now needs the scan to be past its own
+     * dead zone: below 2.5 dB the file is not a burst file, and the median term
+     * has nothing to amplify (measured: the wash 0.00, the +6 dB codec tilt in
+     * the audit suite 0.86, both below the window; the acceptance "s" fixture
+     * 5.63, above it). */
+    const bursty = smoothstep(2.5, 5, m.sibPeakDb || 0);
+    /* …and a file the scan calls *sustained* (its median frame is already narrow
+     * and 7 kHz-heavy — a singer whose "s" never stops) may use the median
+     * statistic as evidence without the burst gate, because the case the gate
+     * protects against is exactly the one the scan's shape test now rejects: a
+     * wash. Measured, scan + excess → `sibDb` (probe `tools/work/sib6.js`):
+     * the audit's continuous sibilant 1.98 + 1.33 = 3.31 (de-esser 0.51, and
+     * 0.07 without the flag), the acceptance wash 0.00 + 0.00, the +6 dB codec
+     * tilt 0.86 + 0.00. */
+    const sibDb = clamp((m.sibPeakDb || 0)
+      + 2 * smoothstep(2, 8, m.sibExcessDb || 0) * (m.sibSustained ? 1 : bursty), 0, 16);
     // Threshold and slope are its own: the per-frame scan reads 0.7–1.0 dB on a
     // clean recording and 2.2–4.9 dB on one with real "s" bursts, so the window
     // starts above the noise and reaches full correction inside the range the

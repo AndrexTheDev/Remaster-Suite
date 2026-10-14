@@ -13,6 +13,58 @@ thresholds sat in the tone stages (the glue's and the warmth's), all of them wri
 full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
 else may move.
 
+### Fixed — the de-esser named a phrased organ and a wash of cymbals
+
+**A sibilant's own statistics, measured on the two things that are not sibilants.** The de-esser's dose
+comes from a per-frame scan of the 7 kHz/2.6 kHz balance (p95 − p50 over the frames where the low band is
+alive) — and that balance rises for two reasons that have nothing to do with an "s":
+
+* **the 2.6 kHz band falls, not the 7 kHz band.** On a phrased organ the notes stop between phrases, the
+  reference band drops with them, and the *ratio* climbs: measured, the acceptance organ's scan reads
+  **4.29 dB**, past the law's 4.2 dB full-correction point, so the card named `sibilance` on a clean file
+  and the de-esser took a dose. The 7 kHz band never stands out of anything — it is the bed's floor,
+  lifting itself by 1.7 dB across the same frames;
+* **a wash is over zero all the time.** Broadband cymbal noise has 7 kHz above 2.6 kHz in its *median*
+  frame already (a wash breathes everywhere, so the p95 above that p50 is 2.52 dB), and its top end is a
+  genuinely hot tilt — `sibExcessDb` +4.73, real — which the law doubled into a **0.61** de-esser dose on
+  material whose only property is that it is made of cymbals.
+
+The scan now asks two things of the peak frame: the balance must **cross over** (7 kHz above 2.6 kHz, the
+one claim a sibilant makes by definition — measured: the three organ voicings −1.94 / −2.27 / −2.74, four
+"s" settings +0.51 … +5.16, and *identical* when the same "s" file is written 20 dB down, because it is a
+ratio of two bands of one file and knows nothing of level), and the file's own **median** balance must not
+already be over zero (−0.75 dB of hysteresis, smoothstepped). A file whose median frame *is* top-heavy is
+asked for one more thing before its median tilt may count as evidence: a **band-limited top end** — 7 kHz
+above 12 kHz, which is what makes an "s" an "s" and not a cymbal. Measured: the wash −0.47 dB, a
+continuous "s" +2.11, every burst fixture +4.1 … +4.8, a +6 dB codec shelf −1.2.
+
+Measured after: the organ **4.29 → 0.00**, the wash **2.52 → 0.00**, both `deess` **0.000**, and the chain
+never ducks their 7 kHz band (+1.00 dB on the organ — its own `dullTop` air shelf — and +0.35 on the wash,
+against −2.82 dB on the file that needs it). The counter-case is pinned by construction: a singer whose
+"s" never stops reads scan 1.71 with a **0.463** dose (`sibSustained`), the audit suite guards deess > 0.4
+on its own fixture, and the burst fixture of §10 is unchanged — still `sibilance`, still 0.71 of dose.
+
+**The law keeps the median statistic out of the evidence seat.** `sibDb = scan + 2 · smoothstep(2, 8,
+sibExcessDb)` could be armed by the tilt alone: the wash reads `sibExcessDb` 4.73 with a scan of 0.00,
+and 2 × 0.58 was 1.16 dB of `sibDb` — enough, on a slightly brighter file, to name `sibilance` and duck
+the top end it had just lifted (the argument the code already made for the codec shelf). The bonus now
+needs the scan past its own dead zone (`smoothstep(2.5, 5, scan)`), **except** on a file the scan itself
+calls *sustained* — where the median statistic is allowed to be evidence, because the case that gate
+protects against is exactly the one the shape test now rejects. Measured: the audit's continuous sibilant
+1.98 + 1.33 = 3.31 → de-esser 0.535 (0.07 without the flag), the wash 0.00 + 0.00, the +6 dB tilt
+0.86 + 0.00.
+
+* `tests/dsp.test.js` — a section of its own, 140 checks (was 134): a phrased organ, a sustained cymbal
+  wash and an unending "s" each measured through the *engine* — dose and the 7 kHz band of the loudest
+  20 % of frames (organ −31.0 → −30.0 dB, wash −20.3 → −19.9, "s" −18.2 → −21.0, its own biquads);
+* `tests/audit.test.js` — 316 (was 313): the organ and the wash as named fixtures, plus the same-fixture
+  guard that the audit's own sibilant still reads one (scan 1.98, `sibSustained` 1, deess 0.535);
+* `tools/acceptance.js` — §10 gains the continuous "s" (scan + the chain's own 7 kHz meter) and §20 gains
+  the two "not sibilance" rows (organ, wash) printing the ungated number beside the gated one, so each row
+  re-derives its own before/after; 113 rows · 29 defect classes, exit 0 (`tools/work/acceptance-v2bb.txt`).
+
+Measured: `npm test` **ALL PASSED (140 / 137 / 316 / 108 / 17)**, exit 0 (`tools/work/suite-round18.txt`).
+
 ### Fixed — the click as a file carries it: the duration gate on the crackle diagnosis is gone
 
 **The gate that was added to stop the app naming music was rejecting the damage it was built to find.** It asked

@@ -829,6 +829,73 @@ section('audit · presets and parameters');
       Presets.buildParams('auto', tm, 0.7).deess.toFixed(3));
   }
 
+  /* …and the *statistic* has to be a sibilant statistic. Two ways a frame pair
+   * makes the 7 kHz/2.6 kHz balance look bursty with no "s" behind it, both of
+   * them files that were named `sibilance` and given a 0.7 de-esser dose:
+   *
+   *  · a phrased organ (E2/E3 chords, drawbar harmonics out to ~1.3 kHz): the
+   *    balance *rises* 5.5 dB at p95 because the 2.6 kHz band falls between the
+   *    phrases — the 7 kHz band is the bed's floor throughout and lifts itself
+   *    by 1.7 dB. The scan now asks the peak frame's balance to be positive
+   *    (7 kHz above 2.6 kHz), which is the one claim a sibilant makes;
+   *  · a sustained cymbal wash (broadband noise over a quiet bed): the balance
+   *    is over zero *all the time* (p50 +3.5), so the "peak" above it is a wash
+   *    breathing — the median must be negative for the peak to be a departure.
+   * Measured, organ / wash / the acceptance "s" fixture (probe
+   * `tools/work/sib3.js`): scan 5.55 / 2.52 / 5.63 before, 0.00 / 0.00 / 5.63
+   * after — the two false positives go to zero and the "s" does not move. */
+  {
+    const SEC3 = 8;
+    const organ = (() => {
+      const out = new Float32Array(48000 * SEC3);
+      const parts = [[1, 1], [2, 0.55], [3, 0.4], [4, 0.28], [5, 0.22], [6, 0.17], [8, 0.12], [10, 0.09], [12, 0.07], [16, 0.05]];
+      const chords = [[82.4, 164.8], [98, 196], [82.4, 164.8], [110, 220]];
+      const bar = 1.5, on = 1.15;
+      for (let k = 0; k * bar < SEC3; k++) {
+        const at = Math.round(k * bar * 48000), len = Math.round(on * 48000);
+        for (const f0 of chords[k % chords.length]) for (let i = 0; i < len && at + i < out.length; i++) {
+          const e = Math.min(1, i / (48000 * 0.08)) * Math.min(1, (len - i) / (48000 * 0.12));
+          for (const [n, a] of parts) out[at + i] += 0.13 * a * e * Math.sin(2 * Math.PI * f0 * n * i / 48000);
+        }
+      }
+      const qbed = H.normalize(H.filter(DSP, H.pink(48000, SEC3, 0.40, 31), 48000, 'lp', 9000, 0.60), 0.25);
+      return H.normalize(H.mix([out, H.mul(qbed, 0.5)]), 0.72);
+    })();
+    const om = DSP.measure([organ], 48000);
+    ok((om.sibPeakDb || 0) < 0.5 && Presets.buildParams('auto', om, 0.7).deess < 0.05,
+      'a phrased organ is not sibilance',
+      'scan ' + (om.sibPeakDb || 0).toFixed(2) + ' dB (5.55 before this round), deess '
+      + Presets.buildParams('auto', om, 0.7).deess.toFixed(3) + ' · ' + (Presets.diagnose(om).issues.join(', ') || 'healthy'));
+    const wash = (() => {
+      const wbed = H.normalize(H.filter(DSP, H.pink(48000, SEC3, 0.40, 31), 48000, 'lp', 9000, 0.60), 0.7);
+      const n = H.filter(DSP, H.noise(48000, SEC3, 1, 55), 48000, 'hp', 4000, 0.707);
+      const out = Float32Array.from(wbed, (x) => x * 0.6);
+      for (let i = 0; i < out.length; i++) {
+        const env = 0.55 + 0.45 * Math.sin(2 * Math.PI * 0.25 * i / 48000 + 1.1) * Math.sin(2 * Math.PI * 1.7 * i / 48000);
+        out[i] += 0.30 * env * n[i] * (1 + 0.3 * Math.sin(2 * Math.PI * 0.07 * i / 48000));
+      }
+      return out;
+    })();
+    const wm = DSP.measure([wash], 48000);
+    ok((wm.sibPeakDb || 0) < 0.5 && (wm.sibExcessDb || 0) > 2 && Presets.buildParams('auto', wm, 0.7).deess < 0.05,
+      'a sustained cymbal balance is not sibilance either',
+      'scan ' + (wm.sibPeakDb || 0).toFixed(2) + ' dB · excess ' + (wm.sibExcessDb || 0).toFixed(2)
+      + ' dB (a visible tilt, 1.16 dB of dose before this round), deess '
+      + Presets.buildParams('auto', wm, 0.7).deess.toFixed(3));
+    /* this fixture is a singer whose "s" never stops (the 5–9.5 kHz band is
+     * above trend for seconds at a time), so its evidence is the *sustained*
+     * path: scan 1.98 (its band is already over trend in the median frame, so
+     * the burst above that is small) plus the median excess 5.67, which the
+     * flag unlocks. Before this round: scan 1.98, excess 5.67, deess 0.706 —
+     * after: 0.535, the same `sibilance` on the same card. The row is here so
+     * that a future guard that rejects more material has to face this file. */
+    const sm = DSP.measure([sibilant], 48000);
+    ok((sm.sibPeakDb || 0) > 1.5 && sm.sibSustained === 1 && Presets.buildParams('auto', sm, 0.7).deess > 0.4,
+      '…while the sibilant fixture still reads a sibilant (its own, sustained path)',
+      'scan ' + (sm.sibPeakDb || 0).toFixed(2) + ' dB, sustained ' + sm.sibSustained + ', excess '
+      + (sm.sibExcessDb || 0).toFixed(2) + ' dB, deess ' + Presets.buildParams('auto', sm, 0.7).deess.toFixed(3));
+  }
+
   /* …and what the de-clicker is *for*: on material with real pops the chain has
    * to take them out of the audible range, not merely reduce them. The toolkit's
    * user-loop tool measures this against the pre-degradation bed on every run;

@@ -412,6 +412,98 @@ H.section('engine · a performance keeps its top end');
     + worst.toFixed(2) + ' dB at the worst of ' + hits.length + ' hits');
 }
 
+H.section('engine · the de-esser keeps its hands off cymbals and organs');
+{
+  /* The dose law is not enough: the *chain* has to behave, and the two files
+   * this round was written for are a phrased organ and a sustained cymbal wash
+   * — the app named `sibilance` on both and the de-esser ducked the band it had
+   * just lifted (the wash reads +4.7 dB of 5–9 kHz excess, a real tilt). The
+   * detector now asks the peak frame's 7 kHz/2.6 kHz balance to be positive and
+   * the file's own median balance not to be (a wash breathes nowhere), and it
+   * asks a *sustained* top end to be narrow (7 kHz above 12 kHz — a cymbal runs
+   * to the spectrum's end, a "s" stops at ~9 kHz). Measured here: organ and
+   * wash come out `deess 0.000` and their 6.6–9.5 kHz band is untouched to a
+   * fraction of a dB; the sibilant fixture gets 0.535 and its band comes down.
+   *
+   * The two probe files live in tools/work/ (built by `sib6.js`), but the suite
+   * builds its own so it stays self-contained. */
+  const SEC6 = 8;
+  const loudBandDb = (sig) => {
+    /* the band level of the loudest 20 % of 10 ms frames — a "s" is a burst even
+     * when the singer never stops for long */
+    const F = Math.round(SR * 0.01), f = new RSDSP.Biquad(); f.setBandpass(SR, 7000, 0.9);
+    const lv = [];
+    for (let off = 0; off + F <= sig.length; off += F) {
+      let e = 0;
+      for (let i = 0; i < F; i++) { const a = f.process(sig[off + i]); e += a * a; }
+      lv.push(10 * Math.log10(e / F + 1e-20));
+    }
+    lv.sort((a, b) => b - a);
+    const take = Math.max(1, Math.round(lv.length * 0.2));
+    let sum = 0;
+    for (let i = 0; i < take; i++) sum += Math.pow(10, lv[i] / 10);
+    return 10 * Math.log10(sum / take);
+  };
+  const quietBed = H.normalize(H.filter(RSDSP, H.pink(SR, SEC6, 0.40, 31), SR, 'lp', 9000, 0.60), 0.7);
+  const wash = (() => {
+    const n = H.filter(RSDSP, H.noise(SR, SEC6, 1, 55), SR, 'hp', 4000, 0.707);
+    const out = Float32Array.from(quietBed, (x) => x * 0.6);
+    for (let i = 0; i < out.length; i++) {
+      const env = 0.55 + 0.45 * Math.sin(2 * Math.PI * 0.25 * i / SR + 1.1) * Math.sin(2 * Math.PI * 1.7 * i / SR);
+      out[i] += 0.30 * env * n[i] * (1 + 0.3 * Math.sin(2 * Math.PI * 0.07 * i / SR));
+    }
+    return out;
+  })();
+  const organ = (() => {
+    const out = new Float32Array(SR * SEC6);
+    const parts = [[1, 1], [2, 0.55], [3, 0.4], [4, 0.28], [5, 0.22], [6, 0.17], [8, 0.12], [10, 0.09], [12, 0.07], [16, 0.05]];
+    const chords = [[82.4, 164.8], [98, 196], [82.4, 164.8], [110, 220]];
+    const bar = 1.5, on = 1.15;
+    for (let k = 0; k * bar < SEC6; k++) {
+      const at = Math.round(k * bar * SR), len = Math.round(on * SR);
+      for (const f0 of chords[k % chords.length]) for (let i = 0; i < len && at + i < out.length; i++) {
+        const e = Math.min(1, i / (SR * 0.08)) * Math.min(1, (len - i) / (SR * 0.12));
+        for (const [n, a] of parts) out[at + i] += 0.13 * a * e * Math.sin(2 * Math.PI * f0 * n * i / SR);
+      }
+    }
+    return H.normalize(H.mix([out, H.mul(quietBed, 0.5)]), 0.72);
+  })();
+  const sib = (() => {
+    const base = H.normalize(H.filter(RSDSP, H.pink(SR, SEC6, 0.3, 71), SR, 'lp', 4000, 0.707), 0.4);
+    let s6 = H.filter(RSDSP, H.filter(RSDSP, H.noise(SR, SEC6, 1, 75), SR, 'hp', 5200, 0.707), SR, 'lp', 9000, 0.707);
+    s6 = H.normalize(s6, 0.4);
+    const env = H.songEnvelope(SR, SEC6, 0.25);
+    const out = Float32Array.from(base);
+    for (let i = 0; i < out.length; i++) out[i] += s6[i] * env[i];
+    return H.normalize(out, 0.8);
+  })();
+  const verify = (name, sig, wantDose) => {
+    const m = RSDSP.measure([sig], SR);
+    const law = Object.assign({}, H.DEFAULT_PARAMS, RP.buildParams('auto', m, 0.7));
+    H.ok(wantDose ? law.deess > 0.4 : law.deess < 0.05, name + (wantDose ? ' still gets the de-esser' : ' gets no de-esser dose'),
+      'deess ' + law.deess.toFixed(3) + ' · scan ' + (m.sibPeakDb || 0).toFixed(2) + ' · sustained '
+      + (m.sibSustained === undefined ? 0 : m.sibSustained) + ' · excess ' + (m.sibExcessDb || 0).toFixed(2)
+      + ' · ' + (RP.diagnose(m).issues.join(',') || 'healthy'));
+    const r = H.renderEx(Processor, [sig], law);
+    const before = loudBandDb(sig), after = loudBandDb(r.out[0].subarray(r.latency));
+    const moved = after - before;
+    if (wantDose) {
+      H.ok(moved < -1.0, '…and the chain brings its "s" band down', 'loudest 20 % of frames, 7 kHz band: '
+        + before.toFixed(1) + ' → ' + after.toFixed(1) + ' dB (' + moved.toFixed(2) + ' dB)');
+    } else {
+      /* the claim is about the *de-esser*: the band may be lifted by the tone
+       * stage (the organ reads `dullTop`, and the chain's air shelf raises that
+       * band 1.0 dB) but it must never be ducked — a duck is what the false
+       * positive did. */
+      H.ok(moved > -0.3, '…and the chain never ducks its top end', 'loudest 20 % of frames, 7 kHz band: '
+        + before.toFixed(1) + ' → ' + after.toFixed(1) + ' dB (' + moved.toFixed(2) + ' dB, tone stage may lift it)');
+    }
+  };
+  verify('a phrased organ', organ, false);
+  verify('a sustained cymbal wash', wash, false);
+  verify('an unending "s"', sib, true);
+}
+
 H.section('engine · the de-hisser does not undo the de-clicker');
 {
   // A worn record with hiss *and* crackle: both repairs are asked for at once,

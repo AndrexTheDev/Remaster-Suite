@@ -622,6 +622,50 @@ mark('section 10');
   const rm = RSDSP.measure([re], SR);
   row('sibilance', 're-upload at 320 kbit/s → diagnosis', r.dry.issues.join(','), RP.diagnose(rm).issues.join(',') || 'healthy',
     'card ' + r.cls.id + ' → ' + RP.classify(rm).id + ' · deess on the export ' + N(RP.buildParams('auto', rm, 0.7).deess));
+  /* ── the other kind of sibilant, and why the guard above cannot just be a
+   * stronger burst test ───────────────────────────────────────────────────────
+   * The fixture above is *bursts*: a singer's "s" comes and goes, which is what
+   * makes the peak-over-median scan the right question. This fixture is the
+   * audit suite's own sibilant — a lowpassed music bed with a 5.2–9 kHz noise
+   * that never leaves — and its band is already over trend in the *median*
+   * frame, so the burst above that is small (measured: scan 1.98 dB where the
+   * burst fixture reads 4.6–5.6). It is a sibilant nonetheless (a "s" that does
+   * not stop), and the app has to keep naming it: its evidence is the sustained
+   * path, unlocked by the shape test — the top end is band-limited (7 kHz above
+   * 12 kHz) like a vocal, where §20's wash and organ are broadband or fall away
+   * between phrases. The two rows are the counter-case to §20's two "not
+   * sibilance" rows, and the second is measured by an independent meter: the
+   * file's own 7 kHz band in the loudest 20 % of its frames. */
+  const unending = (() => {
+    const base = H.normalize(H.filter(RSDSP, H.pink(SR, SEC, 0.3, 71), SR, 'lp', 4000, 0.707), 0.4);
+    let z = H.filter(RSDSP, H.filter(RSDSP, H.noise(SR, SEC, 1, 75), SR, 'hp', 5200, 0.707), SR, 'lp', 9000, 0.707);
+    z = H.normalize(z, 0.4);
+    const env = H.songEnvelope(SR, SEC, 0.25);
+    const out = Float32Array.from(base);
+    for (let i = 0; i < out.length; i++) out[i] += z[i] * env[i];
+    return H.normalize(out, 0.8);
+  })();
+  const ru = run([unending]);
+  const loud20 = (sig) => {
+    const b = filt(sig, [bq('BP', 7000, 0.9)]);
+    const F = Math.round(SR * 0.01), lv = [];
+    for (let k = 0; k + F < b.length; k += F) {
+      let e = 0;
+      for (let i = 0; i < F; i++) e += b[k + i] * b[k + i];
+      lv.push(10 * Math.log10(e / F + 1e-20));
+    }
+    lv.sort((a, b2) => b2 - a);
+    const take = Math.max(1, Math.round(lv.length * 0.2));
+    let sum = 0;
+    for (let i = 0; i < take; i++) sum += Math.pow(10, lv[i] / 10);
+    return 10 * Math.log10(sum / take);
+  };
+  row('sibilance', 'a continuous “s”: scan ungated vs with the shape test (dB)', N(ru.m.sibRawDb, 2), N(ru.m.sibPeakDb, 2),
+    'its median 7 kHz/2.6 kHz balance is already +2.34 dB (a singer who never stops) and the audit suite pins this file twice (deess ' + N(ru.P.deess, 3)
+    + ' > 0.4, sibSustained === 1) · the two files §20 reports as *not* sibilance are the ones this path must not take: their top end is not band-limited (the wash) or their headroom moves with the phrases (the organ)');
+  row('sibilance', 'a continuous “s” through the chain: 7 kHz of the loudest 20 % of frames (dBFS)',
+    N(loud20(unending), 1), N(loud20(ru.out[0].subarray(ru.lat)), 1),
+    'the de-esser at dose ' + N(ru.P.deess, 3) + ' on the file that needs it — and the same chain never ducks the band on §20\'s wash and organ (tests/dsp.test.js measures both directions through the engine)');
 }
 
 mark('section 11');
@@ -1292,6 +1336,40 @@ mark('section 20');
     + ' dB per dB with the music, and a line that follows is a note · the control stays named: the §3 fixture below reads slope '
     + '-1.00 (a constant line grows *relatively* louder as the music falls) and the sustained tone reads 0.00 · '
     + (ro.dry.issues.join(',') || 'healthy'));
+  /* …and the same organ is the sibilance false positive: its 7 kHz/2.6 kHz
+   * balance *crosses over* in its peak frame because the 2.6 kHz band falls
+   * between the phrases, not because the 7 kHz band stands out of anything. The
+   * scan now asks the peak frame's balance to be positive (the two rows are the
+   * ungated number beside the gated one, so the row re-derives its own
+   * before/after the way the crackle rows print "crest alone vs the app"), and
+   * a file whose *median* frame is top-heavy is asked for a band-limited top end
+   * before its median tilt may count as evidence — the paragraph in §10 and the
+   * audit's own guards (tests/audit.test.js: "a phrased organ is not sibilance")
+   * are the other half of this measurement. */
+  const sstep = (a, b, x) => { const t = clamp01((x - a) / (b - a)); return t * t * (3 - 2 * t); };
+  const oldSibLaw = (raw, excess) => Math.max(0, raw + 2 * sstep(2, 8, excess || 0));
+  const orgLaw = oldSibLaw(ro.m.sibRawDb, ro.m.sibExcessDb);
+  row('a phrased organ, not sibilance', '7 kHz scan: ungated vs with the crossover test (dB)', N(ro.m.sibRawDb, 2), N(ro.m.sibPeakDb, 2),
+    'the old scan alone read ' + N(orgLaw, 2) + ' dB of `sibDb` — '
+    + (orgLaw > 4.2 ? 'past' : 'below') + ' the 4.2 dB full-correction point'
+    + (orgLaw > 4.2 ? ', so the card named `sibilance` and the de-esser took a dose on a clean organ' : ' on this voicing (the probe fixture with full drawbar harmonics reads 5.55 — probe tools/work/sib4.js)')
+    + ' · now: need ' + N(RP.demand(ro.m).sibNeed, 2)
+    + ', deess ' + N(ro.P.deess, 3) + ' · card ' + (ro.dry.issues.join(',') || 'healthy'));
+  const wash = (() => {
+    const n = filt(H.noise(SR * SEC, 1, 1, 55), [bq('HP', 4000, 0.707)]);
+    const out = Float32Array.from(bed(9000, 0.7), (x) => x * 0.6);
+    for (let i = 0; i < out.length; i++) {
+      const env = 0.55 + 0.45 * Math.sin(2 * Math.PI * 0.25 * i / SR + 1.1) * Math.sin(2 * Math.PI * 1.7 * i / SR);
+      out[i] += 0.30 * env * n[i] * (1 + 0.3 * Math.sin(2 * Math.PI * 0.07 * i / SR));
+    }
+    return H.normalize(out, 0.8);
+  })();
+  const rw = run([wash]);
+  row('a sustained cymbal wash, not sibilance', '7 kHz scan: ungated vs with the shape test (dB)', N(rw.m.sibRawDb, 2), N(rw.m.sibPeakDb, 2),
+    'the wash is over zero *all the time* (its median frame already has 7 kHz above 2.6 kHz) and reaches 12 kHz as far as it reaches 7 — a cymbal is not band-limited, a "s" is '
+    + '(probe tools/work/sib6.js: median 7 kHz/12 kHz −0.47 dB here, +2.11 on the audit\'s sibilant, +4.1…+4.8 on every burst fixture) · the old law read '
+    + N(oldSibLaw(rw.m.sibRawDb, rw.m.sibExcessDb), 2) + ' dB (`sibExcessDb` ' + N(rw.m.sibExcessDb, 2) + ' of a *real* tilt) and took deess 0.61 on the material whose only property is that it is made of cymbals (probe tools/work/sib3.js, the same construction) · '
+    + 'now deess ' + N(rw.P.deess, 3) + ' · card ' + (rw.dry.issues.join(',') || 'healthy'));
   /* …and the user's own loop: their export of a *clean* master may not come back
    * with a defect the encoder put in it */
   const master = bed(20000, 0.8);

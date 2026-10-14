@@ -635,7 +635,7 @@
    * real level, so a quiet frame (where both bands are noise) cannot answer.
    * ----------------------------------------------------------------------- */
   function sibStep(channels, sr) {
-    const idle = () => ({ step: stepRange('sib', 0, 0, () => {}), value: () => ({ sibPeakDb: 0, sibFrames: 0 }) });
+    const idle = () => ({ step: stepRange('sib', 0, 0, () => {}), value: () => ({ sibPeakDb: 0, sibSustained: 0, sibFrames: 0 }) });
     if (!channels.length || !channels[0].length) return idle();
     const F = Math.max(64, Math.round(sr * 0.01));        // 10 ms
     const nCh = channels.length;
@@ -644,7 +644,20 @@
     for (const k of per) units += k;
     const hi = channels.map(() => { const b = new Biquad(); b.setBandpass(sr, 7000, 0.9); return b; });
     const lo = channels.map(() => { const b = new Biquad(); b.setBandpass(sr, 2600, 0.9); return b; });
-    const ratios = [], refs = [];
+    /* …and a band *above* the "s": a sibilant is band-limited to about 9 kHz —
+     * that is what makes it a sibilant and not a cymbal, whose noise runs to the
+     * end of the spectrum. Measured on the two files that were both named
+     * `sibilance` by the earlier scan (probe `tools/work/sib6.js`): the
+     * acceptance wash reads 7 kHz 12 kHz −0.47 dB in its median frame (broadband
+     * noise), the audit's own sibilant +2.11 (narrow), and every burst fixture
+     * +4.1 … +4.8. Below ~18 kHz a 12 kHz band is not representable
+     * (`setBandpass` clamps at 0.49·sr) and the shape cannot be seen: that term
+     * passes through as 1 and the scan keeps the two tests that need no 12 kHz
+     * band — the crossover and the median. The limit is stated where the shape
+     * is used. */
+    const upOk = Math.min(12000, sr * 0.49) > 9000;
+    const up = upOk ? channels.map(() => { const b = new Biquad(); b.setBandpass(sr, 12000, 0.9); return b; }) : null;
+    const ratios = [], refs = [], shapes = [];
     const step = stepRange('sib', units, units * F * 3, (from, to) => {
       let base = 0;
       for (let c = 0; c < nCh; c++) {
@@ -655,15 +668,20 @@
           const b = Math.min(to, end) - base;
           for (let w = a; w < b; w++) {
             const off = w * F;
-            let he = 0, le = 0;
+            let he = 0, le = 0, ue = 0;
             for (let i = off; i < off + F; i++) {
               const x = ch[i];
               const h = hi[c].process(x);
               const l = lo[c].process(x);
               he += h * h; le += l * l;
+              if (upOk) { const u = up[c].process(x); ue += u * u; }
             }
             const hr = Math.sqrt(he / F), lr = Math.sqrt(le / F);
-            if (lr > 1e-6) { ratios.push(20 * Math.log10(hr / lr)); refs.push(lr); }
+            if (lr > 1e-6) {
+              ratios.push(20 * Math.log10(hr / lr));
+              refs.push(lr);
+              shapes.push(upOk ? 20 * Math.log10(hr / (Math.sqrt(ue / F) + 1e-20)) : 1);
+            }
           }
         }
         base = end;
@@ -672,19 +690,69 @@
     return {
       step,
       value() {
-        if (ratios.length < 8) return { sibPeakDb: 0, sibFrames: ratios.length };
+        if (ratios.length < 8) return { sibPeakDb: 0, sibRawDb: 0, sibSustained: 0, sibFrames: ratios.length };
         /* the reference band has to be *doing something*: frames where the voice
          * is silent say nothing about sibilance, and in them both bands are just
          * the file's noise floor. Threshold at a quarter of the band's own p75. */
         const rs = refs.slice().sort((a, b) => a - b);
         const gate = 0.25 * rs[Math.floor(rs.length * 0.75)];
-        const kept = [];
-        for (let i = 0; i < ratios.length; i++) if (refs[i] > gate) kept.push(ratios[i]);
-        if (kept.length < 8) return { sibPeakDb: 0, sibFrames: kept.length };
+        const kept = [], keptShape = [];
+        for (let i = 0; i < ratios.length; i++) if (refs[i] > gate) { kept.push(ratios[i]); keptShape.push(shapes[i]); }
+        if (kept.length < 8) return { sibPeakDb: 0, sibRawDb: 0, sibSustained: 0, sibFrames: kept.length };
         kept.sort((a, b) => a - b);
+        keptShape.sort((a, b) => a - b);
         const p50 = kept[Math.floor(kept.length * 0.5)];
         const p95 = kept[Math.min(kept.length - 1, Math.floor(kept.length * 0.95))];
-        return { sibPeakDb: Math.max(0, p95 - p50), sibFrames: kept.length };
+        /* …and the scan has to be a scan of a *sibilant*, which is a narrower
+         * claim than "the frame's 7 kHz/2.6 kHz balance is high": the balance
+         * has to *cross over* in the burst frame. Two ways it crosses without a
+         * sibilant behind it, both measured:
+         *
+         *  · **the 2.6 kHz band falls, not the 7 kHz band.** A phrased organ is
+         *    the case that named a clean file: on the acceptance organ the ratio
+         *    reads p50 −7.82 dB / p95 −2.27 dB — a *rise* of 5.55 dB, and the
+         *    app read 1.00 of sibilance from it — but the 7 kHz band is the
+         *    bed's noise floor the whole time (it lifts itself by 1.73 dB over
+         *    the same frames). A singer's "s" does the opposite: p50 −2.19,
+         *    p95 +3.43 (probe `tools/work/sib4.js`). So the peak only counts if
+         *    the peak frame's balance is *positive* — 7 kHz above 2.6 kHz, the
+         *    one claim a sibilant makes by definition. (The three organ voicings
+         *    read −1.94 / −2.27 / −2.74, the four "s" settings +0.51 … +5.16,
+         *    and the same "s" file 20 dB down reads *identically* — the test is a
+         *    ratio of two bands of the same file and knows nothing of level.)
+         *  · **the file is already sibilant in its median frame.** A sustained
+         *    cymbal wash reads p50 +3.47 / p95 +5.99: its balance is over zero
+         *    *all the time*, and the "peak" above it (2.52 dB) is a wash
+         *    breathing, not a burst — the 7 kHz band never stands out of
+         *    anything, so there is nothing for a de-esser to duck. The window
+         *    below asks for the peak frame to be a *departure*: p50 negative.
+         *    Measured on the whole battery (probes `tools/work/sib3-5.js`): the
+         *    four "s" settings cross −2.2 → +0.5…+5.2; the organ, the bed, the
+         *    vinyl and the cassette sims stay negative at both ends; the wash is
+         *    positive at both ends. */
+        const shape = (x) => { const t = x < 0 ? 0 : x > 1 ? 1 : x; return t * t * (3 - 2 * t); };
+        const shapeP50 = upOk ? keptShape[Math.floor(keptShape.length * 0.5)] : 1;
+        const narrow = upOk ? shape((shapeP50 - 0.5) / 1) : 1;
+        /* a file whose *median* frame has the 7 kHz band over its 2.6 kHz band is
+         * continuously top-heavy; a "s" that never stops is one case, broadband
+         * noise is another, and the shape tells them apart (measured: the
+         * acceptance wash is not narrow, the audit sibilant is) */
+        const sustained = p50 > 0.75 && p95 > 0 && narrow > 0.5 ? 1 : 0;
+        /* the burst path needs the balance to *cross over* in the peak frame —
+         * 7 kHz over 2.6 kHz, the one claim a sibilant makes — and it needs the
+         * file not to be continuously positive (a wash that breathes has its
+         * "peak" everywhere) */
+        const form = sustained ? 1 : shape((p95 + 1.2) / 1.5) * shape((0.75 - p50) / 1.5);
+        /* `sibRawDb` is the number this scan returned before the form existed —
+         * the acceptance matrix prints it beside the gated one, the way the
+         * crackle rows print "crest alone vs the app", so a row's before/after
+         * is re-derivable from the measurement itself. */
+        return {
+          sibPeakDb: Math.max(0, (p95 - p50) * form),
+          sibRawDb: Math.max(0, p95 - p50),
+          sibSustained: sustained,
+          sibFrames: kept.length,
+        };
       },
     };
   }
@@ -2588,6 +2656,8 @@
       /* …and the same question asked per frame, which is the only way the answer
        * is about a singer's "s" and not about the song's average (see sibStep) */
       m.sibPeakDb = sib.value().sibPeakDb;
+      m.sibRawDb = sib.value().sibRawDb;
+      m.sibSustained = sib.value().sibSustained;
       /**
        * Where the hiss begins: the lowest band in which the *music* is less
        * than 14 dB above the measured noise floor. The de-hisser's crossover
