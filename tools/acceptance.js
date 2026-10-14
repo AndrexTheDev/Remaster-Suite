@@ -1021,6 +1021,12 @@ mark('section 17');
  * and the same fixture without the encoder reads 0/72. The second pop the row
  * counts (82135) sits in a loud, HF-rich passage and is a marginal remainder
  * (1.4 dB over the clean copy in its own window) — the count has two authors.
+ * Rounds 16 and 17 took the question to the end and closed it: the level key may
+ * not decide on its own (the app then names `dullTop` on its own exports), the
+ * content witness that would gate it is redundant with the tilt term (88 of 88
+ * frames it opens on already ask the full measured step) and reads *programme* at
+ * this residue, and tilt stationarity is no witness either. What is left in the
+ * file is the arrival's own error, shaped like its music.
  * ------------------------------------------------------------------------- */
 {
   const clean = bed(9000, 0.62, 0.30);
@@ -1106,9 +1112,14 @@ mark('section 17');
     + ' those frames its own plan asks for cutTilt 0.0 dB while its level key allows 19–20 dB, because a *broadband*'
     + ' floor leaves the HF − MID tilt where it was (tiltNow −4.0 vs tiltRef −3.2, probes wr9/wr10) — while 0.26 s'
     + ' later, where a frame\'s tilt does sit above the reference, the same burst at pop 228457 comes out 15.2 dB down'
-    + ' (that pop\'s window reads −63.3 dB against −48.1 with the stage off). Whether that term may be relaxed is a'
-    + ' depth policy, not a bug: the de-hisser\'s automatic dose is deliberately the tilt step that was measured, and'
-    + ' the suite pins it. At pop ' + fo.p + ' the same window reads ' + N(fo.up[1], 1) + ' → ' + N(fo.out[1], 1) + ' dBFS'
+    + ' (that pop\'s window reads −63.3 dB against −48.1 with the stage off). The question was then carried to the end'
+    + ' (rounds 16/17, probes wr13…wr17): letting the level key decide where the tilt term reads nothing makes the app'
+    + ' name *dullTop* on its own exports (hiss, cassette, vinyl, worn), and a content witness to gate it — the shape'
+    + ' *inside* the key band, 11 kHz against 5.5 kHz — is redundant with the tilt term wherever it opens (88 of 88'
+    + ' frames already ask the full step) and at this residue reads *programme*, correctly: a lossy codec\'s error is'
+    + ' shaped like the music it encoded (slope −4.5 dB against the clean copy\'s own −4.6, and the tilt\'s p90−p10'
+    + ' across the passage is 17.2 dB, so it is not stationary either). This 2/72 is a floor of the *arrival format*,'
+    + ' not a missing witness. At pop ' + fo.p + ' the same window reads ' + N(fo.up[1], 1) + ' → ' + N(fo.out[1], 1) + ' dBFS'
     + ' (clean ' + N(fo.cl[1], 1) + ') — a loud, HF-rich passage where the pop\'s own remainder is 1.4 dB over the clean'
     + ' copy, i.e. the count has two authors of very different size');
   const mask = quietMask(clean, 0.5);

@@ -6,6 +6,29 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Measured and closed — the content witness, and why the worn record's last two pops are the arrival's own
+
+**Round 16 priced the level-key arbitration and left it out because it made the app name `dullTop` on its own
+exports.** Round 17 built the witness that would gate it and measured all three candidates to the end (probes
+`tools/work/wr16.js`, `wr17.js`):
+
+| candidate | verdict |
+|---|---|
+| the shape *inside* the key band — 11 kHz against 5.5 kHz, per 2048-frame | the acceptance hiss fixture's **noise-owned** frames read **+1.8 … +2.1 dB**, its **music-owned** ones **−3.2 … −4.9**, the dsp fixture's pauses **+0.9 … +1.2** — it separates, with the threshold in the gap; **but** in every one of the 88 frames it opened on that fixture (87 of 87 on the worn record) `cutTilt` was *already* at the measured step: a flat top end **is** the tilt anomaly this stage is built around, so the witness is redundant wherever it speaks |
+| the same witness at the worn record's residue | it reads **programme** (−4.5 dB, against the clean copy's own −4.6) — and it is right: a lossy codec's error is *shaped like the music it encoded*, so there is no flatness there to see |
+| "the tilt is stationary when it is floor" | dead outright: across the very passage that would be cut, `tiltNow`'s p90−p10 is **17.2 dB**, *wider* than the file elsewhere (14.6) — the encoder's error follows the content's dynamics |
+
+**Net of the witness plus the arbitration it enables, on the whole matrix:** +0.19 dB on the hiss fixture's quiet
+floor, **0.00** at the worn record's pop, ≤0.3 dB of level-match wiggles on four rows and 0.09 dB on the drum row —
+and **no diagnosis changes anywhere** (that is the difference from round 16's ungated version, which flipped four
+rows into `dullTop`). That is noise, so neither the witness nor the arbitration is in the tree; both are documented
+at the decision they belong to, with these numbers.
+
+**And that closes the worn record.** The 2/72 the matrix still counts is the arrival's own floor, ~22 dB above the
+clean copy's top end and *shaped like its music*: no statistic in the file separates it from quiet programme (level —
+round 11's 1.30 vs 1.10; tilt — round 15's broadband blindness; shape and stationarity — round 17), and the app's own
+export criterion forbids the blind alternative. It is a property of the format, and it stays a measured row.
+
 ### Measured and rejected — the de-hisser's level key may not decide on its own
 
 **Round 15 ended with a named lever: the de-hisser's automatic dose is gated on the *tilt* of the

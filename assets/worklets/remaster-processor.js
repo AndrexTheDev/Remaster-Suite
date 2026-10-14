@@ -1005,6 +1005,28 @@ class DeHiss {
       // witness — whether the top end is shaped like programme or like noise —
       // i.e. an analyser metric, not a retune of this stage. Numbers: CHANGELOG,
       // round 16 (probes wr14/wr15; wr13 is void — an instrument slip).
+      //
+      // Round 17 built that content witness — the *shape* inside the key band
+      // (11 kHz against 5.5 kHz, per 2048-frame) — and measured all three
+      // candidates for it to the end:
+      //   · it *does* separate analog hiss from programme with room to spare
+      //     (+1.8 … +2.1 dB on the acceptance hiss fixture's noise-owned frames
+      //     against −3.2 … −4.9 on its music-owned ones) — but it is redundant
+      //     with this term: in every one of the 88 frames it opened on that
+      //     fixture (87 of 87 on the worn record) `cutTilt` was already at the
+      //     measured step, i.e. a flat top end *is* the tilt anomaly this term
+      //     looks for;
+      //   · at the worn record's residue it reads *programme* (−4.5 dB against
+      //     the clean copy's own −4.6) — correctly: a lossy codec's error is
+      //     shaped like the music it encoded, so the floor there is not flat;
+      //   · and the third candidate, "the tilt is stationary when it is floor",
+      //     is dead outright: the tilt's p90−p10 across that quiet passage is
+      //     17.2 dB, wider than elsewhere in the file (14.6), because the
+      //     encoder's error follows the content's dynamics.
+      // Net of the witness and the arbitration: +0.19 dB on the hiss fixture's
+      // quiet floor, 0.00 at the worn record's pop, ≤0.3 dB wiggles elsewhere.
+      // That is noise, so neither is in the tree — the residual 2/72 is the
+      // arrival's own floor, shaped like its music, and it stays documented.
       const cutTilt = this.maxCut > 0.01 ? clamp(tiltNow - this.tiltRef, 0, this.maxCut) : 60;
       const lvl = smoothstep(this.t1, this.t1 + 1 / this.inv, e);
       const cutLevel = lvl > 1e-6 ? -20 * Math.log10(lvl) : 60;
