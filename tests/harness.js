@@ -39,6 +39,35 @@ function loadProcessor(sr) {
   return P;
 }
 
+/**
+ * Load the processor with a few exact string replacements applied first, so a
+ * test can move one constant or one line and measure what that would cost.
+ * Each patch must match exactly once; a silent no-match would be measured as
+ * "the change did nothing", which is the one wrong answer a sweep must not give.
+ */
+function loadProcessorEdited(patches, sr) {
+  const file = path.join(ROOT, 'assets', 'worklets', 'remaster-processor.js');
+  let code = fs.readFileSync(file, 'utf8');
+  for (const [find, replace] of patches) {
+    const n = code.split(find).length - 1;
+    if (n !== 1) throw new Error('patch matched ' + n + ' times: ' + String(find).slice(0, 60));
+    code = code.replace(find, replace);
+  }
+  const rate = sr || 48000;
+  const factory = vm.runInThisContext(
+    `(function(sampleRate, AudioWorkletProcessor, registerProcessor) {\n${code}\n})`,
+    { filename: 'remaster-processor.edited.js' }
+  );
+  const registry = {};
+  class AudioWorkletProcessorStub {
+    constructor() { this.port = { postMessage() {}, onmessage: null }; }
+  }
+  factory(rate, AudioWorkletProcessorStub, (name, cls) => { registry[name] = cls; });
+  const P = registry['remaster-processor'];
+  if (!P) throw new Error('remaster-processor was not registered');
+  return P;
+}
+
 let dspCache = null;
 
 /** Load the shared DSP utilities exactly as the browser loads them. */
@@ -336,7 +365,7 @@ function summarize() {
 
 module.exports = {
   renderEx,
-  ROOT, loadProcessor, loadDsp, render, DEFAULT_PARAMS,
+  ROOT, loadProcessor, loadProcessorEdited, loadDsp, render, DEFAULT_PARAMS,
   tone, noise, pink, mix, mul, filter, rng, peak, songEnvelope, addCrackle, normalize,
   garageSim, cassetteSim, vinylSim, lowBitrateSim, comboSim,
   ok, section, summarize, stats: () => ({ passed, failed }),

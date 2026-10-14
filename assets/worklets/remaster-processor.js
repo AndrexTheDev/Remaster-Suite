@@ -1486,6 +1486,29 @@ class DeClicker {
      * over the bed once its shape is heard; the same law moves the drum kit's
      * touched fraction from 3.2 % to 4.4 % and its worst snare window from
      * −66 to −62 dB against the −55 dB guard). */
+    /* ── where this detector stops, measured ───────────────────────────────
+     * At the automatic dose (0.71) the map above plus the knee below only let a
+     * spike through once the ratio reads ≈ 2.2, and everything quieter than that
+     * is the file's own music as far as this stage is concerned. A fixture with
+     * the pops' amplitude spread over the same 0.34…1.70 the acceptance tool
+     * uses leaves its *three quietest* pops in place: they read ratio 1.86–2.02
+     * with asym 0.30–0.33 — below the 0.32…0.52 band that would discount the
+     * threshold for this shape, so the shape term is worth 0.007 here, not the
+     * 0.18 it could be. Measured in four beds, from one low-passed at 5 kHz to
+     * one open at 12 kHz: 51–52 of 54 pops repaired, and *the same two or three*
+     * left in every bed, so the floor belongs to the statistic and not to a
+     * fixture. The trade, measured on the two fixtures that guard the stage:
+     *
+     *   map as shipped (1.25 / 1.5)   kit snare −62.1 dB ·  4.4 % of the kit ·  2.7 % of a clean master
+     *   lowered to ≈ 2.0 (1.10/1.20)  kit snare −37.7 dB · 30.5 %           · 30.3 %
+     *   lowered to ≈ 1.9 (1.05/0.90)  kit snare −13.6 dB · 61.6 %           · 81.7 %
+     *
+     * (dsp.test.js holds the snare at −55 dB and the clean master is the audit's
+     * wide-band fixture). Reaching the quietest pops of that fixture therefore
+     * costs the snare 24 dB of the 55 it has and rewrites a third of a clean
+     * master, which is why the floor is written down here rather than moved:
+     * those pops are, in this statistic, indistinguishable from music, and the
+     * audit row `the de-clicker's own floor` re-measures all three numbers. */
     const th = 1 - 0.5 * amount
       - 0.25 * amount * smoothstep(0.32, 0.52, asym);
     k = smoothstep(th, th + 0.30, k);
@@ -1543,6 +1566,27 @@ class DeClicker {
     // the prediction always runs, so its state is continuous whether or not the
     // sample in hand is being repaired (a filter switched on for one window at
     // a time would ring at both of its ends)
+    /* ── what stands in the window, measured ───────────────────────────────
+     * Inside a full-replacement window this filter is fed its own output, so it
+     * has no input left and runs to a fixed point: measured sample by sample on
+     * the acceptance fixture (#374596), `pred` freezes at −0.1785 for 60+ samples
+     * and the window becomes a ≈1.35 ms DC plate. That is audible as a hole
+     * (the residual is as loud as the music the window removed: median 0.8 dB of
+     * the music's own 4–12 kHz, worst 8.1), and it is still the best of the four
+     * fills that were measured on the same fixture — band 4–12 kHz over the clean
+     * copy · leftover against the music's peaks · the drum kit:
+     *
+     *   as shipped (self-fed low pass)  median −10.2 · worst +4.0 · 3/72 over · fill cost med 0.7 dB · kit: snare −62.1, 4.4 %
+     *   the same filter fed the dry x  median  −0.8 · worst +39.8 · 30/72      · med 4.1 · worst 46.8 · kit: snare −70.8, 2.9 %
+     *   3-tap polynomial extrapolation  median  −6.5 · worst +16.0 · 13/72     · med 20.1 · worst 40.9 · kit: snare −50.4, 69.7 %
+     *   4-tap polynomial extrapolation  median  +2.9 · worst +14.6 · 38/72     · med 6.3 · worst 27.9 · kit: snare −0.3, 98.8 %
+     *
+     * The extrapolators carry gain (3×, 4×) and therefore fire on snares (the
+     * kit is 70–99 % touched and the −55 dB snare guard is gone), and letting the
+     * *dry* pop into the prediction is worse on every witness. So the trade the
+     * shipped fill makes — a low-frequency hole in exchange for the pop — is the
+     * best measured one; the window *width* was swept too (pre/post 4/8 … 16/48)
+     * and moves the leftover by under 1 dB, so the width is not the lever either. */
     const p = this.pred2.process(this.pred.process(this.inp));
     const out = m > 0.001 ? xd + (p - xd) * m : xd;
     this.inp = out;                                    // filter sees the repair

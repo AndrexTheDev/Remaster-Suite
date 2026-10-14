@@ -1524,6 +1524,161 @@ section('audit · what the de-clicker leaves behind');
  * notch at 0 dB (their ceiling table had no `box` key at all, and `undefined × n`
  * is NaN, which `num()` turns into 0).
  */
+/* Where the de-clicker's detector *stops*, and what moving it would cost.
+ *
+ * The stage's confidence comes from one statistic, the fast/slow ratio of the
+ * signed residual of a 24 dB/oct 4 kHz low pass, and at the automatic dose
+ * (0.71) the map `clamp((ratio - 1.25) / 1.5)` plus the knee at `1 - 0.5*amount`
+ * only lets a spike through once the ratio reads ≈ 2.2. Everything quieter than
+ * that is the file's own music as far as this stage is concerned — and the
+ * fixture that grades the round writes a handful of pops right there.
+ *
+ * Measured (6 s, 9 pops/s, |a| spread 0.34…1.70 — the ones left are the three
+ * quietest): in *four different beds*, from one low-passed at 5 kHz to one open
+ * at 12 kHz, the same two or three pops are the ones not repaired, at 51–52 of
+ * 54 repaired. So the floor belongs to the statistic, not to a fixture — moving
+ * the bed's own top end by 7 kHz does not move it.
+ *
+ * The second half of the row is why the gate stays where it is: the drum kit
+ * (the test below in `dsp.test.js` holds it to −55 dB) and a clean wide-band
+ * master, for three versions of the same line. The map is the *only* lever —
+ * the shape term can add at most `0.25 * amount` = 0.18 to the confidence and
+ * the pops read `asym` 0.30–0.33, below the discount band that was put there
+ * for exactly this shape. Measured, per 8 s of material:
+ *
+ *   the map as shipped (1.25/1.5)   kit snare −62.1 dB · 4.4 % of the kit · 2.7 % of a clean master
+ *   lowered to ≈ 2.0  (1.10/1.20)   kit snare −37.7 dB · 30.5 %           · 30.3 %
+ *   lowered to ≈ 1.9  (1.05/0.90)   kit snare −13.6 dB · 61.6 %           · 81.7 %
+ *
+ * i.e. reaching the three quietest pops of this fixture costs the snare 24 dB
+ * of the 55 it has, and 30 % of the clean master is rewritten. That is the
+ * whole trade, measured — so the de-clicker's floor is documented in the
+ * worklet's own code and not moved, and this row is what would notice if a
+ * later change moved it (any of these three numbers changing by more than a
+ * couple of dB fails here). The four candidate *fills* for the window (the
+ * low-pass as shipped, the same filter fed the dry sample, 3- and 4-tap
+ * polynomial extrapolation of the output) were measured the same way and every
+ * one of them is worse than the shipped one — the table is in the worklet.
+ */
+section('audit · the de-clicker\'s own floor');
+{
+  const SR = 48000, SEC = 6;
+  const num = (v, d) => (typeof v === 'number' && isFinite(v) ? v.toFixed(d === undefined ? 1 : d) : String(v));
+  const LOOK = 17;                       // the stage's own look-ahead, in samples
+  const SRC_C = '  tick(x, amount, reconstructed, clipLevel) {';
+  const SRC_B = '    const out = m > 0.001 ? xd + (p - xd) * m : xd;';
+  const PATCH_C = SRC_C + '\n    this.__n = (this.__n || 0) + 1;';
+  const PATCH_B = SRC_B + '\n    { const __h = globalThis.__floor; if (__h) __h(this.__n, m); }';
+  const bed = (lp) => {
+    let s = H.filter(DSP, H.pink(SR, SEC, 0.40, 31), SR, 'lp', lp, 0.60);
+    const e = H.songEnvelope(SR, SEC, 0.35);
+    for (let i = 0; i < s.length; i++) s[i] *= e[i];
+    return H.normalize(s, 0.7);
+  };
+  const posOf = (dirty, clean) => {
+    const pos = [];
+    for (let i = 2; i < dirty.length - 2; i++) {
+      const d = Math.abs(dirty[i] - clean[i]);
+      if (d > 0.25 && d > Math.abs(dirty[i - 1] - clean[i - 1]) && d >= Math.abs(dirty[i + 1] - clean[i + 1])) pos.push(i);
+    }
+    return pos;
+  };
+  const Proc = H.loadProcessorEdited([[SRC_B, PATCH_B], [SRC_C, PATCH_C]], SR);
+  const leftBy = [];
+  let pops = 0, repairedMin = Infinity;
+  for (const lp of [5000, 7000, 9000, 12000]) {
+    const clean = bed(lp), dirty = H.addCrackle(clean, 9, 0.85, 8);
+    const m = DSP.measure([dirty], SR);
+    const P = Object.assign({}, H.DEFAULT_PARAMS, Presets.buildParams(Presets.classify(m).id, m, 0.7));
+    const N = dirty.length, planAt = new Float32Array(N);
+    globalThis.__floor = (n, plan) => { const i = n - LOOK; if (i >= 0 && i < N) planAt[i] = plan; };
+    H.renderEx(Proc, [dirty], P);
+    globalThis.__floor = null;
+    const pos = posOf(dirty, clean);
+    const left = pos.filter((p) => Math.max(planAt[p], planAt[p + 1]) <= 0.9);
+    pops = pos.length;
+    repairedMin = Math.min(repairedMin, pos.length - left.length);
+    leftBy.push(left);
+  }
+  const common = leftBy[0].filter((p) => leftBy.every((l) => l.some((q) => Math.abs(q - p) < 8)));
+  ok(repairedMin >= pops - 4 && common.length > 0 && common.length <= 4,
+    'the pops the gate does not reach are the same two or three in every bed',
+    repairedMin + ' of ' + pops + ' repaired in the sparsest bed, ' + common.length + ' left everywhere');
+  /* what reaching them would cost, on the two fixtures that guard it */
+  const kit = (() => {
+    const seconds = 12, out = new Float32Array(SR * seconds), hits = [];
+    const rand = H.rng(4242), beat = 60 / 96;
+    for (let b = 0; b * beat < seconds; b++) {
+      const t = b * beat;
+      if (b % 2 === 0) {
+        const s = Math.round(t * SR);
+        for (let i = 0; i < Math.round(0.18 * SR); i++) {
+          const x = i / SR;
+          out[s + i] += Math.sin(2 * Math.PI * (55 + 40 * Math.exp(-x * 40)) * i / SR) * Math.exp(-x * 26) * 0.55;
+        }
+      } else {
+        const s = Math.round(t * SR);
+        for (let i = 0; i < Math.round(0.25 * SR); i++) {
+          const x = i / SR, env = Math.min(1, x / 0.0015) * Math.exp(-x * 22);
+          out[s + i] += (((rand() * 2) - 1) * 0.42 + Math.sin(2 * Math.PI * 190 * i / SR) * 0.22) * env;
+        }
+        hits.push(s);
+      }
+      const h = Math.round((t + beat / 2) * SR);
+      for (let i = 0; i < Math.round(0.045 * SR); i++) out[h + i] += ((rand() * 2) - 1) * Math.exp(-(i / SR) * 60) * 0.10;
+    }
+    let bd = H.mul(H.pink(SR, seconds, 0.28, 99), 1);
+    const env = H.songEnvelope(SR, seconds, 0.05);
+    for (let i = 0; i < bd.length; i++) bd[i] *= env[i];
+    bd = H.filter(DSP, bd, SR, 'lp', 7000, 0.707);
+    return { sig: H.normalize(H.mix([out, bd]), 0.85), hits };
+  })();
+  let wide = H.filter(DSP, H.pink(SR, SEC, 0.42, 61), SR, 'hp', 30, 0.707);
+  for (const f of [180, 3200, 6400, 11000]) {
+    const t = H.tone(f, SR, SEC, 0.05);
+    for (let i = 0; i < wide.length; i++) wide[i] += t[i] * (0.6 + 0.4 * Math.sin(2 * Math.PI * 0.5 * i / SR));
+  }
+  wide = H.normalize(H.filter(DSP, wide, SR, 'lp', 19000, 0.7), 0.80);
+  const SRC_K = '    let k = clamp((ratio - 1.25) / 1.5, 0, 1);';
+  const maps = [
+    ['shipped', null],
+    ['ratio ≈ 2.0', [[SRC_K, '    let k = clamp((ratio - 1.10) / 1.20, 0, 1);']]],
+    ['ratio ≈ 1.9', [[SRC_K, '    let k = clamp((ratio - 1.05) / 0.90, 0, 1);']]],
+  ];
+  const costOf = (edits) => {
+    const Pk = H.loadProcessorEdited(edits || [], SR);
+    const kitOn = H.renderEx(Pk, [kit.sig], { power: 1, autoLevel: 0, declick: 0.715 });
+    const kitOff = H.renderEx(Pk, [kit.sig], { power: 1, autoLevel: 0 });
+    let worstSnare = 0, touched = 0;
+    for (const h of kit.hits) {
+      let e = 0, n = 0, peak = 0;
+      for (let k = 0; k < Math.round(0.002 * SR); k++) {
+        const j = h + k;
+        if (j + kitOn.latency >= kitOn.out[0].length) break;
+        const d = kitOn.out[0][j + kitOn.latency] - kitOff.out[0][j];
+        e += d * d; n++;
+        const a = Math.abs(kitOff.out[0][j]); if (a > peak) peak = a;
+      }
+      const db = 20 * Math.log10(Math.sqrt(e / n) / (peak + 1e-12) + 1e-12);
+      if (db < worstSnare) worstSnare = db;
+    }
+    for (let i = 0; i + kitOn.latency < kitOn.out[0].length; i++) if (Math.abs(kitOn.out[0][i + kitOn.latency] - kitOff.out[0][i]) > 0.002) touched++;
+    const wOn = H.renderEx(Pk, [wide], { power: 1, autoLevel: 0, declick: 0.715 });
+    const wOff = H.renderEx(Pk, [wide], { power: 1, autoLevel: 0 });
+    let wt = 0;
+    for (let i = 0; i + wOn.latency < wOn.out[0].length; i++) if (Math.abs(wOn.out[0][i + wOn.latency] - wOff.out[0][i]) > 0.002) wt++;
+    return { snare: worstSnare, kit: 100 * touched / kit.sig.length, master: 100 * wt / wOn.out[0].length };
+  };
+  const shipped = costOf(maps[0][1]), near = costOf(maps[1][1]), reach = costOf(maps[2][1]);
+  ok(shipped.snare < -55 && shipped.master < 5,
+    'as shipped, the de-clicker leaves the kit and a clean master alone',
+    'snare ' + num(shipped.snare) + ' dB · ' + num(shipped.kit, 2) + ' % of the kit · ' + num(shipped.master, 2) + ' % of the master');
+  ok(near.snare > shipped.snare + 20 && reach.snare > near.snare + 20 && reach.master > 50,
+    'and reaching even the nearest of those pops is what the gate was protecting',
+    'snare ' + num(near.snare) + ' → ' + num(reach.snare) + ' dB as the map moves down (' + num(near.master, 1) + ' → '
+    + num(reach.master, 1) + ' % of the clean master rewritten)');
+}
+
 /* The crackle statistic is the one number three things act on: the classifier's
  * "is this a worn record", the card's "there is crackle", and the de-clicker's
  * dose. So its floor has to be the file, not the analysis — and it was not.

@@ -13,6 +13,39 @@ thresholds sat in the tone stages (the glue's and the warmth's), all of them wri
 full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
 else may move.
 
+### Measured — where the de-clicker's detector stops, and what moving it costs
+
+* **The pops a de-clicker cannot see are the ones the statistic under-reads, and that is now a
+  number instead of an open item.** At the automatic dose (0.71) the fast/slow ratio map plus the
+  knee only let a spike through once the ratio reads ≈ 2.2. The acceptance fixture's *three
+  quietest* pops (|a| 0.41–0.48 of a 0.34–1.70 spread) read **1.86–2.02** with `asym` 0.30–0.33 —
+  below the 0.32–0.52 band that would discount the threshold for that shape, so the shape term is
+  worth 0.007 there, not the 0.18 it could be. Measured in **four beds** (low-passed at 5, 7, 9 and
+  12 kHz): 51–52 of 54 pops repaired, and **the same two or three left in every bed** — the floor
+  belongs to the statistic, not to a fixture.
+* **Moving the gate down is measured, and it is not worth it**: the ratio map lowered to ≈ 2.0 costs
+  the drum kit's snare 24 dB of its 55 dB guard (−62.1 → −37.7 dB) and rewrites 30.3 % of a clean
+  wide-band master (4.4 % at the shipped map); lowered to ≈ 1.9 it takes the snare to −13.6 dB and
+  81.7 % of the master. The shape term cannot reach them at all (its whole budget is `0.25 ×
+  amount` = 0.18 of confidence). So the floor is documented in the worklet itself and **pinned by
+  an audit row** (`audit · the de-clicker's own floor`), which fails if any of those three numbers
+  moves by more than a couple of dB.
+* **The fill was suspected and cleared.** Inside a full-replacement window the prediction filter is
+  fed its own output, so it has no input left and runs to a fixed point: measured sample by sample
+  (#374596), `pred` freezes at −0.1785 for 60+ samples and the window becomes a ≈1.35 ms DC plate.
+  It is a real trade — the residual is as loud as the music the window removed (median 0.8 dB of the
+  music's own 4–12 kHz, worst 8.1) — and it is **the best of four fills measured** on the same
+  fixture: the same filter fed the dry sample is worse on every witness (band median −0.8, leftover
+  worst 46.8 dB), 3-tap extrapolation touches 69.7 % of the drum kit (snare −50.4 dB), 4-tap takes
+  the snare to −0.3 dB and 98.8 % touched. The window *width* (pre/post 4/8 … 16/48) moves the
+  leftover by under 1 dB, so width is not the lever either.
+* **One measurement lesson from the same round**: the acceptance row's "3 of 72 pops above the clean
+  copy" is a comparison that includes the limiter's local gain (with the de-clicker bypassed the
+  same windows read 1.65/2.14 dB, with it engaged 4.01/3.69). On the residual — the chain on the
+  dirty file minus the chain on the clean copy — the two untouched pops read 5.9 and 8.1 dB in their
+  4–12 kHz band, and the *repaired* ones read ≈ 0.8 dB median, which is the fill's cost and not a
+  leftover click. A survivor count is only meaningful with its meter named.
+
 ### Measured — what the true-peak limiter costs a squashed master
 
 * **The card names "squashed" correctly and the chain then takes 1–2 dB more of the little
