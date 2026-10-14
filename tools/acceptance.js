@@ -1012,6 +1012,15 @@ mark('section 17');
  * complaint ("I re-upload the export and the same problem is still named") and
  * the row that closes it. What the 128 kbit/s arrival leaves on the record is
  * still a floor — it is just no longer above the music's own top-end tilt.
+ * Round 15 read that floor per 64-sample block (probes wr1 … wr12). At the pop
+ * the crackle row still counts inside the quiet passage, the arrival's own top
+ * end stands 22.2 dB above the clean copy's (±2000 samples, p50) and the chain
+ * takes 1.3 dB of it at p10, nothing at the median block — over the wider ±8000
+ * passage, 12.1 dB at p10. The pops themselves are repaired at full strength on
+ * both: the stage's plan fires k = 1.0 on the two the encoder clamps at the rail
+ * and the same fixture without the encoder reads 0/72. The second pop the row
+ * counts (82135) sits in a loud, HF-rich passage and is a marginal remainder
+ * (1.4 dB over the clean copy in its own window) — the count has two authors.
  * ------------------------------------------------------------------------- */
 {
   const clean = bed(9000, 0.62, 0.30);
@@ -1031,17 +1040,77 @@ mark('section 17');
   }
   const HP4 = bq('HP', 4000, 0.707), LP12 = bq('LP', 12000, 0.707);
   const ref = filt(clean, [HP4, LP12]);
-  const popE = (sig, lat) => {
+  const popE = (sig, lat, lo, hi) => {
     const b = filt(sig, [HP4, LP12]);
-    const rel = at.map((p) => { let e = 0, ec = 0;
-      for (let k = -16; k <= 48; k++) { const j = p + (lat || 0) + k; if (j >= 0 && j < b.length) e += b[j] * b[j]; ec += ref[p + k] * ref[p + k]; }
-      return e / Math.max(ec, 1e-20); }).sort((a, x) => x - a);
-    return { med: 10 * Math.log10(rel[Math.floor(rel.length / 2)]), over: rel.filter((x) => x > 1).length };
+    const lo2 = lo === undefined ? -16 : lo, hi2 = hi === undefined ? 48 : hi;
+    const rs = at.map((p) => { let e = 0, ec = 0;
+      for (let k = lo2; k <= hi2; k++) { const j = p + (lat || 0) + k, jr = p + k; if (j >= 0 && j < b.length) e += b[j] * b[j]; if (jr >= 0 && jr < ref.length) ec += ref[jr] * ref[jr]; }
+      return { p: p, r: e / Math.max(ec, 1e-20) }; });
+    const rel = rs.map((x) => x.r).sort((a, x) => x - a);
+    return { med: 10 * Math.log10(rel[Math.floor(rel.length / 2)]), worst: 10 * Math.log10(rel[0]),
+      over: rel.filter((x) => x > 1).length, rs: rs };
   };
   const pe = popE(upload, 0), pw = popE(r.out[0], r.lat);
   row('worn record (all at once)', 'crackle: pop energy over the clean copy (median dB)', pe.med, pw.med,
     'pops above it: ' + pe.over + '/' + at.length + ' → ' + pw.over + '/' + at.length + ' · crackleIndex '
     + N(r.m.crackleIndex) + ' → ' + N(r.mo.crackleIndex) + ' · section 1 reads 72/72 → 0/72 under its own chain, so the rest of the chain costs the de-clicker nothing');
+  /* ── the two questions this row used to run together ─────────────────────
+   * The window above is the repair window itself (−16 … +48 samples), so on this
+   * fixture it measures the pop *and* the arrival format around it. Round 15
+   * measured both apart (probes tools/work/wr1.js … wr12.js) and they are two
+   * different things:
+   *
+   *   the *spike*   4–12 kHz in ±4 samples: the chain takes every pop of the
+   *                 fixture to the bed (the row below);
+   *   the *floor*   the 128 kbit/s arrival's own top end, which in the passage
+   *                 the two loudest pops sit in stands 23 dB over the clean
+   *                 copy's (the row after that) — that is what the ±16/+48
+   *                 window of the crackle row still counts as two pops.
+   *
+   * The spike is repaired at *full* strength on both: the stage's own plan
+   * (audit's `plan` hook) fires k = 1.0 on both, and the same fixture *without*
+   * the encoder reads 0/72. Its window: the two loudest pops of the fixture add
+   * 1.75 and 1.66 to a bed that peaks at 0.70, so the WAV handed to the encoder
+   * is clamped at the rail there (`U.enc` clamps, as a 16-bit import does). */
+  const nar = popE(upload, 0, -4, 4), narOut = popE(r.out[0], r.lat, -4, 4);
+  row('worn record (all at once)', 'the pop spike itself (4–12 kHz, ±4 samples, median / worst dB over the clean copy)',
+    N(nar.med, 1) + ' / ' + N(nar.worst, 1), N(narOut.med, 1) + ' / ' + N(narOut.worst, 1),
+    'the chain takes the spike on every pop of the fixture — the median pop lands ' + N(narOut.med, 1)
+    + ' dB over the clean copy against ' + N(nar.med, 1) + ' dB on the upload; the worst ±4 entries sit in the'
+    + ' passage the row below measures');
+  const surv0 = pw.rs.filter((x) => x.r > 1).map((x) => x.p);
+  const surv = surv0.length ? surv0.sort((a, x) => a - x)
+    : pw.rs.slice().sort((a, x) => x.r - a.r).slice(0, 2).map((x) => x.p).sort((a, x) => a - x);
+  const fq = (sig, lat, centre, half) => {
+    const b = filt(lat ? sig.subarray(lat) : sig, [HP4, LP12]);
+    const bl = [];
+    for (let n = Math.max(0, centre - half); n + 64 <= Math.min(b.length, centre + half); n += 64) {
+      let e = 0; for (let k = 0; k < 64; k++) e += b[n + k] * b[n + k];
+      bl.push(10 * Math.log10(e / 64 + 1e-20));
+    }
+    bl.sort((a, x) => x - a);
+    return [bl[Math.floor(bl.length * 0.9)], bl[Math.floor(bl.length * 0.5)]];
+  };
+  /* per surviving pop, ±2000 samples (42 ms) around it; the value column is the
+   * one whose window carries the most of the arrival's own top end */
+  const fi = surv.map((p) => ({ p: p, up: fq(upload, 0, p, 2000), out: fq(r.out[0], r.lat, p, 2000), cl: fq(clean, 0, p, 2000) }));
+  const fiS = fi.slice().sort((a, x) => (x.out[1] - x.cl[1]) - (a.out[1] - a.cl[1]));
+  const fw = fiS[0], fo = fiS[1];
+  row('worn record (all at once)', 'the arrival\'s own top end at the pops the row above still counts (4–12 kHz, 64-sample blocks, p10 / p50 dBFS, ±2000 samples)',
+    N(fw.up[0], 1) + ' / ' + N(fw.up[1], 1), N(fw.out[0], 1) + ' / ' + N(fw.out[1], 1),
+    'the count behind the row above is two different stories, both measured here at ±2000 samples around the pop.'
+    + ' At pop ' + fw.p + ' the 128 kbit/s arrival\'s own top end stands ' + N(fw.up[1] - fw.cl[1], 1) + ' dB above the'
+    + ' clean copy\'s there (' + N(fw.up[1], 1) + ' vs ' + N(fw.cl[1], 1) + ' dBFS at p50) and the chain takes '
+    + N(fw.up[0] - fw.out[0], 1) + ' dB of it where the floor is quietest, ' + N(fw.up[1] - fw.out[1], 1) + ' dB at the'
+    + ' median block. The de-hisser is the stage for that floor and it is the *tilt* term of its key that decides: at'
+    + ' those frames its own plan asks for cutTilt 0.0 dB while its level key allows 19–20 dB, because a *broadband*'
+    + ' floor leaves the HF − MID tilt where it was (tiltNow −4.0 vs tiltRef −3.2, probes wr9/wr10) — while 0.26 s'
+    + ' later, where a frame\'s tilt does sit above the reference, the same burst at pop 228457 comes out 15.2 dB down'
+    + ' (that pop\'s window reads −63.3 dB against −48.1 with the stage off). Whether that term may be relaxed is a'
+    + ' depth policy, not a bug: the de-hisser\'s automatic dose is deliberately the tilt step that was measured, and'
+    + ' the suite pins it. At pop ' + fo.p + ' the same window reads ' + N(fo.up[1], 1) + ' → ' + N(fo.out[1], 1) + ' dBFS'
+    + ' (clean ' + N(fo.cl[1], 1) + ') — a loud, HF-rich passage where the pop\'s own remainder is 1.4 dB over the clean'
+    + ' copy, i.e. the count has two authors of very different size');
   const mask = quietMask(clean, 0.5);
   row('worn record (all at once)', 'hiss: ≥4 kHz RMS in the quiet (dBFS)', maskedBandDb(upload, mask, [HP4]), maskedBandDb(r.out[0], mask, [HP4], r.lat),
     'tilt step ' + N(r.m.hissTiltStepDb) + ' → ' + N(r.mo.hissTiltStepDb) + ' dB over ' + mask.filter(Boolean).length + ' quiet frames');

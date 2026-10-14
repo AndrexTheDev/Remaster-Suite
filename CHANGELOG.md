@@ -6,6 +6,39 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Measured — the 128 kbit/s worn record's last two pops, and the term of the de-hisser's key that cannot see them
+
+**Round 14 closed the de-clicker's floor: 72/72 → 0/72 on the crackles fixture. On the worn-record row —
+the same fixture through a 128 kbit/s encode — two pops stayed counted.** Round 15 asked which stage owns
+them and what they are made of (probes `tools/work/wr1.js` … `wr12.js`). The answer is that the *pop* is
+not the problem any more:
+
+* the stage's own plan fires **k = 1.0** on both survivors (the audit's plan hook), and the same fixture
+  *without* the encoder reads **0/72** — the pop is repaired either way;
+* in the repair window's own narrow form (4–12 kHz, ±4 samples) the chain takes the fixture from
+  **17.7 / 58.5** to **−18.9 / 10.5 dB** over the clean copy (median / worst) — every pop, not just the two;
+* what the ±16/+48 window of the crackle row still counts is the **arrival's own top end**: at the
+  survivor the 128 kbit/s encode's floor sits **22.2 dB** above the clean copy's own band level there
+  (±2000 samples, p50: −46.3 vs −68.5 dBFS), and it is the whole quiet passage that carries it, not a
+  ±600-sample burst around the spike. (The two survivors are also two different stories: the second one,
+  pop 82135, sits in a loud, HF-rich passage and is a 1.4 dB marginal remainder.)
+
+**Two rows were added to the acceptance matrix so the two questions the crackle row used to answer at
+once are measured apart** — the pop spike itself, and the arrival's own top end at the pops the row still
+counts (119 → **121 rows**, 31 classes).
+
+**Why the stage for that floor does not take it:** the de-hisser's automatic dose is gated on the *tilt*
+of the top end, and a **broadband** floor — the codec's own noise, spread over both key bands — lifts the
+4 kHz+ band and the 1.45 kHz reference together. Measured at exactly those frames: `tiltNow −4.0` vs
+`tiltRef −3.2`, i.e. a **0.0 dB** anomaly, while the stage's *level* key allows **19–20 dB** of cut there
+and `min(tilt, level)` closes the gate (applied gain 1.000). Where a frame's tilt does sit above the
+reference — 0.26 s later on the same fixture, pop 228457 — the same burst comes out **15.2 dB** down
+(that window −48.1 → −63.3 dB toggling the stage). Emitting the deeper cut in the broadband case would
+mean reading a *local* reference instead of the file-wide one the analyser measured, i.e. changing the
+stage's depth policy; that is deliberately pinned (`dsp.test.js`, "the floor regime delivers what was
+measured"), so round 15 documents the boundary and names the next lever instead of retuning it. The
+worklet carries the measurement at the decision it belongs to, README's de-hiss row the user-facing half.
+
 ### Fixed — the de-clicker's floor: the pops a band statistic cannot see, and what closed them
 
 **Round 10 ended with a documented floor: three of the crackles fixture's 72 pops survive the

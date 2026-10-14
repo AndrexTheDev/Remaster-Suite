@@ -976,6 +976,22 @@ class DeHiss {
       // hiss from music and would cut either way. The automatic doses therefore
       // only ask for the de-hisser when the measurement found a tilt step
       // (see presets.js) — the module keeps the expander for the manual path.
+      // ── what this term cannot see (round 15, measured) ──────────────────
+      // The automatic dose's depth *is* the tilt step the measurement found, and
+      // this term is what decides. A *broadband* floor — a 128 kbit/s arrival's
+      // own top end in a quiet passage — lifts the 4 kHz+ band and the 1.45 kHz
+      // reference together, so tiltNow − tiltRef stays at 0.0 dB while the level
+      // key below allows 19–20 dB of cut. The stage is therefore transparent
+      // there: on the acceptance fixture's quiet-passage pop the arrival's floor
+      // sits 22.2 dB above the clean copy's own top end and this stage takes
+      // 1.3 dB of it at p10 and nothing at the median block. Where a frame's
+      // tilt *does* sit above the reference — 0.26 s later on the same fixture —
+      // the same burst comes out 15.2 dB down (window −48.1 → −63.3 dB with the
+      // stage toggled). Reading it would mean a local instead of a file-wide
+      // reference, i.e. a *depth* policy, not a bug fix: the automatic dose is
+      // deliberately the measured step (see the dsp suite's "the floor regime
+      // delivers what was measured", and the matrix rows "the arrival's own top
+      // end at the pops the row above still counts"; probes wr9, wr10, wr12).
       const cutTilt = this.maxCut > 0.01 ? clamp(tiltNow - this.tiltRef, 0, this.maxCut) : 60;
       const lvl = smoothstep(this.t1, this.t1 + 1 / this.inv, e);
       const cutLevel = lvl > 1e-6 ? -20 * Math.log10(lvl) : 60;
