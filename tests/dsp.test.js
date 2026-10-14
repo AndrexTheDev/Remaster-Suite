@@ -240,10 +240,10 @@ H.section('engine · de-esser, the dose it is handed is the dose it spends');
   // 1 ── the curve: the same fixture at three intensities gets one dose
   const at = (p) => Object.assign({}, H.DEFAULT_PARAMS, RP.buildParams('auto', met, p));
   const doses = [0.35, 0.7, 0.95].map((p) => at(p).deess);
-  H.ok(met.sibPeakDb > 4.5 && Math.max(...doses) - Math.min(...doses) < 0.01 && doses[0] > 0.7,
+  H.ok(met.sibPeakDb > 4.5 && Math.max(...doses) - Math.min(...doses) < 0.01 && doses[0] > 0.7 && at(0).deess === 0,
     'the de-esser\'s dose is the measurement, not the intensity curve',
     'scan ' + met.sibPeakDb.toFixed(2) + ' dB · dose ' + doses.map((v) => v.toFixed(3)).join(' / ')
-    + ' at p = 0.35 / 0.7 / 0.95 (the curve took 0.830 of it before)');
+    + ' at p = 0.35 / 0.7 / 0.95 and 0 at p = 0 (the curve took 0.830 of it before)');
 
   // 2 ── the sound: the "s" bursts' own band comes down
   const burstBand = (x, lat) => {
@@ -292,28 +292,33 @@ H.section('engine · de-esser, the dose it is handed is the dose it spends');
   /* The frames are chosen on the input and then read on both renders: a de-essed
    * file's own "loudest 20 %" is a different population (the duck flattens the
    * distribution), and a meter that re-sorts each file under-reads the move it
-   * is meant to show. */
-  const loud20 = (chans, lat, ref, refLat) => {
-    const run1 = (x, l) => {
-      const b = new RSDSP.Biquad(); b.setBandpass(SR, 7000, 0.9);
-      const out = [];
-      for (let k = 0; k * 480 < x.length; k++) {
-        let e = 0;
-        for (let i = 0; i < 480; i++) { const v = b.process(x[k * 480 + i]); e += v * v; }
-        out.push(e / 480);
-      }
-      return out;
-    };
-    const a = run1(ref, refLat), b2 = run1(chans[0].subarray(lat || 0), 0);
-    const sorted = a.slice().sort((x, y) => y - x);
-    const cut = sorted[Math.max(0, Math.floor(sorted.length * 0.2) - 1)];
+   * is meant to show. One shared grid, and *complete* frames only — a loop that
+   * runs to `k*F < length` reads past the end on the latency-trimmed buffer,
+   * where the read is `undefined` and the frame's mean is NaN. */
+  const F20 = Math.round(SR * 0.01);
+  const framePower = (x) => {
+    const b = new RSDSP.Biquad(); b.setBandpass(SR, 7000, 0.9);
+    const out = [];
+    let e = 0;
+    for (let i = 0; i < x.length; i++) {
+      const v = b.process(x[i]);
+      e += v * v;
+      if (i % F20 === F20 - 1) { out.push(e / F20); e = 0; }
+    }
+    return out;
+  };
+  const loud20 = (chans, lat, ref) => {
+    const a = framePower(ref), wet = framePower(chans[0].subarray(lat || 0));
+    const n = Math.min(a.length, wet.length);
+    const sorted = a.slice(0, n).sort((x, y) => y - x);
+    const cut = sorted[Math.max(0, Math.floor(n * 0.2) - 1)];
     let sum = 0, take = 0;
-    for (let i = 0; i < Math.min(a.length, b2.length); i++) if (a[i] >= cut) { sum += b2[i]; take++; }
+    for (let i = 0; i < n; i++) if (a[i] >= cut) { sum += wet[i]; take++; }
     return 10 * Math.log10(sum / Math.max(1, take) + 1e-20);
   };
-  const zero = loud20([sus], 0, sus, 0);
-  const moved = zero - loud20(onS.out, onS.lat, sus, 0);
-  const before = zero - loud20(onC.out, onC.lat, sus, 0);
+  const zero = loud20([sus], 0, sus);
+  const moved = zero - loud20(onS.out, onS.lat, sus);
+  const before = zero - loud20(onC.out, onC.lat, sus);
   H.ok(sm.sibExcessDb > 3 && sLaw.deess > 0.4 && moved > before + 0.4,
     'a continuous "s" (the file that needs it) is moved further than the curve moved it',
     'excess ' + sm.sibExcessDb.toFixed(2) + ' dB · dose 0.463 → ' + sLaw.deess.toFixed(3)

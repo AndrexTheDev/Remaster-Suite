@@ -718,7 +718,7 @@ mark('section 10');
       for (let i = 0; i < F; i++) { e += b[k + i] * b[k + i]; re += r[k + i] * r[k + i]; }
       lv.push(e / F); rv.push(re / F);
     }
-    const sorted = rv.slice().sort((a, b2) => b2 - a);
+    const sorted = rv.slice().sort((x, y) => y - x);
     const cut = sorted[Math.max(0, Math.floor(sorted.length * 0.2) - 1)];
     let sum = 0, take = 0;
     for (let i = 0; i < lv.length; i++) if (rv[i] >= cut) { sum += lv[i]; take++; }
