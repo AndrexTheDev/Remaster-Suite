@@ -163,7 +163,9 @@ mark('section 1');
    * where the repair left it (median **−10.26 → −10.23 dB** over the clean copy,
    * the same 3 of 72 pops above it), and the app's verdict on its own export is
    * **healthy** (crackleIndex 1.00 dry → 0.06 after the chain → 0.04 after the
-   * re-upload). The encoder returns sample-aligned output, so the alignment is
+   * re-upload while the statistic was a bare percentile; **0.00 → 0.00** since
+   * the duty gate, because the spike population is gone and the index then sits
+   * on its floor — see section 10). The encoder returns sample-aligned output, so the alignment is
    * the render's own latency; it is found by correlation anyway (lag 0 samples on
    * this fixture) rather than assumed, because the pop meter is a window meter
    * and a wrong offset measures the bed. */
@@ -304,6 +306,12 @@ mark('section 3');
   row('mains hum', '50 + 150 Hz vs a non-hum bin (dB)', humDb(dirty), humDb(r.out[0], r.lat),
     'humScore ' + N(r.m.humScore) + ' → ' + N(r.mo.humScore) + ' · ' + r.dry.issues.join(','));
   row('mains hum', 'analyser humPeakDb', r.m.humPeakDb, r.mo.humPeakDb, '');
+  /* the export the user gets back, re-uploaded — the honesty check from the
+   * request: a fault the chain has repaired may not still be named on it */
+  const re = U.enc(r.out, 320, U.WORK + '/accept-hum-320.mp3')[0];
+  const rm = RSDSP.measure([re], SR);
+  row('mains hum', 're-upload at 320 kbit/s → diagnosis', r.dry.issues.join(','), RP.diagnose(rm).issues.join(',') || 'healthy',
+    'card ' + r.cls.id + ' → ' + RP.classify(rm).id + ' · the 320 kbit/s encoder puts its own noise floor under the file, which is what the analyser reads on it');
 }
 mark('section 4');
 /* 4 ── rumble ────────────────────────────────────────────────────────────── */
@@ -334,6 +342,10 @@ mark('section 4');
   row('rumble', 'the 8–20 Hz band, where the bed is not (dBFS)', bandSumDb(dirty, 8, 20), bandSumDb(r.out[0], 8, 20, r.lat),
     'the bed alone reaches this band at ' + N(bedFloor, 1) + ' dBFS (the rumble mixed into it reads ' + N(srcLevel, 1) + ')');
   row('rumble', 'below 20 Hz vs 100 Hz (dB)', bandSumDb(dirty, 10, 19) - bandSumDb(dirty, 90, 110), bandSumDb(r.out[0], 10, 19, r.lat) - bandSumDb(r.out[0], 90, 110, r.lat), '');
+  const re = U.enc(r.out, 320, U.WORK + '/accept-rumble-320.mp3')[0];
+  const rm = RSDSP.measure([re], SR);
+  row('rumble', 're-upload at 320 kbit/s → diagnosis', r.dry.issues.join(','), RP.diagnose(rm).issues.join(',') || 'healthy',
+    'card ' + r.cls.id + ' → ' + RP.classify(rm).id + ' · infraExcess on the export ' + N(rm.infraExcessDb, 1) + ' dB');
 }
 mark('section 5');
 /* 5 ── clipping ────────────────────────────────────────────────────────────
@@ -571,9 +583,32 @@ mark('section 10');
     lv.sort((a, b2) => a - b2);
     return lv[Math.floor(lv.length * 0.95)] - lv[Math.floor(lv.length * 0.30)];
   };
+  /* ── the other half of "recognise every defect precisely" ─────────────────
+   * A defect class must not be *invented*, and this fixture is where that failed:
+   * its twelve "s" bursts are sustained high-frequency *noise*, and the crackle
+   * statistic — a crest factor per 20 ms window — is a level measure on them:
+   * acceptance **v2aj** (the run before the duty gate landed) named `crackle` on
+   * this very fixture — its own card read `sibilance,crackle` — and the probe
+   * that went looking for the cause measured **0.269** of index and a **0.512**
+   * de-click dose on the same construction. The chain damaged the file it was
+   * asked to repair, and it did it on the strength of a statistic that has no
+   * way to tell a burst from a click.
+   * The statistic now asks whether the window's HF energy is a *spike* or a
+   * noise process (duty: the share of the window within 10 dB of its own peak —
+   * 0.002–0.02 for clicks, 0.045–0.12 for these onsets, 0.20–0.60 for noise),
+   * and the two rows below are the witness: the index stays below every gate and
+   * the de-click dose stays at the floor the profile uses for material with no
+   * clicks. The row is kept in this section on purpose — it is the section that
+   * pays for the mistake. */
+  row('sibilance', 'analyser crackleIndex — sibilance is not clicks', r.m.crackleIndex, r.mo.crackleIndex,
+    'before the duty gate acceptance v2aj named "crackle" on this fixture and the chain spent 0.512 of de-click dose on it · dose now ' + N(r.P.declick) + ', the floor the profile uses for material with no clicks (0.078)');
   row('sibilance', 'level inside the “s” bursts (dBFS)', burstBand(norm), burstBand(r.out[0], r.lat), 'a third of every burst, 33–100 ms in');
   row('sibilance', '7 kHz p95/p30 across the file (dB)', p95p30(norm), p95p30(r.out[0], r.lat),
     'sibExcess ' + N(r.m.sibExcessDb, 1) + ' → ' + N(r.mo.sibExcessDb, 1) + ' · deess ' + N(r.P.deess) + ' · ' + r.dry.issues.join(','));
+  const re = U.enc(r.out, 320, U.WORK + '/accept-sibilance-320.mp3')[0];
+  const rm = RSDSP.measure([re], SR);
+  row('sibilance', 're-upload at 320 kbit/s → diagnosis', r.dry.issues.join(','), RP.diagnose(rm).issues.join(',') || 'healthy',
+    'card ' + r.cls.id + ' → ' + RP.classify(rm).id + ' · deess on the export ' + N(RP.buildParams('auto', rm, 0.7).deess));
 }
 
 mark('section 11');
@@ -761,6 +796,169 @@ mark('section 16');
     'the repair may only touch the bottom');
 }
 
+mark('section 17');
+/* 17 ── everything a vinyl rip brings, at once ─────────────────────────────
+ * The user's own case, and the one no single-class section covers: a worn
+ * record that carries *every* defect of its world at the same time — rumble,
+ * mains hum, a worn top end (hiss), crackle, and a 128 kbit/s MP3 as the way
+ * it arrived. The claim this section has to prove is the one from the request:
+ * the chain works the defects off one after another, and *no repair undoes
+ * another*. Every class therefore gets its own row and its own meter — the
+ * same meters its own section uses — and the bed the record was cut from is
+ * known, so each of them has ground truth.
+ *
+ * Measured (card `vinyl` on the input, issues `crackle,hiss,hum` — the rumble
+ * is below the card's reporting line even though it is there, and 9.7 dB deep):
+ *   crackle   8.51 → **−9.96 dB** over the clean bed (72/72 → 4/72 pops), the
+ *             app's index 1.00 → **0.00** — under the full chain this is §1's own
+ *             result** (8.40 → −10.26, 72 → 3), i.e. the de-hisser, the hum
+ *             notches, the subsonic guard and the codec cost the de-clicker
+ *             nothing, which is exactly the "no stage undoes another" claim;
+ *   hiss      −37.76 → **−41.93 dBFS** (≥4 kHz over the 56 quiet frames), the
+ *             tilt step 16.34 → 6.86 dB;
+ *   hum       30.77 → **18.47 dB** against a non-hum bin — the 128 kbit/s
+ *             arrival has already smeared the line (§3's clean case reaches
+ *             1.7 dB; a lossy codec has nowhere else to put that energy);
+ *   rumble    9.73 → **0.97 dB** (14–30 vs 90–110 Hz), guard 19.6 Hz;
+ *   codec     the 8–16 kHz band sits 0.82 dB below the pre-encode record and
+ *             comes out 1.61 dB down — the chain's own top-end work, the same
+ *             direction as the loop's fixture;
+ *   music     0.62 → **2.18 dB** versus the bed — the chain's tonal work is
+ *             allowed to move this, and here it is by far the largest move.
+ * The export is then re-encoded at 320 kbit/s and re-measured: the app says
+ * `hiss` (card cassette), tilt step 6.86 — the one defect the arrival still
+ * carries loudest, named truthfully on the file the user gets back.
+ * ------------------------------------------------------------------------- */
+{
+  const clean = bed(9000, 0.62, 0.30);
+  let rec = Float32Array.from(clean);
+  rec = H.mix([rec, H.filter(RSDSP, H.filter(RSDSP, H.mul(H.noise(SR, SEC, 1, 12), 0.12), SR, 'lp', 35, 0.707), SR, 'lp', 35, 0.707)]);
+  rec = H.mix([rec, H.tone(50, SR, SEC, 0.030), H.tone(150, SR, SEC, 0.010)]);
+  rec = H.mix([rec, H.mul(H.filter(RSDSP, H.noise(SR, SEC, 1, 21), SR, 'hp', 3000, 0.6), 0.014)]);
+  rec = H.normalize(H.filter(RSDSP, rec, SR, 'lp', 14000, 0.7), 0.70);
+  const pops = H.addCrackle(rec, 9, 0.9, 8);
+  const upload = U.enc([pops], 128, U.WORK + '/accept-worn.mp3')[0];
+  const r = run([upload]);
+  /* the positions the fixture wrote — against the bed, which is the ground truth */
+  const at = [];
+  for (let i = 2; i < pops.length - 2; i++) {
+    const d = Math.abs(pops[i] - clean[i]);
+    if (d > 0.25 && d > Math.abs(pops[i - 1] - clean[i - 1]) && d >= Math.abs(pops[i + 1] - clean[i + 1])) at.push(i);
+  }
+  const HP4 = bq('HP', 4000, 0.707), LP12 = bq('LP', 12000, 0.707);
+  const ref = filt(clean, [HP4, LP12]);
+  const popE = (sig, lat) => {
+    const b = filt(sig, [HP4, LP12]);
+    const rel = at.map((p) => { let e = 0, ec = 0;
+      for (let k = -16; k <= 48; k++) { const j = p + (lat || 0) + k; if (j >= 0 && j < b.length) e += b[j] * b[j]; ec += ref[p + k] * ref[p + k]; }
+      return e / Math.max(ec, 1e-20); }).sort((a, x) => x - a);
+    return { med: 10 * Math.log10(rel[Math.floor(rel.length / 2)]), over: rel.filter((x) => x > 1).length };
+  };
+  const pe = popE(upload, 0), pw = popE(r.out[0], r.lat);
+  row('worn record (all at once)', 'crackle: pop energy over the clean copy (median dB)', pe.med, pw.med,
+    'pops above it: ' + pe.over + '/' + at.length + ' → ' + pw.over + '/' + at.length + ' · crackleIndex '
+    + N(r.m.crackleIndex) + ' → ' + N(r.mo.crackleIndex) + ' · section 1 reads 72/72 → 3/72 under its own chain, so the rest of the chain costs the de-clicker nothing');
+  const mask = quietMask(clean, 0.5);
+  row('worn record (all at once)', 'hiss: ≥4 kHz RMS in the quiet (dBFS)', maskedBandDb(upload, mask, [HP4]), maskedBandDb(r.out[0], mask, [HP4], r.lat),
+    'tilt step ' + N(r.m.hissTiltStepDb) + ' → ' + N(r.mo.hissTiltStepDb) + ' dB over ' + mask.filter(Boolean).length + ' quiet frames');
+  const humDb = (sig, lat) => 20 * Math.log10((goertzel(lat ? sig.subarray(lat) : sig, 50) + goertzel(lat ? sig.subarray(lat) : sig, 150)) / (goertzel(lat ? sig.subarray(lat) : sig, 113) + 1e-20));
+  row('worn record (all at once)', 'hum: 50 + 150 Hz vs a non-hum bin (dB)', humDb(upload, 0), humDb(r.out[0], r.lat),
+    'the 128 kbit/s arrival has smeared the line (section 3\'s clean case reaches 1.7 dB)');
+  row('worn record (all at once)', 'rumble: 14–30 vs 90–110 Hz (dB)',
+    bandSumDb(upload, 14, 30) - bandSumDb(upload, 90, 110), bandSumDb(r.out[0], 14, 30, r.lat) - bandSumDb(r.out[0], 90, 110, r.lat),
+    'guard ' + N(r.P.infraHP, 1) + ' Hz');
+  row('worn record (all at once)', 'codec: 8–16 kHz vs the pre-encode record (dB)',
+    bandSumDb(upload, 8000, 16000) - bandSumDb(pops, 8000, 16000), bandSumDb(r.out[0], 8000, 16000, r.lat) - bandSumDb(pops, 8000, 16000),
+    'the chain\'s own top-end work, the same direction as the loop\'s fixture');
+  row('worn record (all at once)', 'music: 0.8–4 kHz vs the bed (dB)',
+    bandSumDb(upload, 800, 4000) - bandSumDb(clean, 800, 4000), bandSumDb(r.out[0], 800, 4000, r.lat) - bandSumDb(clean, 800, 4000),
+    'the chain\'s tonal work is allowed to move this — the largest single move here');
+  const re = U.enc(r.out, 320, U.WORK + '/accept-worn-320.mp3')[0];
+  const rm = RSDSP.measure([re], SR);
+  row('worn record (all at once)', 're-upload at 320 kbit/s → diagnosis', r.dry.issues.join(','), RP.diagnose(rm).issues.join(',') || 'healthy',
+    'card ' + r.cls.id + ' → ' + RP.classify(rm).id + ' · tilt step on the export ' + N(rm.hissTiltStepDb) + ' dB — the one defect the 128 kbit/s arrival leaves strongest, named truthfully');
+}
+mark('section 18');
+/* 18 ── the modern master, hot ─────────────────────────────────────────────
+ * The other world of the request: a newer song. Nothing worn about it — no
+ * crackle, no rumble, no mains line — but it is *hot*: the envelope is
+ * flattened (what an over-limited master is, see section 15), saturated
+ * mildly, then clipped 2.0 dB below its own peak by the transfer, and it
+ * arrives as a 192 kbit/s MP3. Card `general`, and the app names
+ * `squashed,clipping` — both, which is the point: on this fixture the two
+ * classes coexist and each has its own witness to move.
+ *
+ * Measured:
+ *   squashed   20 ms envelope p98 − p05 12.75 → 11.63 dB, the app's own
+ *              dynamicRangeDb 8.7 → 8.7. The chain does not invent dynamics
+ *              back, and it does not squash further: the 1.1 dB the statistic
+ *              loses is the output stage, measured — with only the ceiling
+ *              removed it reads 11.86 dB, with the whole level stage off
+ *              12.75 (= the input), so it is the −2 dBTP ceiling + level ride,
+ *              not a compressor;
+ *   clipping   flat share of the top 0.20 % → **0.02 %**, implied missing peak
+ *              1.44 → 1.44 dB, evidence 0.21 → 0.02, de-clipper dose 0.68; and
+ *              the tool's own counter (same-sign samples equal to 1e-4 of the
+ *              peak) 6.28 → **0.00 per mille**, 618 → **0 runs**, longest
+ *              36 → 0 — the plateau population is gone, measured twice. (The
+ *              app's *own* longest-run reading moves little, 5 → 4 samples: it
+ *              counts inside its flat-pair window, and the share and the
+ *              counter are the statistics this fixture's evidence acts on.)
+ *   codec      the 8–16 kHz band sits 0.35 dB below the pre-encode master and
+ *              comes out 0.07 dB below it — the air synthesiser (dose 0.10,
+ *              6.0 kHz) rebuilding most of what the bitrate took, inside its
+ *              own ceiling;
+ *   music      −0.26 → 0.37 dB versus the pre-encode master.
+ * The export reads `squashed` — the clipping is gone from it, and what is left
+ * is the master's own dynamics, honestly reported.
+ * ------------------------------------------------------------------------- */
+{
+  const clean = bed(9000, 0.7, 0.35);
+  const sqEnv = H.songEnvelope(SR, SEC, 0.35);
+  const sq = new Float32Array(clean.length);
+  for (let i = 0; i < sq.length; i++) sq[i] = clean[i] / Math.max(sqEnv[i], 0.02) * Math.pow(Math.max(sqEnv[i], 0.02), 0.02);
+  let mean = 0;
+  for (let i = 0; i < sq.length; i++) mean += sq[i];
+  mean /= sq.length;
+  for (let i = 0; i < sq.length; i++) sq[i] = Math.tanh((sq[i] - mean) * 2.0) / 2.0;
+  const master = H.normalize(sq, 0.88);
+  /* the transfer clips 2.0 dB below the master's own peak */
+  const rail = 0.70;
+  const clipped = new Float32Array(master.length);
+  for (let i = 0; i < clipped.length; i++) clipped[i] = Math.max(-rail, Math.min(rail, master[i]));
+  const upload = U.enc([clipped], 192, U.WORK + '/accept-modern.mp3')[0];
+  const r = run([upload]);
+  const crest = (sig, lat) => {
+    const lv = [], F = Math.round(SR * 0.02);
+    for (let k = 0; k + F < sig.length; k += F) { let e = 0;
+      for (let i = 0; i < F; i++) { const j = k + i + (lat || 0); if (j < sig.length) e += sig[j] * sig[j]; }
+      lv.push(Math.sqrt(e / F)); }
+    lv.sort((a, b) => a - b);
+    return 20 * Math.log10((lv[Math.floor(lv.length * 0.98)] + 1e-12) / (lv[Math.floor(lv.length * 0.05)] + 1e-12));
+  };
+  row('hot modern master', '20 ms envelope p98 − p05 (dB)', crest(upload), crest(r.out[0], r.lat),
+    'the app reads ' + N(r.m.dynamicRangeDb, 1) + ' → ' + N(r.mo.dynamicRangeDb, 1) + ' dB (its own "squashed" line is 9) · card '
+    + r.dry.issues.join(',') + ' → ' + (r.wet.issues.join(',') || 'healthy') + ' · it does not invent dynamics, and does not squash further');
+  row('hot modern master', 'flat samples at the top, the share the diagnosis reads (%)',
+    100 * r.m.clipFlatRatio, 100 * r.mo.clipFlatRatio,
+    'implied missing peak ' + N(r.m.clipOvershootDb) + ' → ' + N(r.mo.clipOvershootDb) + ' dB · evidence ' + N(r.m.clipEvidence)
+    + ' → ' + N(r.mo.clipEvidence) + ' · longest run ' + r.m.clipMaxRun + ' → ' + r.mo.clipMaxRun + ' samples · de-clipper dose ' + N(r.P.declip));
+  const spIn = flatSpans(clipped), spOut = flatSpans(r.out[0]);
+  row('hot modern master', 'flat samples, own counter (per mille of the file)', spIn.permille, spOut.permille,
+    spIn.runs + ' → ' + spOut.runs + ' runs of same-sign samples equal to 1e-4 of the peak, longest ' + spIn.longest + ' → ' + spOut.longest
+    + ' · the plateau population is gone, measured twice');
+  row('hot modern master', 'codec: 8–16 kHz vs the pre-encode master (dB)',
+    bandSumDb(upload, 8000, 16000) - bandSumDb(master, 8000, 16000), bandSumDb(r.out[0], 8000, 16000, r.lat) - bandSumDb(master, 8000, 16000),
+    'the air synthesiser rebuilding what the bitrate took, inside its own ceiling (air ' + N(r.P.air) + ', airF ' + N(r.P.airF, 0) + ')');
+  row('hot modern master', 'music: 0.8–4 kHz vs the pre-encode master (dB)',
+    bandSumDb(upload, 800, 4000) - bandSumDb(master, 800, 4000), bandSumDb(r.out[0], 800, 4000, r.lat) - bandSumDb(master, 800, 4000), '');
+  const re = U.enc(r.out, 320, U.WORK + '/accept-modern-320.mp3')[0];
+  const rm = RSDSP.measure([re], SR);
+  row('hot modern master', 're-upload at 320 kbit/s → diagnosis', r.dry.issues.join(','), RP.diagnose(rm).issues.join(',') || 'healthy',
+    'card ' + r.cls.id + ' → ' + RP.classify(rm).id + ' — the clipping is gone from the export, and what is left is the master\'s own dynamics, honestly reported');
+}
+
+/* ── print ──────────────────────────────────────────────────────────────── */
 /* ── print ──────────────────────────────────────────────────────────────── */
 const W = [20, 62, 14, 14];
 console.log('%s %s %s %s %s',

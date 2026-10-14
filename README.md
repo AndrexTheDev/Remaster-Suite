@@ -188,9 +188,10 @@ Automatic mode therefore works on a **chain**, not on a label:
   a file with one problem (measured drift on a solo cassette: 0.03 dB of tone and 0.00 of budget).
 
 Measured on the case that started this: cassette tape with a little dirt on it, diagnosed as
-cassette (its hiss is the bigger defect) with clicks on top. The single-profile answer took 0.6 dB
-off the spike crest; the chain takes **3.6 dB** off it, because the file earned a de-click budget of
-0.60 instead of the cassette profile's 0.20 — and on a real 128 kbit/s re-encode of a vinyl rip the
+cassette (its hiss is the bigger defect) with clicks on top. Applied in full, the cassette profile's
+own budget still leaves **6 of the file's 10 spike windows** (windows whose high-frequency energy is
+a spike rather than a burst — the statistic the detector counts, see the changelog); the chain's own
+dose **0.60** instead of 0.20 leaves **none**. And on a real 128 kbit/s re-encode of a vinyl rip the
 codec joins the chain at 0.46, which lifts the 7 kHz band correction from 0.0 to 1.5 dB.
 
 ### Batch

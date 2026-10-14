@@ -13,6 +13,63 @@ thresholds sat in the tone stages (the glue's and the warmth's), all of them wri
 full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
 else may move.
 
+### Fixed — the crackle statistic read sibilance as clicks, and the chain then "repaired" it
+
+The de-clip / de-click detector asked one question per 20 ms window: how tall is the peak of the
+8.5 kHz+ band against that window's own RMS. On clicks the question is right. On **sustained**
+high-frequency noise it is a *level* measure — and the corpus is full of sustained high-frequency
+noise. Measured, the acceptance matrix's sibilance fixture (a clean bed with twelve "s" bursts on it,
+25 ms raised-cosine attack, no clicks anywhere) was named `crackle` by acceptance **v2aj** — its card
+read `sibilance,crackle` — and the probe that went looking for the cause measured **0.269** of index
+and a **0.512** de-click dose on the same construction: the chain damaged the file it was asked to
+repair, and a clean pop-free master with sibilant vocals would have been next.
+
+* A window now has to be a *spike* to speak: the detector measures the share of the window within
+  10 dB of its own peak (scale-invariant by construction — 960 samples of any noise process put
+  about a third of themselves above 0.3·peak, a one-to-three-sample spike puts 0.001–0.02 there) and
+  admits only windows at or below **0.04**. Measured, the duty of the tallest-crest windows: the pop
+  windows of the crackle and worn-rip fixtures **0.002–0.02** (a 128 kbit/s arrival included), the
+  "s" onsets of the sibilance fixture **0.045–0.12**, the noise windows of every fixture
+  **0.20–0.60** — the gate sits a factor of two above the highest pop and below every onset.
+* The rank-3 global term takes its three peaks from the same spike population, so a file whose
+  tallest high-frequency windows are bursts reads no repetition at all: before, that term alone was
+  worth 0.195 of the sibilance fixture's index (20.8 dB of "global crest" off its own "s" bursts).
+* A non-spike window is given the floor value instead of being dropped, so the 98th percentile still
+  asks for *repeated* spikes and one glitch in an hour cannot carry the index. The consequence is
+  deliberate and documented: on a file the chain has repaired the index sits on that floor
+  (acceptance §1: **0.06 → 0.00** after the chain, **0.04 → 0.00** on the re-uploaded export; §17's
+  worn record **0.11 → 0.00**) — where a comparison still needs to separate two nearly-repaired
+  files, the **spike-window count** is the statistic that has not saturated.
+* Witnesses: acceptance §10 carries the fixture's own row (`crackleIndex` 0.00 on both sides, de-click
+  dose **0.07** against the 0.512 it spent before), the sibilance card is `sibilance` again with no
+  phantom de-clicking in its output, and the audit's "a permission is not a dose" case now pins the
+  spike count it was really measuring: 10 windows with the de-clicker off, 6 with the cassette
+  ceiling applied in full, **0** with the dose the file earned. All five suites green
+  (128/137/310/108/17) with the gate at 0.04.
+
+### Added — the acceptance matrix's "everything at once" and its mirror
+
+* **§17 · a worn record carrying every defect of its world at once** — rumble, mains hum, a worn top
+  end, crackle, and a 128 kbit/s MP3 as the way it arrived — one row per class, each with its own
+  meter and ground truth. Measured: crackle 8.51 → **−9.96 dB** over the clean bed (72/72 → 4/72
+  pops, the app's index 1.00 → 0.00), and that is **§1's own result** (8.40 → −10.26, 72 → 3) — the
+  de-hisser, the hum notches, the subsonic guard and the codec cost the de-clicker nothing, which is
+  the "no repair undoes another" claim; hiss −37.76 → −41.93 dBFS; hum 30.77 → 18.47 dB (the codec has
+  smeared the line); rumble 9.73 → 0.97 dB; music 0.62 → 2.18 dB. The export reads `hiss` (cassette),
+  truthfully.
+* **§18 · the hot modern master** — flattened envelope, mild saturation, clipped 2.0 dB below its own
+  peak, arriving at 192 kbit/s: flat share **0.20 % → 0.02 %**, evidence 0.21 → 0.02, and the matrix's
+  own 1e-4 counter **6.28 → 0.00 per mille**, 618 → **0 runs**. The app reads 8.7 → 8.7 dB of dynamics
+  (it does not invent dynamics, and does not squash further: the 1.1 dB the crest statistic loses is
+  its −2 dBTP ceiling + level ride, measured with the ceiling alone removed (11.86 dB) and with the
+  whole output stage off (12.75 = the input)).
+* **Export re-uploads for the three classes that had none**: mains hum (`hum → healthy`), rumble
+  (`rumble,squashed,dullTop → rumble,squashed,dullTop`, `infraExcess` 10.6 dB) and sibilance
+  (`sibilance → sibilance`, deess 0.51). The rumble row is a **bug report against the chain**, not a
+  pass: the sub-sonic guard (24 Hz) cannot touch a rumble that sits at 25–45 Hz, so the app's own
+  per-frame excess still names its own export. Not fixed yet — the fixture is the one that provides
+  the ground truth.
+
 ### Measured — the two repair stages that stay on the taste curve, and why
 
 * **The de-clicker's amount is a repair depth, and the curve is its transient protection.** Applying

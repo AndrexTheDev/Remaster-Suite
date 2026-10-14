@@ -598,14 +598,30 @@ section('audit · several problems at once');
     '…and its de-click budget is no longer the cassette ceiling',
     pc.declick.toFixed(2) + ' vs ' + Presets.PRESETS.cassette.anchors.declick);
   const base = Object.assign({}, H.DEFAULT_PARAMS, pc);
+  /* Which statistic still moves once the clicks are nearly gone? The crest p98
+   * is a *population* measure — it asks whether the spikes are repeated (at
+   * least 2 % of the 20 ms windows) — so on this fixture it saturates: at the
+   * cassette ceiling the spikes are down to 6 windows of 600, i.e. below the
+   * percentile, and the reading is the floor at 0.0 dB either way (measured:
+   * 17.80 dry, 17.59 with the de-clicker off, 0.00 at the cassette ceiling,
+   * 0.00 with the chain's own dose). The spike *count* is the statistic that
+   * has not saturated, and it says what the claim is: 10 windows with the
+   * buds on, 6 with the cassette ceiling applied in full, 0 with the dose the
+   * file's evidence earned. */
+  const spikes = (ch) => DSP.crackleDetect(ch, SR).spikeFrames;
   const c0 = crest([clicks]);
-  const chainRun = crest(H.render(P, [clicks], base));
-  const capRun = crest(H.render(P, [clicks], Object.assign({}, base, { declick: Presets.PRESETS.cassette.anchors.declick })));
-  const noneRun = crest(H.render(P, [clicks], Object.assign({}, base, { declick: 0 })));
-  ok(chainRun < capRun - 2.5,
+  const chainOut = H.render(P, [clicks], base);
+  const capOut = H.render(P, [clicks], Object.assign({}, base, { declick: Presets.PRESETS.cassette.anchors.declick }));
+  const noneOut = H.render(P, [clicks], Object.assign({}, base, { declick: 0 }));
+  const chainRun = crest(chainOut), capRun = crest(capOut), noneRun = crest(noneOut);
+  /* the calls take the *list* of channels, like crest() above — handed a bare
+   * Float32Array, crackleStep would map over samples and measure nothing */
+  const chainSpikes = spikes(chainOut), capSpikes = spikes(capOut), noneSpikes = spikes(noneOut);
+  ok(chainSpikes === 0 && chainSpikes < capSpikes,
     'the chain tames the clicks where the cassette ceiling cannot (even applied in full)',
-    'crest ' + c0.toFixed(1) + ' → ' + chainRun.toFixed(1) + ' dB with the chain, '
-    + capRun.toFixed(1) + ' dB with the single profile, ' + noneRun.toFixed(1) + ' dB with none');
+    'spike windows ' + noneSpikes + ' with the de-clicker off, ' + capSpikes + ' at the cassette ceiling, '
+    + chainSpikes + ' with the chain — and the crest p98 is saturated either way ('
+    + c0.toFixed(1) + ' dB dry → ' + chainRun.toFixed(1) + ' / ' + capRun.toFixed(1) + ' / ' + noneRun.toFixed(1) + ' dB)');
 
   /* The other direction, and the more important one: a file with one problem
    * must stay a file with one problem. The hints every recording carries are

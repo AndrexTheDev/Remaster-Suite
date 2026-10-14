@@ -867,7 +867,10 @@
     /* Per window: its HF energy and its HF peak. The *selection* of which
      * windows carry the statistic is made in value(), against the file's own
      * HF level — see the gate there. */
-    const st = { ms: [], peak: [], crests: [], peaks: [], gPeak: 0, gSum: 0, gCount: 0, pops: 0 };
+    const st = { ms: [], peak: [], duty: [], spikeFrames: 0, crests: [], peaks: [], gPeak: 0, gSum: 0, gCount: 0, pops: 0 };
+    /* one window of band-passed samples, kept for the second pass that measures
+     * how much of the window sits near its own peak — see the duty gate in value() */
+    const spikeBuf = new Float32Array(win);
     const step = stepRange('crackle', units, units * win * 1.6, (from, to) => {
       let base = 0;
       for (let c = 0; c < channels.length; c++) {
@@ -888,7 +891,21 @@
               const aa = x < 0 ? -x : x;
               if (aa > peak) peak = aa;
               ms += x * x;
+              spikeBuf[i - off] = x;
             }
+            /* how much of the window sits within 10 dB of its own peak. The
+             * ratio is scale-invariant: a *noise* process fills a third of any
+             * window above 0.3·peak whatever its level — the peak of 960
+             * Gaussian samples is ~3.3σ, so 0.3·peak is ~1σ and a third of the
+             * samples sit above 1σ — while a spike of one to three samples
+             * measures 0.001–0.02. Measured, the duty of the eight
+             * tallest-crest windows: crackle 0.002–0.02, the sibilance fixture
+             * 0.13–0.47, a clean bed 0.24–0.45, a hiss 0.22–0.39, a squashed
+             * master 0.21–0.38. */
+            const nearTh = 0.3 * peak;
+            let near = 0;
+            for (let i = 0; i < win; i++) { const a = spikeBuf[i] < 0 ? -spikeBuf[i] : spikeBuf[i]; if (a > nearTh) near++; }
+            st.duty.push(near / win);
             st.gSum += ms; st.gCount += win;
             if (peak > st.gPeak) st.gPeak = peak;
             st.ms.push(ms); st.peak.push(peak);
@@ -926,15 +943,44 @@
         const hfMed = sortedMs.length ? sortedMs[Math.floor(sortedMs.length * 0.5)] : 0;
         const gate = Math.max(hfMed * 0.05, 1e-20);
         const crests = [], peakKept = [];
-        let gSum = 0, gCount = 0, gPeak = 0;
+        let gSum = 0, gCount = 0, gPeak = 0, spikeCount = 0;
         for (let i = 0; i < st.ms.length; i++) {
           if (st.ms[i] <= gate) continue;
           gSum += st.ms[i]; gCount += win;
           if (st.peak[i] > gPeak) gPeak = st.peak[i];
-          peakKept.push(st.peak[i]);
+          /* ── which windows describe a *spike* ─────────────────────────────
+           * A window whose energy is spread through it is a noise process —
+           * hiss, a cymbal, a sibilant — and its crest says nothing about
+           * clicks: a tall narrow peak is a spike only when the rest of the
+           * window is quiet underneath it. Without this gate the statistic is a
+           * *level* measure of the top end on such material, and it names faults
+           * that are not there: measured, the sibilance fixture (section 10 of
+           * the acceptance matrix — a clean bed with twelve "s" bursts on it)
+           * read 0.269 of "crackle", above both the classifier's gate and the
+           * vinyl profile's, so the chain put a 0.51 de-click dose on material
+           * whose only defect was sibilance: it damaged the file it was asked to
+           * repair. The gate sits in the gap the distributions leave, and the
+           * gap is wide: the pop windows of the crackle and worn-rip fixtures
+           * measure 0.002–0.02 (a 128 kbit/s arrival included), the "s" onsets
+           * of the sibilance fixture 0.045–0.12, the noise windows of every
+           * fixture 0.20–0.60. At 0.04 the gate is a factor of two above the
+           * highest pop measured and below every onset measured, and a sweep
+           * over 0.04 / 0.08 / 0.12 / 0.15 / 0.20 / 0.30 (acceptance fixtures,
+           * their chain outputs, a clean bed, a hiss, the squashed master) puts
+           * the working range at 0.04–0.04 ±: at 0.30 the sibilance fixture is
+           * back to 0.399 and the *card* is vinyl again, at 0.08 it is 0.181.
+           * 0.04 is the one value at which every fixture reads its class.
+           * A non-spike window takes the floor value 1 (0 dB, far below the
+           * 13 dB knee) rather than being dropped: the 98th percentile then
+           * still asks for *repeated* spikes, exactly as the rank-3 global term
+           * does, so a single glitch cannot carry the index — and a file the
+           * chain has repaired falls back to the floor. */
+          const spike = st.duty[i] <= 0.04;
           const rms = Math.sqrt(st.ms[i] / win);
-          crests.push(st.peak[i] / rms);
+          if (spike) { spikeCount++; crests.push(st.peak[i] / rms); peakKept.push(st.peak[i]); }
+          else crests.push(1);
         }
+        st.spikeFrames = spikeCount;
         st.crests = crests;
         for (const cf of crests) if (cf > 4.5) st.pops++;
         st.peaks = peakKept.length ? peakKept : st.peaks;
@@ -954,7 +1000,12 @@
          * 21.9 → 22.1. The weight is unchanged, so what this buys is precision:
          * a single glitch click in a clean master no longer contributes a
          * quarter of the crackle index on its own. */
-        const peakRank = st.peak.length >= 3 ? st.peak.slice().sort((a, b) => b - a)[2] : st.gPeak;
+        /* …and only spike windows may supply the rank: a file whose three
+         * tallest HF windows are sustained noise — a cymbal, a sibilant, a hiss —
+         * reads no repetition at all, where the rank used to be taken over every
+         * window and the sibilance fixture scored 20.8 dB of "global crest" off
+         * its own "s" bursts. */
+        const peakRank = peakKept.length >= 3 ? peakKept.slice().sort((a, b) => b - a)[2] : 0;
         const globalCrestDb = 20 * Math.log10(peakRank / (grms + 1e-12));
         st.crests.sort((a, b) => a - b);
         const p98 = st.crests.length ? st.crests[Math.min(st.crests.length - 1, Math.floor(st.crests.length * 0.98))] : 1;
@@ -989,6 +1040,7 @@
           globalCrestDb,
           medianCrestDb: 20 * Math.log10(med + 1e-9),
           peakProminenceDb: prominenceDb,
+          spikeFrames: spikeCount,
           frames: st.crests.length,
           spikes: st.pops,
         };
@@ -2102,7 +2154,7 @@
         clipOvershootDb: clipInfo.overshootDb,
         clipMaxRun: clipInfo.maxRun,
         clipEvidence: clipInfo.evidence,
-        noiseInfo: Object.assign({}, na, { crackleIndex: crackle.index, crestP98Db: crackle.crestP98Db, crestGlobalDb: crackle.globalCrestDb }),
+        noiseInfo: Object.assign({}, na, { crackleIndex: crackle.index, crestP98Db: crackle.crestP98Db, crestGlobalDb: crackle.globalCrestDb, spikeFrames: crackle.spikeFrames }),
         hfNoiseDeltaDb: hfNf - nf,
         dynamicRangeDb: core.dynamicRange(),
         clipRatio: core.clipRatio(),
