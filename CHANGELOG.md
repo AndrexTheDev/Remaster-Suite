@@ -6,6 +6,53 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Fixed — the de-hisser asked for a cut it could not deliver
+
+**The repair was 26 % of its own request where the defect lives.** The stage splits the signal at the
+measured hiss start and scales the high branch — but `low + high` is the Linkwitz-Riley allpass, so
+`low + high·g` also sums back a *unit-magnitude copy* of the whole signal at the gate's gain while the
+low branch's remainder subtracts from it. Measured as a static transfer with the gate held closed
+(probes hiss12/hiss13: white noise at the floor, request −22 dB) the split delivers **−5.8 dB at 4 kHz,
+−10.3 at 6 kHz, −13.8 at 8 kHz — 26 / 47 / 63 % of the request** — where the same gain applied flat
+delivers all −22.1. A steeper split (LR8) buys 1.0–1.4 dB at 6–8 kHz, a lower crossover (2.5 kHz)
+0–1 dB on the worn record: the phase-coupled allpass term is the limit, not the filter order
+(hiss10/hiss13), so neither was shipped.
+
+**Those frames now get a shelf on the same corner, gated by two witnesses that were already there.**
+Where the key band sits at the measured HF floor (`1 − lvl`) *and* the tilt anomaly is at its measured
+maximum (`cutTilt / maxCut`), the missing part comes from a second-order high-shelf at the repair
+corner (`HISS_FLOOR_RATIO = 0.75`) — its magnitude below the corner is exactly 1, and 0 dB of it is
+exactly the identity. The fraction is a measurement, not a taste: over four fixtures × four doses
+(hiss19) the pause floor keeps falling up to 0.75 and stops after it, while the *pauses' own tilt* —
+the number the diagnosis acts on — crosses the music's own tilt at 0.75 (+0.34 dB off on the synthetic
+bed+hiss, +0.71 on the worn record) and over-corrects beyond it (−2.2 / −1.2 dB, i.e. pauses duller
+than the music).
+
+Measured, every claim paired against the same render with the term removed (so each one is false
+without the change):
+
+* the acceptance hiss fixture's own pause frames, median per-band level against the clean copy (probe
+  hiss24, dB over the clean copy at 1/2/3/4/6/8/12 kHz): arrival 14/20/23/25/28/31/36, chain before
+  **11/16/17/17/17/18/21**, after **9/12/12/11/8/8/10** — the repair doubles where the defect lives —
+  and the ≥4 kHz quiet-RMS row moves −39.78 → **−40.32 dBFS** (12.1 from 10.3 dB of band in the frames
+  the noise owns);
+* the app's own statistics on the output move *with* the sound, which is what the round was about: the
+  tilt step the card prints 18.35 → **0.00 dB** and `hissAmount` 1.00 → **0.39** (the amount used to sit
+  at 1.00 by construction — its evidence term clamps at a step of 5.3 dB — so a 12 dB repair moved it by
+  nothing);
+* the user's own workflow (`tools/workflow-check.js`, worn record): upload `crackle, hiss, hum` →
+  re-upload at 320 kbit/s `hiss` → **healthy**; the acceptance §17 and §19 export rows agree (tilt step
+  on the export 6.86 → 0.84 dB);
+* the music does not move: loud and soft *musical* frames stay within 0.06 dB per band of the same
+  render without the shelf (hiss17/hiss25 — 0.48 vs 0.45 dB over the wider music-owned population,
+  0.01 dB in the loud frames), a *forced* dose on loud continuous music is **bit-identical**
+  (tests/dsp.test.js), and every clean fixture still measures a dose of exactly 0.
+
+What is *not* claimed: the pauses' absolute floor is still 8–12 dB above the clean copy at 6–12 kHz, and
+the dedicated hiss fixture's export is still named a hiss — through the *level* term (amount 0.31), not
+the tilt, which reads 0.00. The cap no longer binds either: lifting `hissMax` by 3 dB is worth +0.04 dB
+of band where it used to be worth +0.27 dB (hiss26).
+
 **The level release.** The suite promised that a quieter upload gets the same repair — and the
 repairs did, but the rest of the app did not. Four absolute constants sat in the analysis (an
 inter-sample-peak gate, a flat-top tolerance, a spectrum floor, a synthesizer reference cap) and two

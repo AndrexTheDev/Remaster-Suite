@@ -204,6 +204,113 @@ H.section('engine · de-hiss, dosed by the measurement');
     off.p50.toFixed(1) + ' → ' + on.p50.toFixed(1) + ' dB');
 }
 
+H.section('engine · de-hiss, the floor regime delivers what was measured');
+{
+  // The split cannot deliver the amount it asks for, and the reason is
+  // structural, not a tuning: `low + high` is the Linkwitz-Riley allpass, so
+  // `low + high·g` also sums back a unit-magnitude copy of the whole signal at
+  // the gate's gain, and the low branch's remainder subtracts from it. Measured
+  // as a static transfer with the gate held closed (probe hiss13, white noise at
+  // the floor, request −22 dB): −5.8 dB at 4 kHz, −10.3 at 6 kHz, −13.8 at
+  // 8 kHz, −18.1 at 12 kHz — 26 / 47 / 63 / 82 % of the request, and the deficit
+  // sits right above the crossover, where a worn record's hiss actually lives.
+  // A steeper split (LR8) buys 1.0–1.4 dB at 6–8 kHz and a lower crossover
+  // 0–1 dB on the worn record (probes hiss10/hiss13): neither is the lever.
+  //
+  // Where the two witnesses in DeHiss.tick say the frame is floor *only*, the
+  // missing part is made up by a high-shelf on the same corner. This section
+  // holds that to four numbers, all of them against a render with the shelf
+  // switched off — so the claims below are false without the change.
+  const SEC = 8;
+  const env = H.songEnvelope(SR, SEC, 0.30);
+  let bed = H.filter(RSDSP, H.pink(SR, SEC, 0.40, 31), SR, 'lp', 9000, 0.60);
+  for (let i = 0; i < bed.length; i++) bed[i] *= env[i];
+  const clean = H.normalize(bed, 0.62);
+  const hiss = H.mul(H.filter(RSDSP, H.noise(SR, SEC, 1, 21), SR, 'hp', 3000, 0.6), 0.014);
+  const sig = H.normalize(H.filter(RSDSP, H.mix([clean, hiss]), SR, 'lp', 14000, 0.7), 0.70);
+  const met = RSDSP.measure([sig], SR);
+  const law = Object.assign({}, H.DEFAULT_PARAMS, RP.buildParams('auto', met, 0.7));
+  const noShelf = H.loadProcessorEdited([['const HISS_FLOOR_RATIO = 0.75;', 'const HISS_FLOOR_RATIO = 0;']], SR);
+
+  const F = Math.round(SR * 0.02);
+  const frames = (x) => {
+    const a = [];
+    for (let k = 0; k + F <= x.length; k += F) {
+      let e = 0;
+      for (let i = 0; i < F; i++) e += x[k + i] * x[k + i];
+      a.push(10 * Math.log10(e / F + 1e-20));
+    }
+    return a;
+  };
+  const fl = frames(clean);
+  const sorted = fl.slice().sort((a, b) => a - b);
+  const pause = fl.map((v, i) => (v <= sorted[Math.floor(fl.length * 0.05)] ? i : -1)).filter((i) => i >= 0);
+  const music = fl.map((v, i) => (v >= sorted[Math.floor(fl.length * 0.90)] ? i : -1)).filter((i) => i >= 0);
+  // the frames in between: music is playing, but quietly (the counter-risk)
+  const soft = fl.map((v, i) => (v < sorted[Math.floor(fl.length * 0.90)] - 10
+    && v >= sorted[Math.floor(fl.length * 0.90)] - 25 ? i : -1)).filter((i) => i >= 0);
+  const bandDb = (x, f, idx, lat) => {
+    const b = new RSDSP.Biquad(); b.setBandpass(SR, f, 1.4);
+    let e = 0, n = 0;
+    for (const k of idx) {
+      for (let i = 0; i < F; i++) {
+        const j = k * F + i + (lat || 0);
+        if (j >= 0 && j < x.length) { const v = b.process(x[j]); e += v * v; n++; }
+      }
+    }
+    return 10 * Math.log10(e / Math.max(1, n) + 1e-20);
+  };
+  const on = H.renderEx(Processor, [sig], law);
+  const off = H.renderEx(noShelf, [sig], law);
+  H.ok(law.dehiss > 0.4 && law.hissMax > 8 && met.hissTiltStepDb > 10,
+    'the fixture asks for a deep de-hiss of a loud hiss',
+    'step ' + met.hissTiltStepDb.toFixed(1) + ' dB → dehiss ' + law.dehiss.toFixed(2)
+    + ', max ' + law.hissMax.toFixed(1) + ' dB');
+
+  // 1 ── the pause floor comes down where the split alone ran out of reach
+  const deeper = [4000, 6000, 8000, 12000].map((f) =>
+    bandDb(off.out[0], f, pause, off.lat) - bandDb(on.out[0], f, pause, on.lat));
+  H.ok(Math.min(...deeper) > 3,
+    'the pause floor comes down 4–12 kHz further than the split can take it',
+    deeper.map((v, i) => [4000, 6000, 8000, 12000][i] + ':' + v.toFixed(1)).join('  ') + ' dB');
+
+  // 2 ── and the music does not move: not in the loud frames, not in the soft
+  //      ones where the gate can be half-closed
+  const moves = [];
+  for (const f of [1000, 2000, 4000, 8000]) {
+    moves.push(Math.abs(bandDb(on.out[0], f, music, on.lat) - bandDb(off.out[0], f, music, off.lat)));
+    moves.push(Math.abs(bandDb(on.out[0], f, soft, on.lat) - bandDb(off.out[0], f, soft, off.lat)));
+  }
+  H.ok(Math.max(...moves) < 0.15,
+    'music frames (loud and soft) are untouched by the shelf',
+    'worst move ' + Math.max(...moves).toFixed(2) + ' dB over ' + music.length + '+' + soft.length + ' frames');
+
+  // 3 ── the diagnosis of the *output*: the two tilt numbers, not the clamped
+  //      step (which reads 0.00 for "matched" and for "over-corrected" alike)
+  const outOn = RSDSP.measure([on.out[0]], SR);
+  const outOff = RSDSP.measure([off.out[0]], SR);
+  H.ok(outOff.hissTiltStepDb > 5 && outOn.hissTiltStepDb < 1.0,
+    'the export stops reading as hiss (the round\'s re-upload criterion)',
+    'step ' + outOff.hissTiltStepDb.toFixed(2) + ' → ' + outOn.hissTiltStepDb.toFixed(2)
+    + ', amount ' + outOff.hissAmount.toFixed(2) + ' → ' + outOn.hissAmount.toFixed(2));
+  H.ok(outOn.hissTiltDb > outOn.musicTiltDb - 1.0,
+    '…without overshooting: the pauses are not made duller than the music',
+    'pause tilt ' + outOn.hissTiltDb.toFixed(2) + ' vs music ' + outOn.musicTiltDb.toFixed(2) + ' dB');
+
+  // 4 ── the mechanism: with music in the key band the shelf never opens, so a
+  //      loud continuous programme comes out bit-identical to the render with
+  //      the shelf removed. (The automatic doses never ask for a de-hiss on a
+  //      clean file — this is the *forced* dose, the negative control.)
+  const loud = H.pink(SR, 4, 0.35, 31);
+  const forced = { power: 1, dehiss: 1, noiseFloor: -70, hissFloor: -90, autoLevel: 0 };
+  const a = H.render(noShelf, [loud], Object.assign({}, H.DEFAULT_PARAMS, forced))[0];
+  const b = H.render(Processor, [loud], Object.assign({}, H.DEFAULT_PARAMS, forced))[0];
+  let mx = 0;
+  for (let i = 0; i < a.length; i++) mx = Math.max(mx, Math.abs(a[i] - b[i]));
+  H.ok(mx === 0, 'a forced dose on loud music is bit-identical with and without the shelf',
+    'max |Δ| ' + mx.toExponential(1));
+}
+
 H.section('engine · de-clicker');
 {
   const base = H.normalize(H.filter(RSDSP, H.pink(SR, 4, 0.25, 33), SR, 'lp', 9000, 0.707), 0.55);

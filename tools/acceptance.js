@@ -202,11 +202,13 @@ mark('section 2');
  * repair (see the stage), so both halves of the measurement belong on the row.
  * `hissTiltStepDb` is how many dB of the 4–16 kHz top end the programme cannot
  * account for — the *size*, and the number the card prints. `hissAmount` is a
- * 0–1 gate whose evidence term clamps at a step of 5.3 dB
- * (tiltEvidence = (step − 0.8)/5), so on anything clearly hissy it reads 1.00 on
- * the input, on the output *and* on the re-upload, and cannot move: a row that
- * printed it alone would say "nothing happened" about a repair that took the
- * step from 18.35 to 11.16 dB. The rows print the pair.
+ * 0–1 gate built from the same step (its evidence term is (step − 0.8)/5, so it
+ * clamps on anything clearly hissy) plus a dynamic-deficit term and the level
+ * term; the rows print the pair and the raw deficit beside them, because the
+ * amount alone cannot say *which* witness is holding the verdict up. Measured
+ * this round: the step falls **18.35 → 0.00 dB** and the amount **1.00 → 0.39**,
+ * and what is left of the amount is the level term — not the tilt (probe
+ * hiss24: band table below).
  *
  * Two more things are measured here rather than assumed, because the audit of
  * this class needs them — all on this fixture (step 18.35 dB, card cassette,
@@ -215,21 +217,35 @@ mark('section 2');
  * the repair moves it by 1 dB):
  *   · *where* the repair acts. The quiet mask is 53 of 400 frames, and in 48 of
  *     them the top end is the noise's own — measured, not asserted: the clean
- *     copy's ≥4 kHz sits below the hiss's. There the band comes down 8.8 dB; in
- *     the 5 quiet frames the music owns, and in the loud passages, it moves 0.20
- *     and 0.28 dB — those are the numbers that have to stay near zero;
+ *     copy's ≥4 kHz sits below the hiss's. There the band comes down **12.1 dB**
+ *     (10.3 before this round; the shelf's own share is measured against the same
+ *     render with the term removed — probe hiss25: 10.12 vs 8.93 dB over the wider
+ *     music-owned population); in the 5 quiet frames the music owns, and in the
+ *     loud passages, it moves 1.12 and 0.1 dB, and of the first number the shelf
+ *     is 0.04 dB (0.48 vs 0.45 dB on the wider population) — those are the numbers
+ *     that have to stay near zero;
  *   · *how much of the key's ask is applied*. In the noise-owned frames the tilt
  *     key reads **15.9 dB** — the same number the analyser's quiet median reports
  *     (15.82), which is the point of the key — the ask is capped to the card's
  *     17.35 (the frame would ask 18.4), the smoothed cut holds **17.33** of it
  *     (98 %, so the 60 ms ride is not the limit) and the amount that leaves the
- *     stage is 15.9 dB per sample, **10.3 dB energy-weighted** — because within a
- *     20 ms frame the energy sits where the level term has the gate more open.
- *     The independent meter agrees to a tenth of a dB (10.3 dB of band in those
- *     frames). Where the difference between 17.3 and 10.3 dB goes is therefore the
- *     *signal*, not the stage: the frames this fixture calls the noise's own still
- *     carry music where they are loud.
- *     Three fixes brought it here, each measured: (a) the mid band of the key was
+ *     split is 15.9 dB per sample — because within a 20 ms frame the energy sits
+ *     where the level term has the gate more open, **10.3 dB energy-weighted**
+ *     (8.93 dB measured over the wider population).
+ *     This round added a second stage to that path (see HISS_FLOOR_RATIO): where
+ *     the two witnesses agree the frame is floor only, a shelf on the repair
+ *     corner delivers what the split's phase-coupled reconstruction cannot — its
+ *     gain is **12.87 dB at the median gate update** in these frames (probe
+ *     hiss23: floorW p50 1.00, shelf 12.87 of the 0.75 × 17.33 it may take). It
+ *     is *not* worth 12.87 dB to the band, and that is the point of the gating:
+ *     the energy-weighted gain is +1.2 dB (10.3 → 12.1, the row above), because
+ *     the samples that carry a frame's energy are exactly the ones where the key
+ *     sees music and the witnesses back off. The *pause* is where the whole
+ *     amount lands: median level per band over the noise-owned frames, against
+ *     the clean copy (probe hiss24, dB over the clean copy at 1/2/3/4/6/8/12 kHz)
+ *     11/16/17/17/17/18/21 → **9/12/12/11/8/8/10**, i.e. the repair doubles where
+ *     the defect lives and leaves the bottom of the range to the music.
+ *     Three earlier fixes brought the split here, each measured: (a) the mid band of the key was
  *     **one** biquad where the analyser cascades **two** — the single filter's
  *     upper skirt reaches into the 4 kHz+ band the hiss lives in and read the
  *     quiet frames' tilt 4.38 dB low (−1.85 dB over the whole file), so the key
@@ -243,15 +259,23 @@ mark('section 2');
  *     the frames the music owns moved 0.02 → 1.12 dB (they are quiet frames where
  *     the noise still contributes a dB or so — the calibrated answer, not a
  *     mistake). Both clean-bed fixtures still measure a dose of exactly 0.
- *     What is *not* claimed here is that this is enough: a step of 5.8 dB is still
- *     a hiss, the export reads 5.2 dB, and the re-upload row says so instead of
- *     leaving the gate at 1.00 to imply nothing happened.
+ *     What is *not* claimed here is that this is enough. The tilt step now reads
+ *     **0.00 dB on the output** (was 5.82) and `hissAmount` **0.39** (was 1.00) —
+ *     the indicator moves with the sound now, which is what the 5th-order
+ *     requirement asks for — but the pauses' absolute floor is still 8–12 dB above
+ *     the clean copy at 6–12 kHz (probe hiss24), the export is still named a hiss
+ *     (through the level term, not the tilt), and the row says so instead of
+ *     implying nothing is left.
  *
  * The class's *ceiling* is measured here too, so the next round does not re-derive it. In
  * the frames the noise owns, the noise is **32.4 dB** above the clean copy's own top end
- * (this fixture has a ground truth: the bed is known) — so the 10.3 dB the chain takes is
- * **32 % of what is there**, and the step the card prints says so. Two ways to ask the frame's
- * own 32 dB were measured and rejected:
+ * (this fixture has a ground truth: the bed is known) — so the 12.1 dB the chain takes is
+ * **37 % of what is there** (32 % before this round), and the step the card prints says so.
+ * The cap that bounds the ask is no longer the limit either: lifting `hissMax` by 3 dB is
+ * worth **+0.04 dB** of band now (probe hiss26: 10.12 → 10.16 dB energy-weighted in the
+ * noise-owned frames, where the same lift used to be worth +0.27 dB), because the shelf
+ * scales with the same cap and the witnesses — not the cap — decide what is applied.
+ * Two ways to ask the frame's own 32 dB were measured and rejected:
  *   · *a level key alone* (ask = how far the top end sits above the measured floor) asks
  *     **2.9–7.6 dB inside the loud and music-owned frames** where the tilt key correctly asks
  *     0 — on this fixture the level cannot separate the classes at all (the frame's top end
@@ -261,10 +285,9 @@ mark('section 2');
  *     frames against **7.6 dB** in the loud ones, i.e. the wrong way round, because the
  *     programme's tilt is not constant across frames and the two meters disagreed by ~1.6 dB
  *     (that disagreement was the one-filter mid band, fixed above).
- * What is left is **not** a policy the app could just dial up: the cap binds by 1 dB now and
- * is worth **+0.27 dB** of band when it is lifted 3 dB (10.56 → 10.83 dB in the noise-owned
- * frames), and the frames that still carry music where they are loud are what the remaining
- * 17.3 − 10.3 dB is.
+ * What is left is **not** a policy the app could just dial up: the frames that still carry
+ * music where they are loud are what the difference between the per-sample cut (15.9 dB, plus
+ * up to 12.9 of shelf where the witnesses agree) and the energy-weighted 12.1 dB is.
  * ------------------------------------------------------------------------- */
 {
   const clean = bed(9000, 0.7);
@@ -297,13 +320,16 @@ mark('section 2');
   row('hiss', 'the size it measures, hissTiltStepDb (dB)', r.m.hissTiltStepDb, r.mo.hissTiltStepDb,
     'the card prints this number · the music now stands ' + N(r.mo.hfSnrDb, 1) + ' dB above the top-end floor (was '
     + N(r.m.hfSnrDb, 1) + ') · dose ' + N(r.P.dehiss, 3));
-  row('hiss', 'analyser hissAmount — a 0–1 gate that saturates', r.m.hissAmount, r.mo.hissAmount,
-    'tiltEvidence clamps at a step of 5.3 dB, so this cannot move on a file that is clearly hissy — the step above is the honest statement');
+  const witnesses = (m2) => 'tilt ' + N(clamp01(((m2.hissTiltStepDb || 0) - 0.8) / 5.0))
+    + ' · deficit ' + N(clamp01(((m2.hissDeficitDb || 0) - 1.0) / 4.0)) + ' (raw ' + N(m2.hissDeficitDb) + ' dB)';
+  row('hiss', 'analyser hissAmount — the 0–1 gate behind the card', r.m.hissAmount, r.mo.hissAmount,
+    'built from the step above and two more witnesses, so the row prints them: ' + witnesses(r.m) + ' → ' + witnesses(r.mo));
   const re = U.enc(r.out, 320, U.WORK + '/accept-hiss-320.mp3')[0];
   const rm = RSDSP.measure([re], SR);
   row('hiss', 're-upload at 320 kbit/s → diagnosis', r.dry.issues.join(','), RP.diagnose(rm).issues.join(',') || 'healthy',
-    'step ' + N(rm.hissTiltStepDb, 2) + ' dB · card ' + RP.classify(rm).id
-    + ' — the export is still hissy, and truthfully so: a step of ~10 dB is a hiss, and no repair of this class removes 18 dB of noise without taking the music\'s top end with it');
+    'step ' + N(rm.hissTiltStepDb, 2) + ' dB · amount ' + N(rm.hissAmount) + ' · card ' + RP.classify(rm).id
+    + ' — the tilt no longer explains the verdict on the export: ' + witnesses(rm)
+    + ', and the floor the level term reads is what is left of an 18 dB hiss');
 }
 mark('section 3');
 /* 3 ── mains hum ─────────────────────────────────────────────────────────── */
@@ -900,8 +926,10 @@ mark('section 17');
  *             result** (8.40 → −10.26, 72 → 3), i.e. the de-hisser, the hum
  *             notches, the subsonic guard and the codec cost the de-clicker
  *             nothing, which is exactly the "no stage undoes another" claim;
- *   hiss      −37.76 → **−41.93 dBFS** (≥4 kHz over the 56 quiet frames), the
- *             tilt step 16.34 → 6.86 dB;
+ *   hiss      −37.76 → **−42.02 dBFS** (≥4 kHz over the 56 quiet frames), the
+ *             tilt step 16.34 → **0.85 dB** — before this round the step stopped
+ *             at 6.86 dB, i.e. the pauses were still left above the music's own
+ *             tilt;
  *   hum       30.77 → **18.47 dB** against a non-hum bin — the 128 kbit/s
  *             arrival has already smeared the line (§3's clean case reaches
  *             1.7 dB; a lossy codec has nowhere else to put that energy);
@@ -911,9 +939,12 @@ mark('section 17');
  *             direction as the loop's fixture;
  *   music     0.62 → **2.18 dB** versus the bed — the chain's tonal work is
  *             allowed to move this, and here it is by far the largest move.
- * The export is then re-encoded at 320 kbit/s and re-measured: the app says
- * `hiss` (card cassette), tilt step 6.86 — the one defect the arrival still
- * carries loudest, named truthfully on the file the user gets back.
+ * The export is then re-encoded at 320 kbit/s and re-measured: the app now says
+ * `healthy` (card general), tilt step 0.85 dB — before this round the same file
+ * came back `hiss` (card cassette, step 6.86), which is the request's own
+ * complaint ("I re-upload the export and the same problem is still named") and
+ * the row that closes it. What the 128 kbit/s arrival leaves on the record is
+ * still a floor — it is just no longer above the music's own top-end tilt.
  * ------------------------------------------------------------------------- */
 {
   const clean = bed(9000, 0.62, 0.30);
@@ -962,7 +993,7 @@ mark('section 17');
   const re = U.enc(r.out, 320, U.WORK + '/accept-worn-320.mp3')[0];
   const rm = RSDSP.measure([re], SR);
   row('worn record (all at once)', 're-upload at 320 kbit/s → diagnosis', r.dry.issues.join(','), RP.diagnose(rm).issues.join(',') || 'healthy',
-    'card ' + r.cls.id + ' → ' + RP.classify(rm).id + ' · tilt step on the export ' + N(rm.hissTiltStepDb) + ' dB — the one defect the 128 kbit/s arrival leaves strongest, named truthfully');
+    'card ' + r.cls.id + ' → ' + RP.classify(rm).id + ' · tilt step on the export ' + N(rm.hissTiltStepDb) + ' dB — the defect the 128 kbit/s arrival left loudest does not come back: the pauses no longer sit above the music\'s own tilt (before this round: card cassette, step 6.86)');
 }
 mark('section 18');
 /* 18 ── the modern master, hot ─────────────────────────────────────────────

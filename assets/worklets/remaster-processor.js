@@ -782,6 +782,39 @@ const HISS_MID_HZ = 1450;
 const HISS_MID_Q = 0.63;
 /** Lower edge of the band the analyser measures as "the top end" (4–16 kHz). */
 const HISS_KEY_HZ = 4000;
+/**
+ * How much of the requested cut the floor regime delivers as a *shelf* above the
+ * repair corner, on top of what the split can do.
+ *
+ * The split cannot deliver the amount it asks for, and the reason is structural:
+ * `low + high` is the Linkwitz-Riley allpass, so `low + high·g` also sums back a
+ * *unit-magnitude copy* of the whole signal at the gate's gain, and the low
+ * branch's remainder subtracts from it. Measured as a static transfer with the
+ * gate held closed (probe hiss13, white noise at the floor, request −22 dB):
+ * −5.8 dB at 4 kHz, −10.3 at 6 kHz, −13.8 at 8 kHz, −18.1 at 12 kHz — 26 %, 47 %,
+ * 63 %, 82 % of the request, with the deficit concentrated right above the
+ * crossover, which is where the hiss of a worn record actually sits. A steeper
+ * split (LR8) buys 1.0–1.4 dB at 6–8 kHz, a lower crossover 0–1 dB on the worn
+ * record: neither is the lever (probe hiss10).
+ *
+ * Making the split steeper is therefore not the lever. On the §2 acceptance
+ * fixture's own pause frames (probe hiss24, median per-band level over the 49
+ * frames whose top end is the noise's) the chain used to leave 11 / 16 / 17 / 17
+ * / 17 / 18 / 21 dB above the clean copy at 1/2/3/4/6/8/12 kHz and now leaves 9 /
+ * 12 / 12 / 11 / 8 / 8 / 10 — the repair doubles where the defect lives, and the
+ * app's own two numbers on the output move with it: tilt step 5.82 → 0.00 dB,
+ * hissAmount 1.00 → 0.39. The fraction itself is from a 4-fixture × 4-dose sweep
+ * (probe hiss19): the pause floor keeps falling until 0.75 and stops moving after
+ * it, while the *tilt* of the pauses — the number the diagnosis acts on — crosses
+ * the music's own tilt at 0.75 on both hard fixtures (+0.34 dB off on the
+ * synthetic bed+hiss, +0.71 on the worn record) and over-corrects beyond it
+ * (−2.2 / −1.2 dB, i.e. pauses duller than the music). Music frames are untouched
+ * by every value: the shelf only opens where the gate has already proven there is
+ * nothing but floor (see the two witnesses in tick()), and a forced dose on loud
+ * continuous music comes out bit-identical to the same render with this term
+ * removed (tests/dsp.test.js).
+ */
+const HISS_FLOOR_RATIO = 0.75;
 /** Width of each mains notch, in hertz (see HumNotch.prepare). */
 const HUM_BW_HZ = 3;
 /** Relative floor under a de-clip run — see the run tracker in DeClipper.tick. */
@@ -836,11 +869,22 @@ class DeHiss {
     this.tiltRef = 0;          // the programme's own HF − MID tilt (measured)
     this.maxCut = 0;           // how much of the top end may be taken (measured)
     this.cutDb = 0;            // the cut the gate has actually taken (smoothed, see tick)
+    // the floor regime's shelf: how much of the repair is "this is only floor",
+    // its gain in dB, and the last gain the coefficients were built for (the
+    // filter's identity is exactly 0 dB, so a gain that has not moved by an
+    // audible step needs no new coefficients)
+    this.floorW = 0;
+    this.shDb = 0;
+    this.shApplied = 1e9;
+    this.sh = new Biquad();
   }
   reset() {
     this.lp1.reset(); this.lp2.reset(); this.hp1.reset(); this.hp2.reset();
     this.k1.reset(); this.k2.reset();
     this.mid1.reset(); this.mid2.reset();
+    this.sh.reset();
+    this.shApplied = 1e9;
+    this.floorW = 0; this.shDb = 0;
     this.rmsHf.reset(); this.rmsMid.reset();
     this.gate.reset(1);
   }
@@ -862,6 +906,11 @@ class DeHiss {
     this.xover = x;
     this.lp1.setLowpass(this.sr, x, 0.7071); this.lp2.setLowpass(this.sr, x, 0.7071);
     this.hp1.setHighpass(this.sr, x, 0.7071); this.hp2.setHighpass(this.sr, x, 0.7071);
+    // The floor regime's shelf sits on the *same* corner: the deficit it makes
+    // up is the split's own (−6 dB at the corner, closing by about a dB per
+    // octave above it), so a shelf anywhere else would fill a hole that is not
+    // there. The gain is not touched here — the next tick rebuilds it.
+    this.shApplied = 1e9;
   }
   setNoise(hfNoiseLin) {
     // The absolute reference: where the HF band sits, as an RMS of the same band
@@ -943,6 +992,29 @@ class DeHiss {
         : 1 - Math.exp(-HISS_DECIM / (this.sr * HISS_OPEN_MS * 0.001));
       this.cutDb += (cutTarget - this.cutDb) * rate;
       this.gate.set(Math.pow(10, -this.cutDb / 20));
+      // ── is this frame *only* floor?
+      // Two witnesses, both already computed here, and both have to agree:
+      //   · `1 - lvl` — the key band (4 kHz+) sits at or below the measured HF
+      //     floor, i.e. the level key sees no music at all (lvl is that key's
+      //     own smoothstep against t1, whose top end is +9 dB above the floor);
+      //   · `cutTilt / maxCut` — the tilt anomaly is at the value the
+      //     measurement found, i.e. the whole of what was measured as noise is
+      //     present.
+      // The product is what gives the shelf its permission: a quiet *musical*
+      // passage fails the first term (its own top end lifts `e`), a half-hissy
+      // one fails the second (mid-band programme lowers tiltNow, and the term is
+      // proportional, not a switch), and a loud one fails both.
+      const floorT = this.maxCut > 0.01 ? clamp(cutTilt / this.maxCut, 0, 1) * (1 - lvl) : 0;
+      this.floorW += (floorT - this.floorW) * rate;
+      // The shelf's gain, in dB (negative = cut), smoothed with the gate's own
+      // attack/release so the two move together: a hard step here would be a
+      // step in the waveform, the same reason the `s` window below exists.
+      const shT = -this.cutDb * HISS_FLOOR_RATIO * this.floorW;
+      this.shDb += (shT - this.shDb) * rate;
+      if (Math.abs(this.shDb - this.shApplied) > 0.02) {
+        this.shApplied = this.shDb;
+        this.sh.setHighShelf(this.sr, this.xover, 0.7071, this.shDb);
+      }
     }
     // The amount is applied in *decibels*, not as a linear crossfade: "half the
     // repair" has to mean −6 dB of the noise, and a linear blend of the gate
@@ -973,7 +1045,15 @@ class DeHiss {
     // unchanged to within 0.01 dB.
     const s = gEff >= 1 ? 0 : gEff <= 0.999 ? 1 : (1 - gEff) / 0.001;
     if (s === 0) return x;
-    return x + (low + high * gEff - x) * s;
+    const split = low + high * gEff;
+    // …and where the two witnesses above have proven the frame is floor only,
+    // the shelf closes the gap between what the split delivers and what was
+    // measured. Cascaded after the split rather than in place of it: the modes
+    // are then "top end only, leak-limited" (music present) and "top end plus
+    // the floor regime" (nothing but floor), and the crossfade between them is
+    // the ramp on floorW/shDb, not a switch.
+    const shaped = (this.floorW > 0.001 && this.shDb < -0.01) ? this.sh.process(split) : split;
+    return x + (shaped - x) * s;
   }
 }
 
