@@ -813,12 +813,20 @@ class DeHiss {
     this.k1 = new Biquad(); this.k1.setHighpass(sr, HISS_KEY_HZ, 0.707);
     this.k2 = new Biquad(); this.k2.setHighpass(sr, HISS_KEY_HZ, 0.707);
     // The gate is keyed on the *tilt* of the top end, not on its level: the
-    // 700 Hz–3 kHz band rides with the programme, the 4–16 kHz band rides with it
+    // 1.45 kHz band rides with the programme, the 4–16 kHz band rides with it
     // too as long as it holds music — and stops riding when what is up there is
     // noise. Measuring the same two bands here as the analyser does is what makes
     // the measured number (dB of top end that is not programme) something this
-    // stage can actually subtract.
-    this.mid = new Biquad(); this.mid.setBandpass(sr, HISS_MID_HZ, HISS_MID_Q);
+    // stage can actually subtract — and *same* means the same filters, which is
+    // why the mid band is two cascaded bandpasses like the analyser's `ma`/`mb`
+    // and not one. A single bandpass at this Q has visibly wider skirts and its
+    // upper one reaches into the 4 kHz+ band the *hiss* lives in: measured on the
+    // acceptance fixture, one filter reads the quiet frames' tilt 4.38 dB lower
+    // than the cascade (−1.85 dB over the whole file), i.e. the key under-asked
+    // by the very noise it was looking for, and the mid band was 16 dB inflated
+    // by the noise in the frames the noise owns.
+    this.mid1 = new Biquad(); this.mid1.setBandpass(sr, HISS_MID_HZ, HISS_MID_Q);
+    this.mid2 = new Biquad(); this.mid2.setBandpass(sr, HISS_MID_HZ, HISS_MID_Q);
     this.rmsHf = new SlidingRms(2048);       // same window as the analyser's frames
     this.rmsMid = new SlidingRms(2048);
     this.tickCount = 0;
@@ -832,7 +840,7 @@ class DeHiss {
   reset() {
     this.lp1.reset(); this.lp2.reset(); this.hp1.reset(); this.hp2.reset();
     this.k1.reset(); this.k2.reset();
-    this.mid.reset();
+    this.mid1.reset(); this.mid2.reset();
     this.rmsHf.reset(); this.rmsMid.reset();
     this.gate.reset(1);
   }
@@ -894,7 +902,7 @@ class DeHiss {
     const low = this.lp2.process(this.lp1.process(x));
     const high = this.hp2.process(this.hp1.process(x));
     const e = this.rmsHf.tick(this.k2.process(this.k1.process(x)));
-    const em2 = this.rmsMid.tick(this.mid.process(x));
+    const em2 = this.rmsMid.tick(this.mid2.process(this.mid1.process(x)));
     this.tickCount++;
     if (this.tickCount % HISS_DECIM === 0) {
       // How much top end is left that the programme cannot explain?

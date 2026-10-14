@@ -207,33 +207,39 @@ mark('section 2');
  *     the 5 quiet frames the music owns, and in the loud passages, it moves 0.20
  *     and 0.28 dB — those are the numbers that have to stay near zero;
  *   · *how much of the key's ask is applied*. In the noise-owned frames the tilt
- *     key reads 13.9 dB, the smoothed cut reaches 13.6 dB, and the amount that
- *     leaves the stage is 0.920 × that ≈ 12.5 dB (energy-weighted 8.8, because
- *     the gate still opens in 8 ms). The 0.920 is the law's own value for this
- *     file, under the card's cap. Until this round every repair was multiplied by
- *     the intensity curve — 0.35 + 0.65·p^0.85, i.e. 0.830 at the default
- *     p = 0.7 — so the row read a dose of 0.764 and those frames came down 7.7 dB;
- *     a *measured* repair is now applied as measured (the policy the hum notch
- *     and the resonance notches already followed, with the slider still gating it
- *     to zero below 20 %). Measured on this fixture: the band in those frames
- *     7.69 → **8.79 dB**, the step this card prints 10.18 → **8.39**, for +0.07 dB
- *     on the frames the music owns — and both clean-bed fixtures still measure a
- *     dose of exactly 0. The closing time is 60 ms as of this round and used to
- *     be 250: the *lag*, not the ask, was halving the repair (6.06 → 7.94 dB of
- *     band when the close went 250 → 60 ms, with ≤0.2 dB on the frames the noise
- *     does not own and no change at all in either pop witness — see
- *     HISS_CLOSE_MS for the four-way measurement). What is *not* claimed here is
- *     that this is enough: a step of 8.4 dB is still a hiss, the export reads it,
- *     and the re-upload row says so instead of leaving the gate at 1.00 to imply
- *     nothing happened.
+ *     key reads **15.9 dB** — the same number the analyser's quiet median reports
+ *     (15.82), which is the point of the key — the ask is capped to the card's
+ *     17.35 (the frame would ask 18.4), the smoothed cut holds **17.33** of it
+ *     (98 %, so the 60 ms ride is not the limit) and the amount that leaves the
+ *     stage is 15.9 dB per sample, **10.3 dB energy-weighted** — because within a
+ *     20 ms frame the energy sits where the level term has the gate more open.
+ *     The independent meter agrees to a tenth of a dB (10.3 dB of band in those
+ *     frames). Where the difference between 17.3 and 10.3 dB goes is therefore the
+ *     *signal*, not the stage: the frames this fixture calls the noise's own still
+ *     carry music where they are loud.
+ *     Three fixes brought it here, each measured: (a) the mid band of the key was
+ *     **one** biquad where the analyser cascades **two** — the single filter's
+ *     upper skirt reaches into the 4 kHz+ band the hiss lives in and read the
+ *     quiet frames' tilt 4.38 dB low (−1.85 dB over the whole file), so the key
+ *     under-asked by the very noise it was looking for; (b) the closing time is
+ *     60 ms and used to be 250 — the *lag*, not the ask, was holding the repair
+ *     back (6.06 → 7.94 dB of band on the close time alone); (c) a measured repair
+ *     is now applied as measured instead of being scaled by the intensity curve
+ *     (0.35 + 0.65·p^0.85 = 0.830 at the default p = 0.7, which turned the law's
+ *     0.920 into 0.764). Together, on this fixture: the frames the noise owns went
+ *     **5.8 → 10.3 dB** of band, the step this card prints **18.35 → 5.82 dB**, and
+ *     the frames the music owns moved 0.02 → 1.12 dB (they are quiet frames where
+ *     the noise still contributes a dB or so — the calibrated answer, not a
+ *     mistake). Both clean-bed fixtures still measure a dose of exactly 0.
+ *     What is *not* claimed here is that this is enough: a step of 5.8 dB is still
+ *     a hiss, the export reads 5.2 dB, and the re-upload row says so instead of
+ *     leaving the gate at 1.00 to imply nothing happened.
  *
  * The class's *ceiling* is measured here too, so the next round does not re-derive it. In
  * the frames the noise owns, the noise is **32.4 dB** above the clean copy's own top end
- * (this fixture has a ground truth: the bed is known), the analyser's file-level step says
- * **18.35 dB** (its own calibration: 17.5 dB on the workflow fixture), the card grants a cap
- * of **17.35**, the frame's tilt key asks **13.9** and the ride delivers **8.8** — the hiss
- * comes out 54 % removed, not gone. Three ways to make the key ask what the frame needs were
- * measured, and all three are rejected:
+ * (this fixture has a ground truth: the bed is known) — so the 10.3 dB the chain takes is
+ * **32 % of what is there**, and the step the card prints says so. Two ways to ask the frame's
+ * own 32 dB were measured and rejected:
  *   · *a level key alone* (ask = how far the top end sits above the measured floor) asks
  *     **2.9–7.6 dB inside the loud and music-owned frames** where the tilt key correctly asks
  *     0 — on this fixture the level cannot separate the classes at all (the frame's top end
@@ -241,18 +247,12 @@ mark('section 2');
  *   · *inverting the two bands* (`P_MID = (HF² − N²)/10^(tiltRef/10)`, the one formulation
  *     that is algebraically identifiable) is degenerate here — **3.9 dB** in the noise-owned
  *     frames against **7.6 dB** in the loud ones, i.e. the wrong way round, because the
- *     programme's tilt is not constant across frames and the two meters disagree by ~1.6 dB;
- *   · *aligning the key with the analyser's quantity*: the analyser's quiet-frame median tilt
- *     is **15.82 dB** against the stage's own **11.35 dB** in the same-band frames — a 4.5 dB
- *     gap in aggregation and frame set, not in meters, and raising an ask by an unexplained
- *     offset is not a fix.
- * What is left, then, is **not** a policy the app could just dial up: the cap the law applies
- * is worth **+0.29 dB** of band when it is lifted from 0.95 to 1.0 (8.05 → 8.34 dB in the
- * noise-owned frames — the cap is not what binds), and the frame's own requirement (32 dB)
- * is beyond what any single-key expander can separate from programme without a spectral
- * model. The open item is the **4.5 dB between the stage's key and the analyser's own bound**
- * — an aggregation and frame-set difference, measured, not explained, and therefore not
- * something to raise an ask by.
+ *     programme's tilt is not constant across frames and the two meters disagreed by ~1.6 dB
+ *     (that disagreement was the one-filter mid band, fixed above).
+ * What is left is **not** a policy the app could just dial up: the cap binds by 1 dB now and
+ * is worth **+0.27 dB** of band when it is lifted 3 dB (10.56 → 10.83 dB in the noise-owned
+ * frames), and the frames that still carry music where they are loud are what the remaining
+ * 17.3 − 10.3 dB is.
  * ------------------------------------------------------------------------- */
 {
   const clean = bed(9000, 0.7);

@@ -13,6 +13,35 @@ thresholds sat in the tone stages (the glue's and the warmth's), all of them wri
 full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
 else may move.
 
+### Fixed — the key measured a *different* band than the analysis it follows
+
+* **One bandpass where the analysis cascades two.** The de-hisser's key compares the 4 kHz+ band
+  against a 1.45 kHz reference, and the source says so explicitly: "the analyser measures the hiss
+  tilt as 4–16 kHz against a 1.45 kHz band reference, and the key here has to see exactly those two
+  bands". The analyser cascades **two** bandpasses for that reference (`ma`/`mb`, two poles per side);
+  the stage used **one** — whose flatter skirts reach up into the 4 kHz+ band the hiss lives in.
+  Reproduced outside both, on the acceptance fixture: with the cascade the quiet frames' median tilt
+  is **15.82 dB** and the loud median **−2.53 dB** — exactly the numbers the analyser exports — and
+  with one filter **11.44 dB**, i.e. the single filter reads the noise's own body into the reference
+  and *under-asks by the very noise it is looking for* (mid-band power: +1.85 dB over the whole file,
+  +4.38 dB in the frames the noise owns).
+* **Fixed by cascading it** (`mid1`/`mid2`), which is what the source always claimed. On the
+  acceptance fixture: the noise-owned frames' band comes down **8.8 → 10.3 dB** (5.8 dB before this
+  week's round of hiss fixes), the tilt step the card prints **8.39 → 5.82 dB**, the quiet passages
+  ≥4 kHz **−38.66 → −39.78 dBFS**, and the re-uploaded export reads **5.23 dB** where the upload read
+  18.35. The internal chain now closes exactly: the key reads **15.87** (the analyser says 15.82), the
+  ask is capped to the card's 17.35 (the frame would ask 18.4), the gate holds **17.33** of it — 98 %,
+  so the 60 ms ride is not the limit — and 15.94 dB per sample leaves the stage, **10.33 dB
+  energy-weighted**, against the independent meter's 10.3 dB.
+* **What it costs**: the quiet frames the music owns move 0.20 → **1.12 dB** of top end. Those are
+  frames where the noise still contributes a dB or so of the top end, so this is the calibrated answer
+  rather than damage — and the loud passages move 0.1 dB.
+* **The cap now binds — by 1 dB, and it is still not the lever**: lifting it 3 dB buys **+0.27 dB**
+  (10.56 → 10.83). The remaining 17.3 − 10.3 dB is the signal: the frames this fixture calls the
+  noise's own still carry music where they are loud, and the level term opens the gate there.
+* The previous entry's claim that this 4.5 dB was "an aggregation and frame-set difference, not in
+  meters" was **wrong** — the measurement above shows it was the meter, and it is now zero.
+
 ### Measured — the hiss class's ceiling, and the three key fixes that are not one
 
 * After this round's two fixes the class reads **18.35 → 8.39 dB** of tilt step (54 % of the hiss
@@ -25,25 +54,19 @@ else may move.
   own body — measured against the known bed, the reference in those frames is **+16.1 dB**, the key
   reads HF/MID 11.6 dB where the noise's own tilt is 27.7. In the frames the music owns the
   correction term is **−0.00 dB**, so the contamination is exactly where the repair is.
-* **Three formulations to repair the key, all rejected on measurement**:
+* **Two formulations to repair the key were tried and rejected on measurement**:
   (1) a *level key* alone asks 2.9–7.6 dB inside the loud and music-owned frames where the tilt key
   correctly asks 0 — and on this fixture the level cannot separate the classes at all (the frame's
   top end over the floor: noise **1.30**, music **1.10**), i.e. it would dull music;
   (2) *inverting the two bands* (`P_MID = (HF² − N²)/10^(tiltRef/10)` — the one algebraically
   identifiable formulation) is degenerate: **3.9 dB** in the noise-owned frames against **7.6 dB**
   in the loud ones, the wrong way round, because the programme's tilt is not constant across frames
-  and the two meters disagree by ~1.6 dB;
-  (3) *aligning the key with the analyser's quantity*: the analyser's quiet-frame median tilt is
-  **15.82 dB** against the stage's own **11.35 dB** in the same-band frames — a 4.5 dB gap in
-  aggregation and frame set rather than in meters, and an ask raised by an unexplained offset is not
-  a fix.
-* **The cap is not what binds**: lifting the law from 0.95 to 1.0 is worth **+0.29 dB** of band
-  (8.05 → 8.34 dB in the noise-owned frames). What remains open is the **4.5 dB between the stage's
-  key and the analyser's own bound** — an aggregation and frame-set difference, measured but not
-  explained, and therefore not something to raise an ask by — and the frame's own requirement
-  (32 dB), which is beyond any single-key expander without a spectral model. Pinned in the acceptance
-  header so the next round does not re-derive it. acceptance 57 rows, exit 0 →
-  `tools/work/acceptance-v2ae.txt`.
+  and the two meters disagree by ~1.6 dB. **That disagreement was the bug**: the stage's reference
+  band was a single bandpass where the analysis cascades two — see the fix above, which closed it.
+* **The cap did not bind then** (lifting the law 0.95 → 1.0 was worth **+0.29 dB**), and after the
+  mid-band fix above it binds by 1 dB and is worth **+0.27 dB** — the remaining gap to the frame's
+  own 32 dB is the signal, not a knob: those frames still carry music where they are loud. The
+  acceptance header carries the numbers so the next round does not re-derive them.
 
 ### Measured — where the dull-top class's line sits, and what the chain does with it
 
