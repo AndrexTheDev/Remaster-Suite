@@ -6,6 +6,36 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### The ring a real stylus click makes — the ninth of the family, and the three guards it needed
+
+**A vinyl click is not an impulse in the air.** It excites the cartridge's resonance and rings there: 0.5 … 3 ms of
+damped *tone* at 8–12 kHz, which is what the acceptance matrix has modelled as a 9 kHz ring since the round that
+removed the duration gate. Shorter members of the family (0.1 … 1.0 ms) were already taken by the statistic; the
+longer ones were not, and the reason is structural: **a ring that fills the window** puts its duty (the share of the
+window within 10 dB of its own peak) into the 0.045–0.12 band that a *sibilant onset* occupies, and that duty gate
+exists precisely to keep the sibilants out of the de-click dose. Measured on a 1.5 ms ring at 9 kHz, 9/s, on a quiet
+bed: duty p50 **0.063**, 71 of its 72 windows inside that band, **one** spike window, index **0.00** — no card, no
+dose, every click left in the file. That is the beta report this round answers.
+
+| what | measured |
+|---|---|
+| the admission that takes it | the window's **tonality** — the spectral flatness of its 6–24 kHz content, one 1024-point FFT on the Hann-windowed band-passed samples: the ring family **0.11 / 0.07 / 0.055 / 0.032** (p50 at τ 0.6 / 1.0 / 1.5 / 2.5 ms), a sibilant onset **0.269 … 0.584**, a hi-hat **0.488 … 0.587** |
+| the threshold | **0.10**, the *tightest* value the family survives: swept over 0.20 / 0.15 / 0.12 / 0.10 / 0.08 the readings are 0.73 / 0.62 / 0.51 / 0.39 at every step while the admitted windows fall (τ 1.0 ms: 68 → 43) |
+| the guard that keeps a *note* out | a duty bound (0.25): a sustained tone measures 0.6 … 0.8 and is not a click — a 9.2 kHz bell, a pad, a note in the band stay at 0.000 |
+| the guard that keeps a *sibilant* out | only a window whose crest reaches the index's own **13 dB knee** may carry the repetition rank: without it a 320 kbit/s export of the **clean** sibilance fixture read **0.155** off its own noise (p98 crest 12.9 dB, i.e. below the knee, carried entirely by the rank) and the app named `crackle` on its own export |
+| the guard that keeps an *empty* window out | the same knee on the admission itself — a window whose HF is almost nothing can read tonal because what is being measured there is the analysis filter. The matrix's own **clean** bed (8 s of pink noise through the chain's 9 kHz low-pass, no defect at all) holds one such window of 400 (duty 0.226, flatness 0.040, crest 4.17, HF energy 0.41× the file's median), and it is the *same* window in every fixture built on that bed; with the bound, that bed and the chain output of the cassette fixture (its one residual window reads 4.49) report **no spike window at all**, and the ring family loses only its own sub-knee windows (τ 2.5 ms: 12 of 71; τ 1.5 ms: 3 of 68) |
+| the family, before → after | τ 0.6 / 1.0 / 1.5 / 2.5 ms **0.73 / 0.55 / 0.00 / 0.00 → 0.73 / 0.62 / 0.51 / 0.39**; τ 1.5 ms at 3/s 0.00 → 0.50, at a quarter amplitude 0.00 → 0.44 |
+| everything that must not move | hi-hats, sibilants, a 9.2 kHz bell, a sustained note, a drum performance, a clean bed, the cassette and low-bitrate sims: **0.00 before and after** — and the index is identical to the last digit on all eighteen fixtures of the battery (probe tools/work/wr22.js) with the knee bound in place; the crackle fixtures unchanged (pops 1.00, worn 128 kbit/s 1.00, vinyl 0.98, garage 0.73, combo 0.62 → 0.64), the matrix moves on **no** index, on one value column that is the documented true-peak jitter (−0.10 → −0.30 dBTP dry) and on four spike counts inside notes (26 → 25, 62 → 61, 68 → 65, 17 → 16 of 400/354), with **no diagnosis change anywhere**. Two runs of *identical* code were diffed for this: the only row that moves between them is the exported true peak's dry column (±0.2 dB — the 16-bit conversion dithers with `Math.random()` and a true peak is a max statistic), and that is now stated on the row itself |
+| the repair, both halves | per click in 4–12 kHz against the same file without clicks: **13.7 → 5.1 dB** (the 0.6 ms ring's own row: 13.1 → 0.8). The split is measured stage by stage: the **onset** (−0.5 … +1 ms) goes **+17.7 → −2.0 dB** over the clean copy, the **ring-out** (+1 … +4 ms) only **+11.7 → +8.0**, and past +4 ms there was nothing |
+| the price, stated | a *damped* 9 kHz burst under 10 ms — a synth blip — is indistinguishable from a ring in every statistic measured here: index **0.47** (was 0.00) and the dose it earns costs the blip **9.7 dB** of its band peak (measured with the stages bypassed one at a time — it is the de-clicker that spends it, and with the de-hisser bypassed the number is the same). That is the trade a time-domain de-clicker makes with such material, RX's included |
+
+**The boundary that is not crossed** is the ring-out: the de-clicker's third witness is a second-difference measure,
+so a smooth 9 kHz tone is *music* to it — the onset is what the stage repairs. Removing the rest would be a spectral
+repair with a notch at the click's own frequency; it is not in this tree, and these numbers are its baseline.
+
+**Suites:** dsp 150 → **158** (the family, all three guards — the clean bed's empty window included — and the
+onset/ring-out boundary are pinned), audit 335, web 137, e2e 108, tuning 17. The matrix grew 121 → **125 rows** and 31 → **32 defect classes**.
+
 ### Measured and closed — the content witness, and why the worn record's last two pops are the arrival's own
 
 **Round 16 priced the level-key arbitration and left it out because it made the app name `dullTop` on its own

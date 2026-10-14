@@ -958,6 +958,113 @@ H.section('engine · de-clicker on a lossy rip');
    * threshold and its dose beside it. */
   H.ok(touched < kit.sig.length * 0.08, 'and only a small part of the kit is touched at all',
     (100 * touched / kit.sig.length).toFixed(2) + ' % of samples');
+
+  /* ── the ring a record really carries (round 18) ─────────────────────────
+   * Everything above is a *spike*: this harness models a click as one to three
+   * samples, and against that shape the duty gate is decisive. A stylus click is
+   * not that shape — it excites the cartridge's resonance and rings there, 0.5 …
+   * 3 ms of damped *tone* at 8–12 kHz — and a ring that long fills the analysis
+   * window: its duty (p50 0.063 at τ 1.5 ms) lands in the band a sibilant onset
+   * occupies (0.045–0.12), so the duty gate that keeps the sibilants out kept
+   * the ring out with them. Measured before round 18: τ 1.5 ms read index 0.000
+   * off a *single* spike window, so no card, no dose, the clicks left in the
+   * file. The admission that takes it is the window's *tonality* — the spectral
+   * flatness of its 6–24 kHz content (0.055 at τ 1.5 ms, against 0.27 and up for
+   * a sibilant and 0.49 and up for a hi-hat) — and it is guarded three times: a
+   * duty bound (0.25) that only ever excludes a *sustained* tone; the index's own
+   * 13 dB knee, which a window must reach to be admitted on tonality at all; and
+   * the same knee on the repetition rank (without it a sibilant's 320 kbit/s
+   * export read 0.155 off its own noise). The knee is what keeps the admission
+   * honest where the HF is almost nothing: the matrix's own *clean* bed has one
+   * such window (136 of 400: duty 0.226, flatness 0.040, crest 4.17, HF energy
+   * 0.41× the file's median) — a low-HF moment in which what reads tonal is the
+   * analysis filter — and it is the same window in every fixture built on that
+   * bed. Every guard is asserted below with the fixtures it is for, and the
+   * boundary this stage *does not* cross is measured with them. */
+  const ringFx = (tauMs, perSecond) => {
+    const seconds = 8, bed = H.normalize(H.filter(RSDSP, H.pink(SR, seconds, 0.40, 31), SR, 'lp', 9000, 0.60), 0.7);
+    const raw = Float32Array.from(bed), rand = H.rng(7), tau = SR * tauMs * 1e-3, positions = [];
+    for (let k = 0; k < perSecond * seconds; k++) {
+      const p = Math.floor(rand() * (raw.length - 6 * tau - 4));
+      positions.push(p);
+      const a = 0.55 * (0.5 + rand()) * (rand() < 0.5 ? -1 : 1);
+      for (let i = 0; i < 6 * tau && p + i < raw.length; i++) raw[p + i] += a * Math.exp(-i / tau) * Math.sin(2 * Math.PI * 9000 * i / SR);
+    }
+    const g = 0.8 / H.peak(raw);
+    return { sig: Float32Array.from(raw, (x) => x * g), positions, clean: Float32Array.from(bed, (x) => x * g) };
+  };
+  const ring06 = ringFx(0.6, 9), ring15 = ringFx(1.5, 9), ring25 = ringFx(2.5, 9);
+  const d06 = RSDSP.crackleDetect([ring06.sig], SR);
+  const d15 = RSDSP.crackleDetect([ring15.sig], SR);
+  const d25 = RSDSP.crackleDetect([ring25.sig], SR);
+  H.ok(d15.index > 0.45, 'a 1.5 ms stylus ring is read as crackle, by its tonality',
+    'index ' + d15.index.toFixed(2) + ' off ' + d15.spikeFrames + ' windows (0.00 off 1 window before round 18)');
+  H.ok(d06.index > 0.6 && d25.index > 0.3, 'and the family reads from 0.6 ms to 2.5 ms',
+    'tau 0.6 / 1.5 / 2.5 ms: ' + d06.index.toFixed(2) + ' / ' + d15.index.toFixed(2) + ' / ' + d25.index.toFixed(2));
+  /* the guards, on the fixtures they are for */
+  const hats = (() => {
+    const out = Float32Array.from(ring15.clean);
+    const hf = H.filter(RSDSP, H.noise(SR, 8, 0.6, 91), SR, 'hp', 3000, 0.707);
+    for (let k = 0; k * 0.33 < 8; k++) {
+      const at = Math.round(k * 0.33 * SR);
+      for (let i = 0; i < SR * 0.02 && at + i < out.length; i++) out[at + i] += 0.5 * Math.exp(-i / (SR * 0.005)) * hf[at + i] * 3;
+    }
+    return out;
+  })();
+  const sibilant = (() => {
+    const out = Float32Array.from(ring15.clean), F = Math.round(SR * 0.12);
+    const shaped = H.filter(RSDSP, H.noise(SR * 0.12, 1, 1, 77), SR, 'hp', 5200, 0.707);
+    for (let burst = 0; burst < 12; burst++) {
+      const at = Math.round(SR * (0.35 + burst * 0.6));
+      for (let i = 0; i < F; i++) {
+        const j = at + i; if (j >= out.length) break;
+        const A = Math.round(SR * 0.025), att = i < A ? 0.5 - 0.5 * Math.cos(Math.PI * i / A) : 1;
+        out[j] += 0.55 * att * Math.exp(-i / (F * 0.5)) * shaped[i] * (1 + 0.4 * Math.sin(i * 0.7));
+      }
+    }
+    return out;
+  })();
+  const sustainedTone = (() => {                     // a *note* in the key band, not a click
+    const out = Float32Array.from(ring15.clean);
+    for (let i = 0; i < out.length; i++) out[i] += 0.22 * Math.sin(2 * Math.PI * 9200 * i / SR) * (0.6 + 0.4 * Math.sin(2 * Math.PI * 1.1 * i / SR));
+    return out;
+  })();
+  const dh = RSDSP.crackleDetect([hats], SR), ds = RSDSP.crackleDetect([sibilant], SR), dt = RSDSP.crackleDetect([sustainedTone], SR);
+  H.ok(dh.index < 0.02 && ds.index < 0.02, 'a hi-hat pattern and a sibilant are not clicks (the duty gate\'s own family)',
+    'hi-hats ' + dh.index.toFixed(3) + ' · sibilant ' + ds.index.toFixed(3));
+  H.ok(dt.index < 0.02, 'nor is a tone that is simply *there* (the duty bound keeps a note out)',
+    'a 9.2 kHz note: ' + dt.index.toFixed(3) + ' off ' + dt.spikeFrames + ' windows');
+  /* …and the counterpart of the admission: a window whose HF is almost nothing
+   * must not read as a click because the filter looks tonal in it. Asserted on
+   * the bed the whole family is built on, which admits no spike window at all. */
+  const db = RSDSP.crackleDetect([ring15.clean], SR);
+  H.ok(db.index < 0.02 && db.spikeFrames === 0, 'nor does an HF-empty window of a clean bed (the knee guards the tonality admission)',
+    'the bed the fixtures sit on: index ' + db.index.toFixed(3) + ' off ' + db.spikeFrames
+    + ' spike windows (one window of 400 was admitted on tonality before the knee bound: duty 0.226, flatness 0.040, crest 4.17)');
+  /* …and what the stage does with a ring: the onset is the click, the ring-out is
+   * a smooth tone the time-domain witness cannot tell from music — the boundary,
+   * not an aspiration */
+  const on15 = H.renderEx(Processor, [ring15.sig], Object.assign({}, MIN(), { declick: 0.63 }));
+  const off15 = H.renderEx(Processor, [ring15.sig], MIN());
+  const seg = (sig, lat, fromMs, toMs) => {
+    const p = ring15.positions.map((c) => {
+      let pk = 0;
+      const o = Math.max(0, c + (lat || 0) + Math.round(SR * fromMs * 1e-3));
+      for (let i = 0; i < Math.round(SR * (toMs - fromMs) * 1e-3) && o + i < sig.length; i++) { const a = Math.abs(sig[o + i]); if (a > pk) pk = a; }
+      return pk;
+    }).sort((a, b) => a - b);
+    return p[p.length >> 1];
+  };
+  const lvl = (sig, lat, a, b) => 20 * Math.log10((seg(sig, lat, a, b) + 1e-12) / (seg(ring15.clean, 0, a, b) + 1e-12));
+  const dropOnset = lvl(off15.out[0], 0, -0.5, 1) - lvl(on15.out[0], on15.latency, -0.5, 1);
+  const dropTail = lvl(off15.out[0], 0, 1, 4) - lvl(on15.out[0], on15.latency, 1, 4);
+  H.ok(dropOnset > 8, 'the click itself goes: the 1 ms at the onset, against the same file without clicks',
+    'the de-clicker takes ' + dropOnset.toFixed(1) + ' dB off it (the upload stands ' + lvl(ring15.sig, 0, -0.5, 1).toFixed(1) + ' dB over the clean copy there)');
+  H.ok(dropTail < dropOnset, 'and the ring-out behind it is left — a de-click stage repairs the click, not the note it leaves',
+    'onset ' + dropOnset.toFixed(1) + ' dB down, ring-out (+1…+4 ms) ' + dropTail.toFixed(1) + ' dB');
+  const after15 = RSDSP.crackleDetect([on15.out[0]], SR);
+  H.ok(after15.index < d15.index * 0.7, 'the ring reading comes down with it',
+    d15.index.toFixed(2) + ' → ' + after15.index.toFixed(2));
 }
 
 H.section('engine · de-clipper on a clipped master');

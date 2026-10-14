@@ -963,10 +963,25 @@
     /* Per window: its HF energy and its HF peak. The *selection* of which
      * windows carry the statistic is made in value(), against the file's own
      * HF level — see the gate there. */
-    const st = { ms: [], peak: [], duty: [], wid: [], spikeFrames: 0, crests: [], peaks: [], gPeak: 0, gSum: 0, gCount: 0, pops: 0 };
+    const st = { ms: [], peak: [], duty: [], flat: [], wid: [], spikeFrames: 0, crests: [], peaks: [], gPeak: 0, gSum: 0, gCount: 0, pops: 0 };
     /* one window of band-passed samples, kept for the second pass that measures
      * how much of the window sits near its own peak — see the duty gate in value() */
     const spikeBuf = new Float32Array(win);
+    /* …and the transform behind the *tonal* admission (see value()): a click the
+     * cartridge rings out is a damped *tone* in this band, and a tone is the one
+     * thing a hi-hat, a cymbal and a sibilant are not. One FFT per window, on the
+     * same band-passed samples, and only where the duty test has not already
+     * decided the window (duty > 0.04). The band is 6–24 kHz: below 6 kHz the
+     * transform would be describing the music, not the analysis band. */
+    const nf = 1 << Math.ceil(Math.log2(Math.max(256, win)));
+    const hwin = hann(win);
+    const re = new Float32Array(nf), im = new Float32Array(nf);
+    const bandLo = Math.ceil(6000 / (sr / nf)), bandHi = Math.min(nf / 2 - 1, Math.floor(24000 / (sr / nf)));
+    const flatness = () => {
+      let tot = 0, lg = 0, nb = 0;
+      for (let b = bandLo; b <= bandHi; b++) { const v = re[b] * re[b] + im[b] * im[b]; tot += v; lg += Math.log(v + 1e-30); nb++; }
+      return tot > 1e-30 && nb > 0 ? Math.exp(lg / nb) / (tot / nb) : 1;
+    };
     const step = stepRange('crackle', units, units * win * 1.6, (from, to) => {
       let base = 0;
       for (let c = 0; c < channels.length; c++) {
@@ -1005,7 +1020,18 @@
               if (a > nearTh) near++;
               if (a > best) { best = a; ipk = i; }
             }
-            st.duty.push(near / win);
+            const duty = near / win;
+            st.duty.push(duty);
+            /* A window the duty test already takes needs no transform; one whose
+             * duty is above the sustained-tone bound cannot be taken either, so
+             * only the band between them is measured. */
+            let flat = 1;
+            if (duty > 0.04 && duty <= 0.25) {
+              for (let i = 0; i < nf; i++) { re[i] = i < win ? spikeBuf[i] * hwin[i] : 0; im[i] = 0; }
+              fft(re, im);
+              flat = flatness();
+            }
+            st.flat.push(flat);
             /* …and how long the tallest excursion in the window takes to fall
              * 20 dB from its own peak, in samples. That is the *duration* of the
              * spike, and duration is the one thing a click and a musical hit do
@@ -1059,7 +1085,7 @@
         const sortedMs = st.ms.slice().sort((a, b) => a - b);
         const hfMed = sortedMs.length ? sortedMs[Math.floor(sortedMs.length * 0.5)] : 0;
         const gate = Math.max(hfMed * 0.05, 1e-20);
-        const crests = [], peakKept = [], widKept = [];
+        const crests = [], peakKept = [], widKept = [], rankKept = [];
         let gSum = 0, gCount = 0, gPeak = 0, spikeCount = 0;
         for (let i = 0; i < st.ms.length; i++) {
           if (st.ms[i] <= gate) continue;
@@ -1092,9 +1118,75 @@
            * still asks for *repeated* spikes, exactly as the rank-3 global term
            * does, so a single glitch cannot carry the index — and a file the
            * chain has repaired falls back to the floor. */
-          const spike = st.duty[i] <= 0.04;
+          /* ── …and the second family the duty test cannot take ────────────
+           * A stylus click is not an impulse in the air: it excites the
+           * cartridge's own resonance and rings there, 0.3 … 3 ms of damped
+           * *tone* at 8–12 kHz. A ring that long fills its window, so its duty
+           * sits in the 0.045–0.12 band a sibilant onset occupies (round 15's
+           * probe: duty p50 0.063, 71 of 72 windows in that band) and the duty
+           * gate above cannot take it without taking the sibilants. What
+           * separates them is not level and not duration — it is *tonality*, and
+           * the measurement is the spectral flatness of the window (geometric
+           * over arithmetic mean of the 6–24 kHz bins, one 1024-point FFT on the
+           * Hann-windowed band-passed samples):
+           *
+           *   the ring family    τ 0.6 / 1.0 / 1.5 / 2.5 ms   0.11 · 0.07 · 0.055 · 0.032   (p50)
+           *                 …and their p90 across 66–74 windows: 0.14 · 0.11 · 0.077 · 0.061
+           *   a sibilant onset  12 "s" bursts on a bed        0.269 … 0.584   (p10 … p90)
+           *   a hi-hat pattern   3 ms noise bursts, 5 ms tail    0.488 … 0.587
+           * a 320 kbit/s export of the sibilant fixture        0.065 … 0.196 over 30 windows
+           *   a clean bed, a bell, a damped *musical* blip     0.5 and up, or the duty test's bounds
+           *
+           * The threshold sits in the gap the two distributions leave, and the value is
+           * 0.10 — the *tightest* one the family survives: swept over 0.20 / 0.15 / 0.12 /
+           * 0.10 / 0.08 (probe tools/work/wr24.js, the whole battery per step) the readings
+           * of τ 0.6 / 1.0 / 1.5 / 2.5 ms come out 0.73 / 0.62 / 0.51 / 0.39 at every one
+           * of them, while the number of windows admitted falls with the threshold
+           * (τ 1.0 ms: 68 → 43). So the tightest one that costs the family nothing is
+           * taken: it sits *below* the highest p90 the family reaches (0.14, at τ 0.6 ms,
+           * whose windows the duty test already takes) and 2.7× below the lowest p10 the
+           * sibilant family reaches (0.269).
+           * The duty bound (0.25) is not the discriminator — it only keeps *sustained*
+           * tones out, whose duty is 0.6 … 0.8: a long tone in this band is a note, not
+           * a click, and a 90 ms bell or a synth pad stays where it was. What this
+           * costs is stated below with the measurement: a *damped* 9 kHz tone burst
+           * under 10 ms — a musical blip, not a click — is indistinguishable from a
+           * stylus ring in every statistic measured here, and is repaired the way a
+           * click is (which is what RX's de-click would do with it too).
+           */
           const rms = Math.sqrt(st.ms[i] / win);
-          if (spike) { spikeCount++; crests.push(st.peak[i] / rms); peakKept.push(st.peak[i]); widKept.push(st.wid[i]); }
+          const cf = st.peak[i] / rms;
+          /* …and a window admitted on tonality is admitted only if it is a
+           * *spike* by the same 13 dB measure the whole index is built on: the
+           * tonality test alone can be fooled by a window whose HF is almost
+           * nothing, where what reads flat is the analysis filter, not a click.
+           * Measured, that is not hypothetical — the acceptance matrix's own
+           * clean bed (8 s of pink noise through the chain's own 9 kHz low-pass,
+           * no defect at all) has one such window (window 136 of 400: duty 0.226,
+           * flatness 0.040, crest 4.17, HF energy 0.41× the file's median), and
+           * it is the *same* window in every fixture built on that bed. With the
+           * bound, that bed and the chain output of the cassette fixture (whose
+           * one residual window reads 4.49) report no spike windows at all, and
+           * the ring family loses only its own sub-knee windows (tau 2.5 ms: 12
+           * of 71; tau 1.5 ms: 3 of 68) — the ones the index already discounts,
+           * since neither its p98 term nor its rank can use a crest below 4.5. */
+          const spike = st.duty[i] <= 0.04
+            || (st.duty[i] <= 0.25 && st.flat[i] <= 0.10 && cf >= 4.5);
+          if (spike) { spikeCount++; crests.push(cf); peakKept.push(st.peak[i]); widKept.push(st.wid[i]);
+            /* ── …and which of them may carry the *repetition* rank ──────────
+             * The rank term is the third tallest spike-window peak against the
+             * file's own HF rms, and it is the one term a *sustained* HF event
+             * can feed: a sibilant's onset windows are tall peaks whatever their
+             * crest, and on the tonality admission (round 18) that is exactly
+             * what a 320 kbit/s export of the clean sibilance fixture did —
+             * index 0.155 with a p98 crest of 12.9 dB, i.e. *below* the 13 dB
+             * knee the whole index is built on, carried entirely by the rank
+             * (global crest 19.2 dB). So a window supplies the rank only if its
+             * own crest reaches that knee (4.5 = 13 dB): the same rule the p98
+             * term applies by construction, now applied to both. Measured, it
+             * changes nothing else — the spike sets of every crackle fixture
+             * stand at 19.8–25.1 dB of crest. */
+            if (cf >= 4.5) rankKept.push(st.peak[i]); }
           else crests.push(1);
         }
         st.spikeFrames = spikeCount;
@@ -1122,7 +1214,7 @@
          * reads no repetition at all, where the rank used to be taken over every
          * window and the sibilance fixture scored 20.8 dB of "global crest" off
          * its own "s" bursts. */
-        const peakRank = peakKept.length >= 3 ? peakKept.slice().sort((a, b) => b - a)[2] : 0;
+        const peakRank = rankKept.length >= 3 ? rankKept.slice().sort((a, b) => b - a)[2] : 0;
         const globalCrestDb = 20 * Math.log10(peakRank / (grms + 1e-12));
         st.crests.sort((a, b) => a - b);
         const p98 = st.crests.length ? st.crests[Math.min(st.crests.length - 1, Math.floor(st.crests.length * 0.98))] : 1;
@@ -1217,11 +1309,35 @@
          *    window of it. It is repaired like a click; the guard that protects
          *    a performance is the tail, and a recording that really is a train
          *    of such bursts will be de-clicked the way RX's de-click would
-         *    de-click it. And a ring longer than about 1.2 ms still does not get
-         *    in: it fills a tenth of its window with samples near its own peak,
-         *    which is the duty band a sibilant onset occupies (0.045–0.12), so
-         *    the duty gate cannot take it without taking the sibilants — a
-         *    measured limit of the statistic, not of this gate. */
+         *    de-click it. And a ring longer than about 1.2 ms was, until round
+         *    18, out of reach: it fills a tenth of its window with samples near
+         *    its own peak, which is the duty band a sibilant onset occupies
+         *    (0.045–0.12), so the duty gate could not take it without taking the
+         *    sibilants — a measured limit of that one statistic, not of the
+         *    chain (a 1.5 ms ring is what a real stylus click does; it is the
+         *    ninth member of this family and it read **0.00**). Round 18 lifted
+         *    it with a *second*, independent admission — the window's tonality —
+         *    documented at the gate in value(). Measured on the inputs, before →
+         *    after that admission (probe tools/work/wr22.js):
+         *
+         *      τ 0.6 ms 9/s        0.729 → 0.729    hi-hats 3/s        0.000 → 0.000
+         *      τ 1.0 ms 9/s        0.548 → 0.616    sibilance 12 "s"   0.000 → 0.000
+         *      τ 1.5 ms 9/s        0.000 → 0.512    a 9.2 kHz bell     0.000 → 0.000
+         *      τ 1.5 ms 3/s        0.000 → 0.499    the clean bed      0.000 → 0.000
+         *      τ 1.5 ms 6/s @0.25  0.000 → 0.436    cassette sim       0.000 → 0.000
+         *      τ 2.5 ms 9/s        0.000 → 0.386    low-bitrate sim    0.000 → 0.000
+         *      72 pops on a bed    1.000 → 1.000    vinyl sim          0.984 → 0.984
+         *      the worn 128 kbit/s 1.000 → 1.000    garage sim         0.728 → 0.728
+         *                                          combo sim          0.615 → 0.643
+         *
+         *    and the price is stated with it: a *damped* 9 kHz tone burst under
+         *    10 ms — a synth blip, a chime sample, a "laser" — is indistinguishable
+         *    from a stylus ring in every statistic measured here; it reads 0.469
+         *    where the shipped detector read 0.000. That is a deliberate trade,
+         *    not an oversight: it is what a time-domain de-clicker does with such
+         *    material (RX's included), the dose it earns is the same one a real
+         *    ring earns, and what the chain then costs the blip is measured in the
+         *    acceptance matrix, in the row beside the ring's own. */
 
         const widthMax = Math.max(2, Math.round(sr * 0.25e-3));
         let wide = 0;

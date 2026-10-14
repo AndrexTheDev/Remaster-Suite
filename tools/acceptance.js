@@ -1290,11 +1290,11 @@ mark('section 20');
  * being wider than the 0.25 ms bound (a ninth ring of the family, τ 1.5 ms, reads
  * 0.00 still — its ring fills the 20 ms window, so its duty sits in the band a
  * sibilant onset occupies: duty p50 0.063, 71 of its 72 windows inside 0.045–0.12
- * and 1 under the 0.04 gate, so 1 spike window and no dose — probes
- * /tmp/duty15.js and /tmp/gate5.js). That is the beta report this section now
- * carries: with
- * the gate the file read index 0.00, healthy, dose 0 — and the clicks stayed in
- * it.
+ * and 1 under the 0.04 gate, so 1 spike window and no dose (probes
+ * /tmp/duty15.js and /tmp/gate5.js): the file read index 0.00, healthy, dose 0
+ * — and the clicks stayed in it. That is the beta report this section carries,
+ * and round 18's tonality admission is the answer to it; the rows below measure
+ * both halves of that answer.
  *
  * Both directions are rows below, measured twice: by the app's own index and by
  * this tool's independent time-domain meter — every click's peak in the 4–12 kHz
@@ -1452,6 +1452,89 @@ mark('section 20');
   row('a click as a file carries it (0.6 ms ring, 9 kHz)', 'per click in 4–12 kHz vs the same file without clicks (dB)',
     N(20 * Math.log10((mDry + 1e-12) / (mClean + 1e-12)), 1), N(20 * Math.log10((mOut + 1e-12) / (mClean + 1e-12)), 1),
     'median of ' + clickTrain.pos.length + ' clicks · independent time-domain meter (this tool\'s own biquads), not the app\'s statistic — the repair need not be perfect at the loudest of them, but the population has to come back to the clean file\'s level');
+  /* ── the ninth ring of the family: the length a real stylus click rings ──
+   * A 1.5 ms ring is not an edge case — a cartridge's own resonance rings that
+   * long — and until round 18 the app could not see it: the ring fills the 20 ms
+   * window, so its duty (p50 0.063) lands in the band a sibilant onset occupies
+   * (0.045–0.12) and the duty gate that keeps the sibilants out kept this out
+   * with them (index 0.00, one spike window, no card, no dose, the clicks left
+   * in the file — the beta report this round answers). Round 18 admits a window
+   * on a second, independent statistic: how *tonal* it is (the spectral flatness
+   * of its 6–24 kHz content). The two rows here are the same two the 0.6 ms ring
+   * above gets — the app's own index and this tool's own time-domain meter — so
+   * the class is judged the way every other class in this matrix is. */
+  const click15 = (() => {
+    const bedSym = bed(9000, 0.7);
+    const raw = Float32Array.from(bedSym);
+    const rand = H.rng(7);
+    const pos = [];
+    const tau = SR * 1.5e-3;
+    for (let k = 0; k < Math.round(9 * SEC); k++) {
+      const p = Math.floor(rand() * (raw.length - 6 * tau - 4));
+      pos.push(p);
+      const amp = 0.55 * (0.5 + rand()) * (rand() < 0.5 ? -1 : 1);
+      for (let i = 0; i < 6 * tau && p + i < raw.length; i++) raw[p + i] += amp * Math.exp(-i / tau) * Math.sin(2 * Math.PI * 9000 * i / SR);
+    }
+    const g = 0.8 / H.peak(raw);
+    return { sig: Float32Array.from(raw, (x) => x * g), pos, clean: Float32Array.from(bedSym, (x) => x * g) };
+  })();
+  const r15 = run([click15.sig]);
+  const c15 = RSDSP.crackleDetect([click15.sig], SR);
+  const c15o = RSDSP.crackleDetect([r15.out[0]], SR);
+  row('a click as a file carries it (1.5 ms ring, 9 kHz)', 'crackle index: before vs after the chain (0–1)',
+    N(c15.index, 2), N(c15o.index, 2),
+    'spikes ' + N(c15.spikeFrames, 0) + '/' + c15.frames + ' · ' + N(c15.spikeWidth, 0) + ' samples wide · '
+    + N(100 * c15.spikeWideShare, 0) + ' % of them wider than 0.25 ms · dose ' + N(r15.P.declick, 3)
+    + ' · ' + (r15.dry.issues.join(',') || 'healthy') + ' → ' + (r15.wet.issues.join(',') || 'healthy')
+    + ' — the tonality of the window is what takes this ring (spectral flatness p50 0.055 over 6–24 kHz, against 0.269 at the'
+    + ' sibilant onset and 0.54 at a hi-hat), and only where the window also reaches the 13 dB knee the index is built on' + ' — a window whose HF is almost nothing can read tonal, and what is measured there is the analysis filter, not a click.'
+    + ' The chain then takes the ring *down*: its onset (−0.5 … +1 ms) falls from +17.7 dB'
+    + ' over the clean copy to −2.0, the ring-out behind it (+1 … +4 ms) only from +11.7 to +8.0, and past +4 ms there was'
+    + ' nothing (probe tools/work/wr25.js) — a de-click stage repairs the click, and the smooth tone the cartridge leaves'
+    + ' behind is music to a second-difference witness');
+  const m15c = bandPeaks(click15.clean, click15.pos, 0);
+  const m15d = bandPeaks(click15.sig, click15.pos, 0);
+  const m15o = bandPeaks(r15.out[0], click15.pos, r15.lat);
+  row('a click as a file carries it (1.5 ms ring, 9 kHz)', 'per click in 4–12 kHz vs the same file without clicks (dB)',
+    N(20 * Math.log10((m15d + 1e-12) / (m15c + 1e-12)), 1), N(20 * Math.log10((m15o + 1e-12) / (m15c + 1e-12)), 1),
+    'median of ' + click15.pos.length + ' clicks · the same independent meter as the 0.6 ms row · the ring is longer than the'
+    + ' 0.6 ms family\'s, so the clicks stand lower over the bed and the de-clicker\'s own witness has a smaller step to read');
+  /* ── …and the price of that admission, measured on the same machinery ─────
+   * A *damped* high tone burst under 10 ms is what the new statistic cannot tell
+   * apart from a stylus ring: a synth blip, a chime sample, a "laser". The app
+   * now counts it (index 0.47 where it read 0.00) and spends a de-click dose on
+   * it, so both halves are measured here: what the app says, and what the stage
+   * costs the blips themselves. */
+  const blips = (() => {
+    const out = Float32Array.from(bed(9000, 0.7));
+    const pos = [];
+    for (let k = 0; k * 0.5 < SEC; k++) {
+      const at = Math.round(k * 0.5 * SR);
+      pos.push(at);
+      for (let i = 0; i < SR * 0.01 && at + i < out.length; i++) out[at + i] += 0.5 * Math.exp(-i / (SR * 0.0015)) * Math.sin(2 * Math.PI * 9000 * i / SR);
+    }
+    return { sig: H.normalize(out, 0.7), pos };
+  })();
+  const rbl = run([blips.sig]);
+  const cbl = RSDSP.crackleDetect([blips.sig], SR);
+  const cblo = RSDSP.crackleDetect([rbl.out[0]], SR);
+  row('a damped 9 kHz tone burst train (a musical blip, not a click)', 'crackle index: before vs after the chain (0–1)',
+    N(cbl.index, 2), N(cblo.index, 2),
+    'the price of the tonality admission, in the app\'s own numbers: ' + N(cbl.spikeFrames, 0) + ' of ' + cbl.frames
+    + ' windows are tonal spikes and the card reads ' + (rbl.dry.issues.join(',') || 'healthy') + ', dose ' + N(rbl.P.declick, 3)
+    + ' — a *damped* 9 kHz burst under 10 ms is indistinguishable from a stylus ring in every statistic measured');
+  const offb = H.renderEx(P0, [blips.sig], Object.assign({}, rbl.P, { declick: 0 }));
+  const bpk = (sig, lat) => { const bnd = filt(sig, [bq('HP', 4000, 0.707), bq('LP', 12000, 0.707)]); const v = blips.pos.map((p) => {
+    let pk = 0; const o2 = Math.max(0, p + (lat || 0) - Math.round(SR * 0.001));
+    for (let i = 0; i < SR * 0.004 && o2 + i < bnd.length; i++) { const x = Math.abs(bnd[o2 + i]); if (x > pk) pk = x; }
+    return pk; });
+    v.sort((x, y) => x - y); return v[v.length >> 1]; };
+  const bo = bpk(rbl.out[0], rbl.lat), bf = bpk(offb.out[0], rawLat(offb));
+  row('a damped 9 kHz tone burst train (a musical blip, not a click)', 'blip band peak through the chain: de-click off vs on (dB)',
+    '0.00', N(20 * Math.log10((bo + 1e-12) / (bf + 1e-12)), 2),
+    'median of ' + blips.pos.length + ' blips in 4–12 kHz · what the dose this row earns actually costs a musical blip — the same'
+    + ' two-render comparison the drum-performance row above uses for hits · the stage that spends it is the de-clicker: with'
+    + ' the de-hisser bypassed the loss stands at −9.7 dB, with the de-clicker bypassed the blip is untouched (probe wr25.js)');
   /* a hi-hat pattern: the family the duty gate already excluded */
   const hats = (() => {
     const out = Float32Array.from(bed(9000, 0.7));
@@ -1682,7 +1765,9 @@ mark('section 22');
       'the render holds its ceiling — the *encoder* is what moves it, and the room it needs is ' + N(margin, 1)
       + ' dB at ' + kbps + ' kbit/s (measured: worst of three dense masters). Without the margin the delivered file sat '
       + (tB - prom >= 0 ? '+' : '') + N(tB - prom, 2) + ' dB against the promise; with it, '
-      + (tA - prom >= 0 ? '+' : '') + N(tA - prom, 2) + ' dB');
+      + (tA - prom >= 0 ? '+' : '') + N(tA - prom, 2) + ' dB'
+      + ' · the *dry* column jitters by ±0.2 dB between runs of identical code — the app\'s own 16-bit conversion'
+      + ' dithers with Math.random() and a true peak is a max statistic; the delivered column and the promise are stable');
     if (kbps === 128) {
       const nB = ceilFindings(fB), nA = ceilFindings(fA);
       row('export', 'what the app names on the re-upload of its own 128 kbit/s export (ceiling findings)',
