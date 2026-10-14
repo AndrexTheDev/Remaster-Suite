@@ -6,6 +6,42 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Fixed — the export's ceiling, through the codec: the promise is about the file the user keeps
+
+**The last stage holds the *render* to the platform's true-peak target, and the app says so. The file
+the user keeps is an MP3.** A lossy encoder re-shapes the waveform between the samples, and its own
+overshoot was coming out of the promise. Measured through the app's own export path — lamejs out of
+`assets/vendor`, the app's `toInt16` (TPDF dither at ±1 LSB) and its 72000-sample chunking, with
+ffmpeg's `ebur128` as an independent 4× oversampled meter (`tools/work/tp1.js` … `tp3.js`, three dense
+masters) — a master rendered *at* its ceiling comes back over it:
+
+| export bitrate | 128 | 192 | 256 | 320 kbit/s |
+|---|---|---|---|---|
+| overshoot | +2.00 | +0.60 | +0.40 | +0.40 dB |
+
+That is 1.2–1.8 dB over the ceiling at 128 kbit/s, and the app's own findings list then named
+`truePeak` on the re-upload of its own export — the same shape of dishonesty as the sinc that read
+0.5 dB low. The overshoot is material- *and* encoder-dependent (the app's own lamejs overshoots a
+bass-heavy 128 kbit/s export 1.7 dB more than ffmpeg's LAME does), which is why the table is measured
+through the app's path and not assumed.
+
+**The fix is the room up front.** `Presets.codecMargin(format, kbps)` returns 0 for WAV and the worst
+measured overshoot, rounded up, for a lossy export — 2.1 / 0.8 / 0.5 / 0.5 dB at 128 / 192 / 256 / 320
+kbit/s — and the app subtracts it from the ceiling where the export format is known, in the same place
+it builds the *monitor's* parameters, so what you hear is still what you save. Material that stays under
+the ceiling is bit-transparent to the margin (measured: 0.00 dB on a fixture whose limiter never works),
+so the room is paid for by a master whose limiter is already working, and by nothing else.
+
+**Delivered, measured:** the hot-master export at 128 kbit/s goes −0.30 dBTP (**+1.70 dB over** the
+promise) → **−2.20 dBTP**; at 320 kbit/s −1.70 (+0.30 over) → −2.20; the app's ceiling findings on the
+re-upload of its own export go **2 → 0**; and all three dense masters now deliver under their promise at
+every bitrate the UI offers (192 / 256 / 320) — 9 of the 12 rows across the whole ladder were
+at or over it before, none is now. The matrix carries the class (`export`, 4 rows, 115 → 119 rows, 30 → 31 classes)
+and the audit re-derives the arithmetic — every bitrate read out of the export markup, the margin
+against the worst measured overshoot, the general −1 dBTP surviving the worst case, and that the
+tooling's export mirrors `codecs.js`'s chunking so the file the matrix measures is the file the app
+writes (326 → 333 assertions).
+
 ### Measured — scale freedom: the same record at 20 dB less is repaired the same, and why
 
 **The claim is made twice in this repository — the de-clicker's gate is relative to the file, and a

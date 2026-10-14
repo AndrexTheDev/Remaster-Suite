@@ -38,6 +38,20 @@ const rms = (a, from, to) => {
   for (let i = from === undefined ? 0 : from; i < (to === undefined ? a.length : to); i++) { e += a[i] * a[i]; n++; }
   return Math.sqrt(e / Math.max(1, n));
 };
+/**
+ * The true peak of a *file*, by ffmpeg's own 4x oversampled meter — the
+ * independent side of section 22's rows (the app's own definition is a 32-tap
+ * sinc; this one is ffmpeg's). ebur128 prints one summary per input *and* one
+ * for the output: the first is the empty one before the filter runs (−70 LUFS,
+ * −inf dBFS), and reading it cost a probe one run. Take the *last* Summary.
+ */
+function fileTruePeakDb(file) {
+  const r = U.ffmpeg(['-i', file, '-filter_complex', 'ebur128=peak=true', '-f', 'null', '-']);
+  const s = (r.stderr || '').slice((r.stderr || '').lastIndexOf('Summary:'));
+  const mI = s.match(/Integrated loudness:[\s\S]{0,120}?I:\s*(-?[\d.]+)\s*LUFS/);
+  const mP = s.match(/True peak:[\s\S]{0,200}?Peak:\s*(-?[\d.]+)\s*dBFS/);
+  return { tp: mP ? parseFloat(mP[1]) : NaN, lufs: mI ? parseFloat(mI[1]) : NaN };
+}
 function goertzel(sig, f) {
   const w = 2 * Math.PI * f / SR;
   let re = 0, im = 0;
@@ -1529,6 +1543,85 @@ mark('section 21');
   row('dropouts', 'analyser crackleIndex — a file of dropouts is not named crackle', N(dm.crackleIndex, 3), N(rm.crackleIndex, 3),
     'card ' + RP.classify(dm).id + ' → ' + RP.classify(rm).id + ' · the chain is dosed at the profile\'s floor (declick ' + N(P1.declick, 3)
     + '), so the stage stands by on a file whose holes are −6.8 dB deep in the music\'s own band');
+}
+
+mark('section 22');
+/* 22 ── the file the user keeps: a lossy export holds its ceiling ───────────
+ * The chain's last stage holds the *render* to the platform's true-peak target
+ * (−1 dBTP, or −2 dBTP when the master is louder than −14 LUFS) and the app says
+ * so. The file the user keeps is the MP3, and a lossy encoder re-shapes the
+ * waveform between the samples: its own overshoot comes out of the promise.
+ * Measured through the app's own export path — lamejs out of assets/vendor, the
+ * app's 16-bit dither and its chunking, ffmpeg's ebur128 as the independent
+ * meter (tools/work/tp1.js … tp3.js, three dense masters) — a master rendered
+ * *at* its ceiling comes back over it:
+ *
+ *   bitrate      128      192      256      320 kbit/s
+ *   overshoot   +2.00    +0.60    +0.40    +0.40 dB
+ *
+ * At 128 kbit/s that is 1.2–1.8 dB over the ceiling the chain promised, over the
+ * general −1 dBTP a service asks for, and the app's own findings list then names
+ * `truePeak` on the re-upload of its own export — the same shape of dishonesty
+ * as the sinc that read 0.5 dB low. The fix is the room up front:
+ * `Presets.codecMargin()` lowers the render's ceiling by the worst overshoot
+ * measured at that bitrate whenever the export is lossy, and the app builds the
+ * monitor's parameters in the same place, so what you hear is still what you
+ * save. The rows below are the *delivered* file, measured through the app's own
+ * encoder and ffmpeg's meter: before the margin → with it. Material that stays
+ * under the ceiling is bit-transparent to the margin (last row: 0.00 dB), so the
+ * room is paid for by the masters whose limiter is already working. */
+{
+  /* A hot modern master: full bandwidth, envelope flattened, saturated. The
+   * bandwidth is the whole point — section 18's hot master is low-passed at
+   * 9 kHz for the de-clipper's sake, and a 9 kHz-limited waveform leaves the
+   * encoder almost nothing to re-shape (measured: it comes back +0.10 dB over
+   * its ceiling at 128 kbit/s, this one +1.70). A modern master has the top
+   * end, so this is the fixture the promise has to survive. */
+  const flat = H.filter(RSDSP, H.pink(SR, SEC, 0.5, 33), SR, 'hp', 120, 0.707);
+  const env = H.songEnvelope(SR, SEC, 0.2);
+  const shaped = new Float32Array(flat.length);
+  for (let i = 0; i < shaped.length; i++) shaped[i] = Math.tanh(flat[i] * env[i] * 3.4) / Math.tanh(1.8);
+  const hot = H.normalize(H.filter(RSDSP, shaped, SR, 'lp', 17000, 0.707), 0.99);
+  const hm = RSDSP.measure([hot], SR);
+  const HP0 = RP.buildParams('auto', hm, 0.7);
+  const prom = HP0.tpCeil;
+  const ceilFindings = (file) => {
+    const mm = RSDSP.measure(U.dec(file), SR);
+    const keys = RP.recipe(mm, RP.buildParams('auto', mm, 0.7), 0.7).findings.map((z) => z.key);
+    return { n: keys.filter((k) => k === 'truePeak' || k === 'hotPeak').length, keys };
+  };
+  for (const kbps of [128, 320]) {
+    const margin = RP.codecMargin('mp3', kbps);
+    const before = H.renderEx(Processor, [hot], HP0).out;
+    const after = H.renderEx(Processor, [hot], Object.assign({}, HP0, { tpCeil: prom - margin })).out;
+    const fB = U.appMp3(before, kbps, U.WORK + '/accept-export-b' + kbps + '.mp3');
+    const fA = U.appMp3(after, kbps, U.WORK + '/accept-export-a' + kbps + '.mp3');
+    const tB = fileTruePeakDb(fB).tp, tA = fileTruePeakDb(fA).tp;
+    row('export', 'a hot master exported at ' + kbps + ' kbit/s: delivered true peak (dBTP) vs the ' + N(prom, 2) + ' dBTP promise',
+      N(tB, 2), N(tA, 2),
+      'the render holds its ceiling — the *encoder* is what moves it, and the room it needs is ' + N(margin, 1)
+      + ' dB at ' + kbps + ' kbit/s (measured: worst of three dense masters). Without the margin the delivered file sat '
+      + (tB - prom >= 0 ? '+' : '') + N(tB - prom, 2) + ' dB against the promise; with it, '
+      + (tA - prom >= 0 ? '+' : '') + N(tA - prom, 2) + ' dB');
+    if (kbps === 128) {
+      const nB = ceilFindings(fB), nA = ceilFindings(fA);
+      row('export', 'what the app names on the re-upload of its own 128 kbit/s export (ceiling findings)',
+        String(nB.n), String(nA.n),
+        '`truePeak` fires above −1.05 dBTP, so the app was naming the true peak *it had just written* (the file measures '
+        + N(fileTruePeakDb(fB).tp, 2) + ' dBTP). With the margin it measures ' + N(tA, 2)
+        + ' dBTP and no ceiling finding is left — with an MP3 the app finally keeps the promise the chain makes for the render');
+    }
+  }
+  /* …and what the room costs where the limiter never works */
+  const q = bed(9000, 0.7);
+  const qm = RSDSP.measure([q], SR);
+  const QP = RP.buildParams('auto', qm, 0.7);
+  const qB = H.renderEx(Processor, [q], QP).out;
+  const qA = H.renderEx(Processor, [q], Object.assign({}, QP, { tpCeil: QP.tpCeil - RP.codecMargin('mp3', 128) })).out;
+  const qTp = (ch, tag) => fileTruePeakDb(U.appMp3(ch, 128, U.WORK + '/accept-export-quiet' + tag + '.mp3')).tp;
+  row('export', 'the same margin on a fixture whose limiter never works (dBTP)', N(qTp(qB, 'b'), 2), N(qTp(qA, 'a'), 2),
+    'the ceiling is ' + N(QP.tpCeil, 2) + ' dBTP and this fixture renders at ' + N(RSDSP.measure(qB, SR).ispDb, 2)
+    + ' dBTP, so a lower ceiling changes nothing: the delivered file is the same to 0.00 dB. A file that stays under its ceiling is bit-transparent to the whole stage');
 }
 
 /* ── print ──────────────────────────────────────────────────────────────── */

@@ -2310,6 +2310,52 @@ section('audit · codecs');
  * change cannot pass by bypassing everything. Measured by `tools/work/dc13.js`
  * through `dc18.js`; the row is the same arithmetic they ran.
  * -------------------------------------------------------------------------- */
+/* ---- the export's ceiling has to survive the encoder ------------------------
+ * The chain holds the *render* to the platform's true-peak target (−1 dBTP, or
+ * −2 when the master is louder than −14 LUFS). The file the user keeps is the
+ * MP3, and a lossy encoder re-shapes the waveform between the samples: its own
+ * overshoot comes out of the promise. Measured through the app's own export path
+ * (lamejs + codecs.toInt16 + the app's chunking) on three dense masters, with
+ * ffmpeg's ebur128 as the meter — probes tools/work/tp1.js … tp3.js, matrix
+ * section 22:
+ *
+ *   bitrate      128      192      256      320 kbit/s
+ *   overshoot   +2.00    +0.60    +0.40    +0.40 dB
+ *
+ * The UI offers 192 / 256 / 320, the matrix re-uploads at 128 and 320. So the
+ * margin table has to cover the worst measured overshoot at every bitrate, has
+ * to grow as the bitrate falls, and has to leave the general −1 dBTP a service
+ * asks for intact in the worst case — and the app has to actually apply it.
+ */
+{
+  const SRX = 48000;
+  const WORST = { 128: 2.0, 192: 0.6, 256: 0.4, 320: 0.4 };      // tp1–tp3, matrix §22
+  /* the bitrates the export UI offers, read from the markup itself: a new
+   * option in index.html without a margin in the table fails here */
+  const offered = (read('index.html').match(/id="mp3Rate"[\s\S]*?<\/select>/) || [''])
+    .join('').match(/value="(\d+)"/g).map((v) => parseInt(v.replace(/\D/g, ''), 10));
+  ok(offered.length >= 3 && offered.every((k) => Presets.codecMargin('mp3', k) >= WORST[k]),
+    'every MP3 bitrate the UI offers reserves the room the encoder measured',
+    offered.map((k) => k + 'k: ' + Presets.codecMargin('mp3', k).toFixed(1) + ' dB >= ' + WORST[k].toFixed(1)).join(' · '));
+  ok(Presets.codecMargin('wav', 320) === 0, 'a lossless export reserves nothing for an encoder',
+    'wav margin ' + Presets.codecMargin('wav', 320) + ' dB');
+  ok(Presets.codecMargin('mp3', 128) > Presets.codecMargin('mp3', 320),
+    'and the room grows as the bitrate falls, because the overshoot does',
+    '128k ' + Presets.codecMargin('mp3', 128).toFixed(1) + ' dB vs 320k ' + Presets.codecMargin('mp3', 320).toFixed(1) + ' dB');
+  ok(-2 - Presets.codecMargin('mp3', 192) + WORST[192] <= -1,
+    'so the general −1 dBTP a service asks for survives the worst case',
+    'worst delivered ' + (-2 - Presets.codecMargin('mp3', 192) + WORST[192]).toFixed(2) + ' dBTP on a hot master at 192 kbit/s');
+  ok(/Presets\.codecMargin\(State\.format, State\.mp3Rate\)/.test(read('assets/js/app.js')),
+    'the app applies it where the export format is known');
+  ok(/Math\.max\(1152 \* 4, Math\.floor\(rate \* 1\.5\)\)/.test(read('assets/js/codecs.js'))
+    && /Math\.max\(1152 \* 4, Math\.floor\(rate \* 1\.5\)\)/.test(read('tools/util.js')),
+    'the tooling export mirrors the app chunking, so the measured file is the delivered one');
+  const gm = DSP.measure([H.garageSim(DSP, SRX, 6)], SRX);
+  ok(Presets.buildParams('auto', gm, 0.7).tpCeil === -1,
+    'and the chain itself still asks for the platform ceiling — the margin is the export addition',
+    'a quiet fixture asks for ' + Presets.buildParams('auto', gm, 0.7).tpCeil + ' dBTP, not ' + Presets.codecMargin('mp3', 192) + ' dB less');
+}
+
 section('audit · scale freedom');
 {
   const SRF = 48000, SEC = 6, G = 0.25;                 // 0 and −12.04 dB

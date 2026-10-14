@@ -1176,6 +1176,10 @@
      * encoder overdriven. */
     const loud = (m.loudness === undefined ? -70 : m.loudness) > -14;
     a.tpCeil = loud ? -2 : -1;
+    /* …and that number is a promise about the file the user *keeps*. A lossy
+     * encoder re-shapes the waveform between the samples and its own overshoot
+     * comes out of the promise, so a lossy export lowers the render's ceiling by
+     * `codecMargin()` — measured, see its comment. */
 
     /* ── 7 · dynamics and warmth ──────────────────────────────────────────
      * Saturation adds density, so it belongs on sparse, dynamic recordings.
@@ -1334,6 +1338,43 @@
     a.declick = clamp(a.declick * (1 - 0.3 * D.percussive * (1 - D.crackleNeed)), 0, cap.declick);
 
     return a;
+  }
+
+  /**
+   * The room a lossy encoder needs, in dB, for a given export bitrate.
+   *
+   * The chain's true-peak ceiling is the platform's number, and the file the
+   * user keeps is the MP3, not the render. Measured through the app's own export
+   * path — lamejs out of assets/vendor, the app's 16-bit TPDF dither and its
+   * 72000-sample chunking, ffmpeg's `ebur128` as the independent meter
+   * (probes tools/work/tp1.js, tp2.js, tp3.js) — a dense master rendered *at*
+   * its ceiling comes back over it after the encoder has had its way:
+   *
+   *   bitrate        128      192      256      320 kbit/s
+   *   overshoot     +2.00    +0.60    +0.40    +0.40 dB   (worst of three dense masters)
+   *
+   * At 128 kbit/s that is 1.2-1.8 dB *over* the ceiling the chain promised and
+   * 0.2-0.9 dB over the general -1 dBTP a service asks for, and the app's own
+   * findings list then names `truePeak` on the re-upload of its own export —
+   * the same shape of dishonesty as the sinc that read 0.5 dB low. So the render
+   * pays the encoder's room up front: the table above, rounded up to the next
+   * tenth. Material that stays under the ceiling is bit-transparent and pays
+   * nothing (a matrix row that renders at -3 dBTP moves by 0.00 dB); only a
+   * master whose limiter is already working gives up the level, and it gives it
+   * up in the monitor as well — the app builds the export's parameters once, so
+   * what you hear is still the file you get.
+   *
+   * @param {string} format 'mp3' or 'wav'
+   * @param {number} [kbps] the chosen MP3 bitrate
+   * @returns {number} dB to subtract from the ceiling
+   */
+  function codecMargin(format, kbps) {
+    if (format !== 'mp3') return 0;
+    const k = kbps || 320;
+    if (k <= 128) return 2.1;
+    if (k <= 192) return 0.8;
+    if (k <= 256) return 0.5;
+    return 0.5;
   }
 
   /**
@@ -1749,7 +1790,7 @@
     return classify(metrics).id;
   }
 
-  const API = { PRESETS, PRESET_ORDER, CEILING, MANUAL, PROFILE_EQ, CHAIN_MIN, TONE_MIN, classify, chainOf, evidence, mixAnchors, demand, adapt, resolve, buildParams, diagnose, recipe, eqCurve, curveDb, biquadDb, profileDb };
+  const API = { PRESETS, PRESET_ORDER, CEILING, MANUAL, PROFILE_EQ, CHAIN_MIN, TONE_MIN, classify, chainOf, evidence, mixAnchors, demand, adapt, resolve, buildParams, diagnose, recipe, eqCurve, curveDb, biquadDb, profileDb, codecMargin };
   global.RSPresets = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
