@@ -259,6 +259,24 @@ sample-aligned: you hear the change and not the delay. With the repair stages of
 0 — the latency is exactly 0. The offline render (the file you save) is bit-identical to what you
 heard live either way.
 
+**The whole chain is scale-free, and that is measured end to end.** A transfer that arrives 12 dB
+quieter is the same record: over 0 … −40 dB of input the *decisions* (card and issue list), the chain's
+*action* per band (identical to ≤ 0.1 dB), the *delivered* defect statistic (≤ 0.11 dB, on the 4 kHz+
+level of the quiet frames against the same frame's body band) and the app's own index (`hissAmount`,
+`crackleIndex`, `sibExcessDb`, to 0.01) all come out the same on every fixture — and the meter itself is
+*exactly* linear (a −40 dB input reads back at −40.0000). What makes it work is not that the doses ignore
+the level, because they do not: on the quiet copies the taste doses read up to 2.2× higher (exciter 0.0211
+→ 0.0527, glue 0.0927 → 0.2317, warmth 0.1523 → 0.3323 on a crackly bed, plateau from −12 dB) and the
+de-hisser's dose settles 0.02 lower and stays there. It is that every parameter which carries a level in
+dBFS — `refDb`, `hissFloor`, `noiseFloor`, `declipLevel` — moves by *exactly* the gain, so a compressor
+threshold and a hiss floor land on the same point of the signal whether the transfer arrived at −3 or at
+−40 dBFS: at *fixed* parameters the same de-hisser is not scale-free at all (a −6 dB copy differs by
+1.2 dB of waveform), while the delivered files match at −41.5 dB. The audit row `scale freedom`
+re-measures both halves at 0 and −12 dB on a hiss and a crackle fixture, so a new stage that reads a
+level without carrying it fails there instead of on somebody's record. The one thing that does *not*
+scale is the delivery itself: the chain does not lift a quiet file — a −20 dB transfer leaves at
+−20 dB, exactly — which is the level stage's job and not this property.
+
 ### Offline render
 
 Saving runs the same processor in an `OfflineAudioContext` — with `suspend()`/`resume()` progress
@@ -327,13 +345,14 @@ tests/
                                  through a 128 kbit/s encoder)
   dsp.test.js                    DSP/engine suite: transparency, sub, air, exciter, de-hiss,
                                  de-click, measured hum/hiss repair, and the contract that a
-                                 broken file never becomes NaN parameters (73 checks)
+                                 broken file never becomes NaN parameters (150 checks)
   tuning.test.js                 the tuning contract: what the automatic mode may do to a file (17 checks)
   web.test.js                    static, DOM and app suite (137 checks)
   audit.test.js                  repository hygiene, markup, contrast, i18n, parameter,
                                  codec and robustness audit — including the mains-notch law,
-                                 a rich-hum fixture, the effect budgets, and the
-                                 several-problems-at-once chain (257 checks)
+                                 a rich-hum fixture, the effect budgets, the
+                                 several-problems-at-once chain, and the chain-level
+                                 scale-freedom row (326 checks)
   e2e.test.js                    realistic journeys: five problem recordings, slider sweep,
                                  profile overrides, 10-file batch → ZIP, mono/32 k/96 k,
                                  hostile input (108 checks)

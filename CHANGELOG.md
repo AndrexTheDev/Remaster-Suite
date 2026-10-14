@@ -6,6 +6,45 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Measured — scale freedom: the same record at 20 dB less is repaired the same, and why
+
+**The claim is made twice in this repository — the de-clicker's gate is relative to the file, and a
+quiet transfer is meant to be repaired like a hot one — and it had never been swept over the whole
+chain.** Round 12 rendered eight fixtures at 0 / −6 / −12 / −20 dB (the four worst again at −30 and
+−40 dB) through the same processor and compared the *decisions*, the *action* and the *delivered* defect
+statistic rather than the parameters. The verdicts are exactly scale-free: the card (`vinyl`,
+`cassette`, `garage`, `lowbitrate`) and the entire issue list are identical at every gain on every
+fixture — down to −40 dB, a hundred times quieter than anything a rip arrives at. The doses are not: on
+a crackly bed the taste doses read up to 2.2× higher on the quiet copies (exciter 0.0211 → 0.0527, air
+0.0237 → 0.0592, glue 0.0927 → 0.2317, warmth 0.1523 → 0.3323, plateau from −12 dB) and the de-hisser's
+dose settles 0.02 lower (0.9200 → 0.9000, monotone and saturating: the movement is bounded, not a
+runaway).
+
+**That movement is the mechanism, not a defect, and the delivered file is the proof.** The parameters
+that carry a level in dBFS — `refDb`, `hissFloor`, `noiseFloor`, `declipLevel` — move by *exactly* the
+gain (12.041 dB for a −12.04 dB input, to 0.0000 dB), so every absolute threshold inside the worklet
+lands on the same point of the signal. At *fixed* parameters the same de-hisser is not scale-free at
+all: a −6 dB copy of the hissy bed differs by **1.2 dB** of waveform, while the delivered pair matches
+at **−41.5 dB**. Measured on the output side over 0 … −40 dB: the chain's action per band, relative to
+the body band, is identical to **≤ 0.1 dB** on all eight fixtures; the delivered defect statistic — the
+4 kHz-and-up level of the quiet frames against the same frame's body band, with one mask chosen on the
+0 dB input — to **≤ 0.11 dB**; the delivered HF crest factor, i.e. the crackle statistic, to **0.00
+dB**; the app's own index to 0.01; and the meter is exactly linear in level (−40 dB in reads back as
+−40.0000 out). Every measurement field is gain-free except the level itself: crest, dynamic range, SNR,
+`topLoss`, `dullIndex`, `bassRoll`, `mudScore`, `harshness`, `humScore`, `hfCutoff`, `brickwall`,
+`clipEvidence` and the score are identical at 0, −20, −30 and −40 dB. What does *not* scale is the
+delivery: the chain does not lift a quiet file (a −20 dB transfer leaves at −20 dB, exactly), which is
+the level stage's job and not this property.
+
+**The new audit row checks the property on the chain rather than on a stage** (`audit · scale
+freedom`, 5 assertions): a hiss fixture and a crackle fixture at 0 and −12 dB must read the same card
+and issue list, the same action per band (≤ 0.3 dB) and the same delivered statistic (≤ 0.3 dB); the
+level-carrying parameters must move by exactly the gain (±0.05 dB); the meter must be linear to 0.02 dB
+— and the repair must be present (the statistic moves ≥ 8 dB), so a change that made the chain inert
+could not pass the row. No chain code changed; `assets/js/presets.js` gained one comment where the
+level-carrying parameters are built, naming the property and the row. Probes: `tools/work/dc10.js` …
+`dc18.js`; suite 150 / 137 / **326** / 108 / 17.
+
 ### Measured — the dropout class: what a hole in the music costs, and why the de-clicker does not see it
 
 **A click is an impulse *added* to the music; a dropout is a hole — a worn groove, a scratch, or a

@@ -2289,6 +2289,122 @@ section('audit · codecs');
 
 /* ═════════════════════════════════════════════════════════ 8 · performance ══ */
 
+/* -----------------------------------------------------------------------------
+ * Scale freedom: the same record at a quarter of the level gets the same repair.
+ *
+ * One property of the *whole* chain, checked on the whole chain. It is the claim
+ * the de-clicker's level gate was fixed to keep ("a transfer digitised at
+ * −24 dBFS is the same record as one at −3") and every stage that reads a level
+ * inherits it: the *decisions* (card, issue list), the chain's own *action* per
+ * band, and the *delivered* defect statistic must be the same whether the input
+ * arrives at 0 or −12 dB. A hiss fixture stands for the statistics that live in
+ * the quiet frames, a crackle fixture for the spike statistics.
+ *
+ * What makes it work is *not* that the doses ignore the level — they do not
+ * (round 12, `tools/work/dc10.js`: exciter/air/glue/warmth read up to 2.2× on
+ * the quiet copy). The parameters that carry the level in dBFS (`refDb`,
+ * `hissFloor`, `noiseFloor`, `declipLevel`) move by *exactly* the gain, so every
+ * absolute threshold inside the worklet lands on the same point of the signal.
+ * This row pins both halves — the effect does not move, the mechanism still
+ * does — and it pins that the chain is doing something at all, so a future
+ * change cannot pass by bypassing everything. Measured by `tools/work/dc13.js`
+ * through `dc18.js`; the row is the same arithmetic they ran.
+ * -------------------------------------------------------------------------- */
+section('audit · scale freedom');
+{
+  const SRF = 48000, SEC = 6, G = 0.25;                 // 0 and −12.04 dB
+  const num = (v, d) => (typeof v === 'number' && isFinite(v) ? v.toFixed(d === undefined ? 2 : d) : String(v));
+  const gain = (x, g) => { const o = new Float32Array(x.length); for (let i = 0; i < x.length; i++) o[i] = x[i] * g; return o; };
+  /* own RBJ biquads — never a remembered coefficient */
+  const bq = (kind, f, q) => {
+    const w = 2 * Math.PI * f / SRF, cw = Math.cos(w), sw = Math.sin(w), al = sw / (2 * q);
+    let b0, b1, b2, a0, a1, a2;
+    if (kind === 'lp') { b0 = (1 - cw) / 2; b1 = 1 - cw; b2 = b0; a0 = 1 + al; a1 = -2 * cw; a2 = 1 - al; }
+    else if (kind === 'hp') { b0 = (1 + cw) / 2; b1 = -(1 + cw); b2 = b0; a0 = 1 + al; a1 = -2 * cw; a2 = 1 - al; }
+    else { b0 = al; b1 = 0; b2 = -al; a0 = 1 + al; a1 = -2 * cw; a2 = 1 - al; }
+    return [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0];
+  };
+  const filt = (x, c) => {
+    const y = new Float32Array(x.length); let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+    for (let i = 0; i < x.length; i++) {
+      const v = c[0] * x[i] + c[1] * x1 + c[2] * x2 - c[3] * y1 - c[4] * y2;
+      x2 = x1; x1 = x[i]; y2 = y1; y1 = v; y[i] = v;
+    }
+    return y;
+  };
+  const rms = (a, s, n) => { let e = 0; for (let i = s; i < s + n; i++) e += a[i] * a[i]; return Math.sqrt(e / n); };
+  const bed = (lp) => {
+    let s = H.filter(DSP, H.pink(SRF, SEC, 0.40, 31), SRF, 'lp', lp, 0.60);
+    const e = H.songEnvelope(SRF, SEC, 0.35);
+    for (let i = 0; i < s.length; i++) s[i] *= e[i];
+    return H.normalize(s, 0.7);
+  };
+  const hissy = () => {
+    const b = bed(9000), n = H.mul(H.filter(DSP, H.noise(SRF, SEC, 0.02, 7), SRF, 'hp', 3000, 0.707), 0.35);
+    const o = Float32Array.from(b);
+    for (let i = 0; i < o.length; i++) o[i] += n[i];
+    return o;
+  };
+  const W = 960, HOP = 480, HP4 = bq('hp', 4000, 0.707), BP9 = bq('bp', 900, 0.707), LP12 = bq('lp', 12000, 0.707);
+  const BANDS = [['lp', 120], ['bp', 3300], ['bp', 7000], ['hp', 11000]];
+  const FIX = [['hiss bed', hissy()], ['crackle bed', H.addCrackle(bed(9000), 9, 0.85, 8)]];
+  const Proc = H.loadProcessor(SRF);
+  const seen = [];
+  for (const [name, sig] of FIX) {
+    const x2 = gain(sig, G);
+    const m1 = DSP.measure([sig], SRF), m2 = DSP.measure([x2], SRF);
+    const P1 = Object.assign({}, H.DEFAULT_PARAMS, Presets.buildParams(Presets.classify(m1).id, m1, 0.7));
+    const P2 = Object.assign({}, H.DEFAULT_PARAMS, Presets.buildParams(Presets.classify(m2).id, m2, 0.7));
+    const o1 = H.renderEx(Proc, [sig], P1).out[0], o2 = H.renderEx(Proc, [x2], P2).out[0];
+    /* the quiet frames, chosen on the 0 dB input once and read on both renders:
+     * a mask that moved with the gain would compare two different populations */
+    const body = filt(sig, BP9), mv = [];
+    for (let s = 0; s + W <= body.length - 4800; s += HOP) mv.push([rms(body, s, W), s]);
+    mv.sort((a, b) => a[0] - b[0]);
+    const mask = mv.slice(0, Math.floor(mv.length / 5)).map((r) => r[1]);
+    const quietHF = (y) => {
+      const hf = filt(y, HP4), bd = filt(y, BP9);
+      const v = mask.map((s) => 20 * Math.log10((rms(hf, s, W) + 1e-12) / (rms(bd, s, W) + 1e-12)));
+      v.sort((a, b) => a - b);
+      return v[v.length >> 1];
+    };
+    const crest = (y) => {
+      const b = filt(filt(y, HP4), LP12);
+      let pk = 0;
+      for (let i = 0; i < b.length; i++) pk = Math.max(pk, Math.abs(b[i]));
+      return 20 * Math.log10(pk / (rms(b, 0, b.length) + 1e-12));
+    };
+    const shape = (y) => {
+      const bd = 20 * Math.log10(rms(filt(y, BP9), 0, y.length) + 1e-12);
+      return BANDS.map(([k, f]) => 20 * Math.log10(rms(filt(y, bq(k, f, 0.707)), 0, y.length) + 1e-12) - bd);
+    };
+    const s1 = shape(o1), si1 = shape(sig), s2 = shape(o2), si2 = shape(x2);
+    const worstTr = Math.max.apply(null, BANDS.map((b, i) => Math.abs((s1[i] - si1[i]) - (s2[i] - si2[i]))));
+    const stat = name.indexOf('hiss') === 0 ? quietHF : crest;
+    const delivered = Math.abs(stat(o1) - stat(o2));
+    const repair = stat(sig) - stat(o1);
+    const dB = 20 * Math.log10(1 / G);
+    const meter = Math.abs(m1.peakDb - m2.peakDb - dB);
+    const car = Math.max(Math.abs(P1.refDb - P2.refDb - dB),
+      Math.abs((P1.hissFloor || 0) - (P2.hissFloor || 0) - dB));
+    seen.push({ name, meter, car, worstTr, delivered, repair,
+      same: Presets.classify(m1).id === Presets.classify(m2).id
+        && Presets.diagnose(m1).issues.join(',') === Presets.diagnose(m2).issues.join(',') });
+  }
+  const worse = (k) => seen.reduce((a, r) => (r[k] > a[k] ? r : a));
+  ok(seen.every((r) => r.meter < 0.02), 'the meter is linear in level',
+    'level shift off by ' + num(worse('meter').meter, 4) + ' dB at −12 dB');
+  ok(seen.every((r) => r.car < 0.05), 'the parameters that carry the level move by exactly the gain',
+    'refDb and hissFloor off by ' + num(worse('car').car, 4) + ' dB');
+  ok(seen.every((r) => r.worstTr < 0.3 && r.delivered < 0.3), 'so the delivered repair is the same at −12 dB',
+    'action per band off by ' + num(worse('worstTr').worstTr, 3) + ' dB, defect statistic by '
+    + num(worse('delivered').delivered, 3) + ' dB');
+  ok(seen.every((r) => r.repair > 8), 'and it is a repair, not an inert chain',
+    'the statistic moves ' + num(seen.reduce((a, r) => (r.repair < a.repair ? r : a)).repair, 2) + ' dB or more');
+  ok(seen.every((r) => r.same), 'the card and the issue list do not move with the input level',
+    seen.map((r) => r.name).join(' and ') + ' read the same verdict at 0 and −12 dB');
+}
+
 section('audit · performance budgets');
 {
   const budget = (label, ms, limit) => ok(ms <= limit, label, ms.toFixed(0) + ' ms (budget ' + limit + ' ms)');

@@ -769,6 +769,18 @@
     const headroom = peakDb <= -1 ? 1 : clamp(1 - 0.6 * (peakDb + 1), 0.4, 1);
     const dense = (m.dynamicRangeDb !== undefined && m.dynamicRangeDb < 12) ? 1 : 0;
 
+    /* Scale freedom: the doses below are *not* gain-free, and must not be — they
+     * are the compensation for the absolute thresholds inside the worklet. Every
+     * parameter that carries the level in dBFS (refDb, hissFloor, noiseFloor,
+     * declipLevel) moves by exactly the gain of the input, so a compressor
+     * threshold or a hiss floor lands on the same point of the signal whether the
+     * transfer arrived at −3 or at −40 dBFS, and the two halves cancel: the card,
+     * the issue list, the chain's action per band and the delivered defect
+     * statistic are the same at every input level. A new parameter that reads a
+     * level has to carry it the same way, or the chain stops being scale-free —
+     * the audit row `scale freedom` and the probes tools/work/dc10.js … dc18.js
+     * are what say so, and the row re-measures the lot at 0 and −12 dB. */
+
     return {
       topDeficitDb, codecDeficitDb, airDeficitDb, subDeficitDb, subPresentDb, subHole, wallAboveSib,
       mudExcessDb, harshExcessDb, boxExcessDb,
