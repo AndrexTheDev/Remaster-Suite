@@ -165,20 +165,29 @@ mark('section 4');
 {
   let clean = bed(6000, 0.7);
   clean = H.normalize(H.filter(RSDSP, clean, SR, 'hp', 60, 0.707), 0.7);
-  /* The rumble has to *dominate* the band that is supposed to see it. At 0.30
-   * the 8–20 Hz band measured −16.9 dBFS … against −17.0 for the bed on its own,
-   * i.e. the row was reading the bed's own leakage through its 60 Hz high-pass.
-   * At 0.9 the rumble is 5 dB above that floor and the row measures the thing
-   * it names. */
+  /* The rumble has to *dominate* the band that is supposed to see it, or the row
+   * measures the bed's own leakage through its 60 Hz high-pass instead of the
+   * defect. Measured on this fixture as it stands: the bed alone reaches 8–20 Hz
+   * at **−68.9 dBFS**, the rumble mixed into it at **−32.4** — 36 dB above that
+   * floor — and the chain brings the band from −38.1 to −67.5 dBFS, i.e. to
+   * within 1.4 dB of what the bed itself does down there. (The row's note used to
+   * print the rumble's own level under the words "the bed alone", which made the
+   * row look 36 dB better than it was; both numbers are named now.) */
   const low = H.normalize(H.filter(RSDSP, H.filter(RSDSP, H.noise(SR, SEC, 0.30, 12), SR, 'lp', 35, 0.707), SR, 'lp', 35, 0.707), 0.9);
   const dirty = H.normalize(H.mix([clean, low]), 0.7);
   const r = run([dirty]);
-  const bedFloor = 10 * Math.log10(Math.pow(10, bandSumDb(low, 8, 20) / 10) + 1e-20);
+  /* The floor this row has to beat is the *bed's* own leakage into 8–20 Hz
+   * through its 60 Hz high-pass — measured here, not guessed: it read −17.0 dBFS
+   * at the 0.30 rumble level that made this row useless. The note used to print
+   * the rumble source's own level under the words "the bed alone", which flattered
+   * the row by ~5 dB; both numbers are printed now, each named. */
+  const bedFloor = bandSumDb(clean, 8, 20);
+  const srcLevel = bandSumDb(low, 8, 20);
   row('rumble', 'under-35 Hz vs 100 Hz (dB)', bandSumDb(dirty, 14, 30) - bandSumDb(dirty, 90, 110), bandSumDb(r.out[0], 14, 30, r.lat) - bandSumDb(r.out[0], 90, 110, r.lat),
     'infraExcess ' + N(r.m.infraExcessDb, 1) + ' → ' + N(r.mo.infraExcessDb, 1) + ' · guard ' + N(r.P.infraHP, 1) + ' Hz · ' + r.dry.issues.join(','));
   row('rumble', 'absolute level of the 25 Hz band (dBFS)', bandSumDb(dirty, 24, 26), bandSumDb(r.out[0], 24, 26, r.lat), '');
   row('rumble', 'the 8–20 Hz band, where the bed is not (dBFS)', bandSumDb(dirty, 8, 20), bandSumDb(r.out[0], 8, 20, r.lat),
-    'the bed alone reaches this band at ' + N(bedFloor, 1) + ' dBFS');
+    'the bed alone reaches this band at ' + N(bedFloor, 1) + ' dBFS (the rumble mixed into it reads ' + N(srcLevel, 1) + ')');
   row('rumble', 'below 20 Hz vs 100 Hz (dB)', bandSumDb(dirty, 10, 19) - bandSumDb(dirty, 90, 110), bandSumDb(r.out[0], 10, 19, r.lat) - bandSumDb(r.out[0], 90, 110, r.lat), '');
 }
 mark('section 5');

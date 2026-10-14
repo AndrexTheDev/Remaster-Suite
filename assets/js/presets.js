@@ -1205,7 +1205,16 @@
      * file. Each is a repair: it is dosed by the measurement of the defect and
      * it does nothing at all when nothing was measured. */
 
-    // 9a · sub-sonic rumble → a high-pass at the measured corner. The corner
+    // 9a · sub-sonic rumble → a high-pass at the measured corner. What this
+    // cannot do is a rumble *above* the corner: a turntable's bottom end reaches
+    // into the 30–80 Hz where the bass lives, and a high-pass that takes it out
+    // takes the music's bottom with it — measured, a 30 Hz corner costs a
+    // sustained 35 Hz note 7.6 dB and a 24 Hz corner costs 3.7 dB (the audit's
+    // "what the sub-sonic guard cannot do" holds those numbers). The rumble
+    // statistic is a radio below 45 Hz, so it only ever arms this stage where the
+    // music has nothing anyway; a rumble on top of the bass is left in place and
+    // named on the card rather than half-removed by a filter that cannot tell it
+    // from the bass. The corner
     // *is* the amount, and it stays low on purpose: 18–30 Hz is where rumble
     // lives and where no instrument does, so a 12 dB/octave filter there takes
     // out what a turntable (or a desk, or a passing lorry) put in without
