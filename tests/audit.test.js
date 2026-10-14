@@ -1892,6 +1892,69 @@ section('audit · the de-clicker\'s own floor');
     + num(asMeasured.kit, 2) + ' % · master ' + num(onCurve.master, 2) + ' → ' + num(asMeasured.master, 2) + ' %');
 }
 
+/* ── the class the stage does not see, pinned ──────────────────────────────
+ * A click is an impulse *added* to the music; a dropout is a hole, and the
+ * matrix had no class for one until round 11 measured it (probes dc5–dc9, and
+ * the acceptance tool's `dropouts` rows). The numbers that matter are here,
+ * because they are what a future round would have to move:
+ *
+ *   mute length        1     2     5    12    25    60    120 samples
+ *   0.3–4 kHz vs clean +1.4  +1.0  +0.4 −0.2  −6.8  −9.8 −12.8 dB
+ *   the stage's plan   0.00  0.00  0.00 0.00  0.00  0.00  0.00
+ *
+ * — the band-limited signal *heals* a short gap, so the class only starts at
+ * about 25 samples, and the stage fires on none of it. Two replacement
+ * witnesses were measured against music's own floor and fail: a body-band
+ * envelope dip reads 0.70 at the holes and 0.032 on a plain clean bed, and the
+ * fast/slow ratio *falling* (0.48 at 25 samples, 0.04 at 120) has music's own
+ * p0.01 at 0.03. This assertion pins the bound so that a witness which *does*
+ * separate them — or a longer delay line, without which a partial fill lands as
+ * a step — is a deliberate change and not a silent one. */
+section('audit · the class the de-clicker does not see: dropouts');
+{
+  const SR6 = 48000;
+  const num6 = (v, d) => (typeof v === 'number' && isFinite(v) ? v.toFixed(d === undefined ? 1 : d) : String(v));
+  const SRC_C2 = '  tick(x, amount, reconstructed, clipLevel) {';
+  const SRC_B2 = '    const out = m > 0.001 ? xd + (p - xd) * m : xd;';
+  const P_drop = H.loadProcessorEdited([
+    [SRC_C2, SRC_C2 + '\n    this.__n = (this.__n || 0) + 1;'],
+    [SRC_B2, SRC_B2 + '\n    { const __h = globalThis.__drop; if (__h) __h(this.__n, m); }'],
+  ], SR6);
+  const SEC6 = 6, LOOK6 = 17, HL = 25;
+  const env6 = H.songEnvelope(SR6, SEC6, 0.35);
+  const b6 = H.filter(DSP, H.pink(SR6, SEC6, 0.40, 31), SR6, 'lp', 9000, 0.60);
+  for (let i = 0; i < b6.length; i++) b6[i] *= env6[i];
+  const bed6 = H.normalize(b6, 0.7);
+  const hs6 = H.mul(H.filter(DSP, H.noise(SR6, SEC6, 0.02, 7), SR6, 'hp', 3000, 0.707), 0.35);
+  const cl6 = Float32Array.from(bed6), dr6 = Float32Array.from(bed6);
+  for (let i = 0; i < cl6.length; i++) cl6[i] += hs6[i];
+  const P0 = Math.round(2 * SR6);
+  for (let i = 0; i < HL; i++) dr6[P0 + i] = 0;
+  for (let i = 0; i < dr6.length; i++) dr6[i] += hs6[i];
+  const m6 = DSP.measure([dr6], SR6);
+  const Pk = Object.assign({}, H.DEFAULT_PARAMS, Presets.buildParams(Presets.classify(m6).id, m6, 0.7));
+  const NN = dr6.length, plan6 = new Float32Array(NN);
+  globalThis.__drop = (n, plan) => { const i = n - LOOK6; if (i >= 0 && i < NN) plan6[i] = plan; };
+  const rc6 = H.renderEx(P_drop, [dr6], Pk);
+  globalThis.__drop = null;
+  let fired = 0;
+  for (let i = P0 - 40; i < P0 + HL + 60; i++) if (plan6[i] > fired) fired = plan6[i];
+  const rb6 = (hp, f, q) => {
+    const w = 2 * Math.PI * f / SR6, c = Math.cos(w), s2 = Math.sin(w), al = s2 / (2 * q), a0 = 1 + al;
+    return hp
+      ? [(1 + c) / 2 / a0, -(1 + c) / a0, (1 + c) / 2 / a0, -2 * c / a0, (1 - al) / a0]
+      : [al / a0, 0, -al / a0, -2 * c / a0, (1 - al) / a0];
+  };
+  const lf6 = (x) => DSP.applyBiquad(DSP.applyBiquad(x, rb6(true, 300, 0.707)), rb6(false, 4000, 0.707));
+  const bcl = lf6(cl6), bol = lf6(rc6.out[0]);
+  const e6 = (x, i) => { let v = 0; for (let j = 0; j < HL; j++) v += x[i + j] * x[i + j]; return v; };
+  const lost = 10 * Math.log10((e6(bol, P0 + rc6.latency) + 1e-24) / (e6(bcl, P0) + 1e-24));
+  ok(fired <= 0.02 && lost < -5,
+    'the dropout class is a measured bound, not a repair',
+    'a 25-sample mute: plan ' + num6(fired) + ' · 0.3–4 kHz ' + num6(lost) + ' dB under the clean copy · card '
+    + Presets.classify(m6).id + ' with crackleIndex ' + num6(m6.crackleIndex) + ' (probes dc5–dc9, acceptance `dropouts`)');
+}
+
 /* The crackle statistic is the one number three things act on: the classifier's
  * "is this a worn record", the card's "there is crackle", and the de-clicker's
  * dose. So its floor has to be the file, not the analysis — and it was not.

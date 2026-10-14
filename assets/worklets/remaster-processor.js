@@ -1391,7 +1391,8 @@ class DeClipper {
 /* -------------------------------------------------------------------------- */
 
 /**
- * De-clicker (vinyl crackle, digital dropouts, impulse repair).
+ * De-clicker (vinyl crackle, impulse repair — and the class it does *not* see,
+ * the dropout, measured at the end of this header).
  *
  * A pop old enough to be on a record is short — one to three samples of
  * broadband energy — and that is what every de-clicker looks for. What arrives
@@ -1430,6 +1431,31 @@ class DeClipper {
  * statistic — but a drum kit is long next to a pop: measured on a 96 BPM kit
  * with 16 snares, the stage at the automatic dose changes the 2 ms around a
  * snare by −84 dB, against −31 dB for the single-sample repair it replaces.
+ *
+ * ── the class this stage does not see, measured (round 11) ───────────────────────
+ * A click is an impulse *added* to the music; a *dropout* is a hole, and this
+ * header used to claim digital dropouts without ever measuring one. Measured
+ * now, with a mute planted every 1/9 s on a bright bed (LP 9000 + hiss; probes
+ * dc5–dc9, and the acceptance tool's two `dropouts` rows):
+ *
+ *   mute length        1     2     5    12    25    60    120 samples
+ *   0.3–4 kHz vs clean +1.4  +1.0  +0.4 −0.2  −6.8  −9.8 −12.8 dB
+ *   the plan mask      0.00  0.00  0.00 0.00  0.00  0.00  0.00
+ *
+ * A short gap is *not* a defect at all — the band-limited signal heals it, which
+ * is why the class only starts at about 25 samples — and this stage fires on
+ * none of it: the witness watches the high band, and there the 4 kHz prediction
+ * smears both edges of a gap, so the ratio reads 1.24–1.94 at 2–25 samples
+ * against a knee that wants ≈ 2.2. Two replacement witnesses were measured
+ * against music's own floor and both fail: a body-band envelope dip reads 0.70
+ * at the holes and **0.032** on a plain clean bed (a phrase boundary is deeper
+ * than any hole), and the ratio *falling* — which a mute does produce (0.48 at
+ * 25 samples, 0.04 at 120) — has music's own p0.01 at **0.03**, i.e. music
+ * reaches as deep as the deepest gap. The fill would also need a longer delay
+ * line than the 0.35 ms of look-ahead above, or the un-filled head would be
+ * left as a step — the click this stage exists to remove. So the class is a
+ * measured bound rather than a claim, pinned by the audit's `dropouts` section
+ * and by the acceptance matrix's `dropouts` rows.
  */
 class DeClicker {
   constructor(sr) {

@@ -6,6 +6,31 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Measured — the dropout class: what a hole in the music costs, and why the de-clicker does not see it
+
+**A click is an impulse *added* to the music; a dropout is a hole — a worn groove, a scratch, or a
+codec that swallowed a block — and the matrix had no class for one.** The de-clicker's header claimed
+“digital dropouts” without a measurement behind it; this round planted mutes every 1/9 s on a bright
+vinyl-shaped bed and walked the length ladder. The first result is that **a short gap is not a defect
+at all**: the band-limited signal heals it, so 1 / 2 / 5 / 12 samples cost the 0.3–4 kHz band **+1.4 /
++1.0 / +0.4 / −0.2 dB** against the clean copy — while 25 / 60 / 120 samples cost **−6.8 / −9.8 /
+−12.8 dB**. The second is that **the stage fires on none of them, at any length** (plan mask 0.00
+across the ladder), because its witness watches the *high* band, and there the 4 kHz prediction smears
+both edges of a gap: the ratio reads 1.24–1.94 at 2–25 samples against a knee that wants ≈ 2.2.
+
+**Two replacement witness families were measured against music's own floor, and both fail.** A
+body-band envelope dip — with the symmetry and recovery conditions a hole has and a note's decay does
+not — reads 0.70 at the holes and **0.032** on a plain clean bed (a phrase boundary is deeper than any
+hole), and it does not separate even after a 3×3 sweep of the envelope release and the bed's
+brightness. The fast/slow ratio *falling* is the other direction a mute does move (0.48 at 25
+samples, 0.04 at 120) — but music's own p0.01 on the same file is **0.03**, i.e. music reaches as deep
+as the deepest gap. The third result is structural: the fill's look-ahead is 0.35 ms, shorter than the
+smallest hole that costs the music anything, and a fill that starts mid-hole leaves the *un*-filled
+head as a step — the click this stage exists to remove. So the class is measured, named and **not**
+claimed: the header, the README and the matrix now say so. Probes `dc5`–`dc9`; the matrix gained the
+`dropouts` class (113 → **115 rows**, 29 → **30 classes**) and the audit a row that pins the bound
+(320 → **321**).
+
 ### Measured — the de-clicker's shape discount is not a lever, and what its floor leaves
 
 **The floor note said the survivors could not be reached by the map; this round priced the other half

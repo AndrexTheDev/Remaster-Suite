@@ -1474,6 +1474,63 @@ mark('section 20');
     + ' — the brick wall and the noise floor the encoder adds are not defects the card names');
 }
 
+mark('section 21');
+/* 21 ── dropouts ───────────────────────────────────────────────────────────
+ * The defect class this matrix did not have. A click is an impulse *added* to
+ * the music; a dropout is a hole — a worn groove, a scratch, or a codec that
+ * swallowed a block mutes two to a hundred samples. Measured (probes dc5–dc9),
+ * on this fixture (a bright bed, LP 9000 + hiss, mutes planted at 2.00 s):
+ *
+ *   mute length        1     2     5    12    25    60    120 samples
+ *   0.3–4 kHz vs clean +1.4  +1.0  +0.4 −0.2  −6.8  −9.8 −12.8 dB
+ *   the stage's plan   0.00  0.00  0.00 0.00  0.00  0.00  0.00
+ *
+ * Short gaps are not a defect at all: the band-limited signal *heals* them, and
+ * that is why the class starts at about 25 samples. None of them is repaired at
+ * any length — the de-clicker's witness watches the *high* band, where the
+ * 4 kHz prediction smears both edges of a gap (the ratio reads 1.24–1.94 at
+ * 2–25 samples, under the 2.2 knee), and the diagnosis is silent, so the chain
+ * runs at the profile's floor dose. Two replacement witness families were
+ * measured against music's own floor and both fail: a body-band envelope dip
+ * reads 0.70 at the holes and **0.032** on a plain clean bed (a phrase boundary
+ * is deeper than any hole), and the ratio *falling* — which a mute does produce
+ * (0.48 at 25 samples, 0.04 at 120) — has music's own p0.01 at **0.03**, i.e.
+ * music reaches as deep as the deepest gap. The fill would also need a longer
+ * delay line than the stage's 0.35 ms of look-ahead, or the un-filled head
+ * would be left as a step — the click this stage exists to remove. So the class
+ * is measured, named and *not* claimed: it is the bound next to the stage that
+ * repairs impulses. */
+{
+  const SEC4 = 4, P0 = Math.round(2 * SR), HL = 25;
+  const rbjCoef = (t, f, q) => {
+    const w = 2 * Math.PI * Math.min(f, SR * 0.49) / SR, c = Math.cos(w), si = Math.sin(w), al = si / (2 * (q || 0.707)), a0 = 1 + al;
+    if (t === 'HP') return [(1 + c) / 2 / a0, -(1 + c) / a0, (1 + c) / 2 / a0, -2 * c / a0, (1 - al) / a0];
+    return [al / a0, 0, -al / a0, -2 * c / a0, (1 - al) / a0];
+  };
+  let s = H.filter(RSDSP, H.pink(SR, SEC4, 0.40, 31), SR, 'lp', 9000, 0.60);
+  const env = H.songEnvelope(SR, SEC4, 0.35);
+  for (let i = 0; i < s.length; i++) s[i] *= env[i];
+  const bedC = H.normalize(s, 0.7);
+  const hs = H.mul(H.filter(RSDSP, H.noise(SR, SEC4, 0.02, 7), SR, 'hp', 3000, 0.707), 0.35);
+  const cl = Float32Array.from(bedC), dr = Float32Array.from(bedC);
+  for (let i = 0; i < cl.length; i++) cl[i] += hs[i];
+  for (let i = 0; i < HL; i++) dr[P0 + i] = 0;
+  for (let i = 0; i < dr.length; i++) dr[i] += hs[i];
+  const dm = RSDSP.measure([dr], SR);
+  const P1 = RP.buildParams('auto', dm, 0.7);
+  const r1 = H.renderEx(Processor, [dr], P1);
+  const LFband = (x) => filt(x, [rbjCoef('HP', 300, 0.707), rbjCoef('LP', 4000, 0.707)]);
+  const bl = LFband(cl), bo = LFband(r1.out[0]);
+  const en = (b, i) => { let v = 0; for (let j = 0; j < HL; j++) v += b[i + j] * b[i + j]; return v; };
+  const lost = 10 * Math.log10((en(bo, P0 + r1.latency) + 1e-24) / (en(bl, P0) + 1e-24));
+  const rm = RSDSP.measure([r1.out[0]], SR);
+  row('dropouts', '0.3–4 kHz at a 25-sample mute vs the clean copy (dB)', lost, lost,
+    'a mute is a hole, not an impulse: measured, 1–12 samples cost this band *nothing* (+1.4 … −0.2 dB — the band-limited signal heals them), while 60 and 120 samples cost −9.8 and −12.8 dB. The chain repairs none of them at any length: the witness watches the high band, where the prediction smears both edges and the ratio reads 1.24–1.94 against a knee of 2.2, and both replacement witnesses fail against music\'s own floor (a body-band dip reads 0.70 at the holes and 0.032 on a clean bed; the ratio falling reads 0.48 at 25 and 0.04 at 120 against music\'s own p0.01 of 0.03). A measured bound, not a claim');
+  row('dropouts', 'analyser crackleIndex — a file of dropouts is not named crackle', N(dm.crackleIndex, 3), N(rm.crackleIndex, 3),
+    'card ' + RP.classify(dm).id + ' → ' + RP.classify(rm).id + ' · the chain is dosed at the profile\'s floor (declick ' + N(P1.declick, 3)
+    + '), so the stage stands by on a file whose holes are −6.8 dB deep in the music\'s own band');
+}
+
 /* ── print ──────────────────────────────────────────────────────────────── */
 /* ── print ──────────────────────────────────────────────────────────────── */
 const W = [20, 62, 14, 14];
