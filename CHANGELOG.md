@@ -13,6 +13,21 @@ thresholds sat in the tone stages (the glue's and the warmth's), all of them wri
 full scale. The same recording measured and processed 20 dB down now comes out 20 dB down: nothing
 else may move.
 
+### Measured — where the dull-top class's line sits, and what the chain does with it
+
+* Sweeping the low-pass corner of the same bed (19 kHz → 5 kHz) and asking the app: `dullIndex` goes
+  0.00 → 0.62 and the `dullTop` flag turns on between **0.22** (9 kHz corner) and **0.37** (7 kHz); the
+  chain lifts the 8–16 kHz band by 0.4 dB (13 kHz corner) … **2.7 dB** (5 kHz), with the air dose
+  falling the other way — 0.324 at 5 kHz, 0.012 at 11 kHz, 0 at 13 kHz and above.
+* A file the card calls dull (7 kHz corner: 0.37 → 0.22) comes out **healthy**. The double-pole fixture
+  the row uses reads the top of the scale (dullIndex **1.00 → 0.86**, topLoss 1.00 → 0.78) and comes out
+  with the card still saying **`dullTop`** — that is the synthesiser's own ceiling, not a missing
+  repair: it derives what it adds from the band below the cliff and is not allowed to overtake it
+  (`airRoom`), so a recording this dull is not turned into a bright modern one, and the card says so.
+* The row now prints the verdict **pair** — before → after the chain — instead of only the dry one,
+  which left the reader to guess which of the two had happened. acceptance 57 rows (unchanged count),
+  exit 0 → `tools/work/acceptance-v2ab.txt`.
+
 ### Fixed — a measured repair was still being scaled by the intensity curve
 
 * **The de-hisser's dose is its measurement, and the taste curve was scaling it.** `repair()` multiplies

@@ -601,14 +601,37 @@ mark('section 12');
     'mudScore ' + N(r.m.mudScore) + ' · band1 ' + N(r.P.band1) + ' · band2 ' + N(r.P.band2) + ' · ' + r.dry.issues.join(','));
 }
 mark('section 13');
-/* 13 ── dull top end ────────────────────────────────────────────────────── */
+/* 13 ── dull top end ──────────────────────────────────────────────────────
+ * Where the class's line sits, measured by sweeping the low-pass corner of the
+ * same bed (a single pole, so the corner is the slope) and asking the app:
+ *
+ *   corner   19k    16k    13k    11k     9k     7k     5k
+ *   dullIdx 0.00   0.02   0.05   0.12   0.22   0.37   0.62
+ *   card    healthy ……………………… healthy   dullTop  dullTop
+ *
+ * — i.e. the flag turns on between 0.22 and 0.37, and the same sweep says what
+ * the chain does with it: the 8–16 kHz band comes up 0.4 (13 kHz) … 2.7 dB
+ * (5 kHz), the air dose falls with the dullness the other way (0.324 at 5 kHz,
+ * 0.012 at 11 kHz, 0 at 13 kHz). A file the *card* calls dull (7 kHz corner,
+ * dullIdx 0.37 → 0.22) comes out `healthy`, and a 5 kHz corner — the double-pole
+ * fixture below reads the top of the scale, dullIdx 1.00 — does **not**: it comes
+ * out at 0.46 with the card still saying `dullTop`. That is the synthesiser's
+ * own ceiling, not a missing repair: it derives what it adds from the band below
+ * the cliff and is not allowed to overtake it (`airRoom`), so a recording this
+ * dull is not turned into a bright modern one — and the row prints the pair of
+ * verdicts rather than only the dry one, so the reader can see which of the two
+ * happened.
+ * ------------------------------------------------------------------------- */
 {
   const clean = bed(20000, 0.7);
   let dull = H.normalize(filt(clean, [bq('LP', 5200, 0.707), bq('LP', 5200, 0.707)]), 0.7);
   const r = run([dull]);
   const topDb = (sig, lat) => bandSumDb(sig, 9000, 15000, lat) - bandSumDb(sig, 2000, 4000, lat);
   row('dull top end', '9–15 kHz vs 2–4 kHz (dB)', topDb(dull), topDb(r.out[0], r.lat),
-    'hfCutoff ' + N(r.m.hfCutoff, 0) + ' Hz · dullIndex ' + N(r.m.dullIndex) + ' · topLoss ' + N(r.m.topLoss) + ' · air ' + N(r.P.air) + ' · airF ' + N(r.P.airF, 0) + ' · ' + r.dry.issues.join(','));
+    'hfCutoff ' + N(r.m.hfCutoff, 0) + ' Hz · dullIndex ' + N(r.m.dullIndex) + ' → ' + N(r.mo.dullIndex)
+    + ' · topLoss ' + N(r.m.topLoss) + ' → ' + N(r.mo.topLoss) + ' · air ' + N(r.P.air) + ' · airF ' + N(r.P.airF, 0)
+    + ' · ' + r.dry.issues.join(',') + ' → ' + (r.wet.issues.join(',') || 'healthy')
+    + ' (the synthesiser may not overtake the band it derives from — a 7 kHz corner is closed, a 5 kHz one is not)');
 }
 mark('section 14');
 /* 14 ── harsh presence ──────────────────────────────────────────────────── */
