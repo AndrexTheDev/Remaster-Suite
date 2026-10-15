@@ -360,6 +360,13 @@ tests/
                                  profile overrides, 10-file batch → ZIP, mono/32 k/96 k,
                                  hostile input (108 checks)
   webaudio-stub.js               miniature Web Audio implementation for Node
+  beta/
+    beta.js                      the real-browser suite: every control on the page,
+                                 the whole journey from file to export, the scale
+                                 rows, the progress bars, the phone layouts (94 checks)
+    cdp.js                       minimal Chrome DevTools Protocol client over the
+                                 platform WebSocket — no dependency beyond Node ≥ 22
+    chromium.js                  launcher for the packaged headless Chromium
 ```
 
 No bundler, no transpiler, no dependencies at runtime. The only `node_modules` in the project
@@ -384,11 +391,15 @@ node tests/e2e.test.js     # realistic journeys: five problem recordings, slider
 node tests/tuning.test.js  # the tuning contract: octave bands, loudness, the level match, the
                            # soft-clip guard, level-normalised synthesis, honest extremes
 node tests/beta/beta.js    # big beta: drives a real headless Chromium over the DevTools
-                           # protocol — real drops, real AudioWorklet, real dialogs and
-                           # downloads, phone emulation at 390 and 320 px with live progress
-                           # sampling — and photographs the screenshot matrix. The recordings
-                           # are the same synthesised fixtures the node suites use, served to
-                           # the page, and the upload path is timed phase by phase
+                           # protocol — real clicks, real drops, real AudioWorklet, real
+                           # dialogs and downloads, phone emulation at 390 and 320 px with
+                           # live progress sampling — and photographs the screenshot matrix.
+                           # The recordings are the same synthesised fixtures the node suites
+                           # use, served to the page, and the upload path is timed phase by
+                           # phase. The two scale rows calibrate themselves: a 30-second take
+                           # goes through the identical instrumented path seconds earlier on
+                           # the same machine, and what the row holds the app to is the
+                           # machine's own rate, not an absolute budget. 94 checks
 ```
 
 The beta writes `docs/BETA-REPORT.md` and the screenshot matrix to `docs/beta/`.
