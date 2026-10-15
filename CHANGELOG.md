@@ -6,6 +6,23 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Round 21 — a squashed master must stay squashed honestly, not be “restored” by a fake transient stage
+
+**The remaining class was the squashed master.** The correct question is not whether the card can name it — it can — but whether the chain makes a second mistake after naming it: compressing it again, or pretending that a transient shaper has recovered peaks the master no longer contains. The answer is now measured on the exact acceptance §15 fixture, on a clipped modern master, and with a deliberately isolated hit experiment.
+
+| fixture and stage | app's own statistic | independent meter / consequence |
+|---|---|---|
+| squashed, not clipped, before → after the full chain | `dynamicRangeDb` **8.70 → 8.27 dB**; card **squashed → squashed** | the independent 20 ms envelope p98 − p05 is **12.82 → 11.45 dB**; true peak is −1.10 → **−2.10 dBTP**. The output ceiling is doing its promised safety work; the class is not falsely declared repaired |
+| the same fixture, stage controls | glue off: app DR **8.34**; warmth off **8.34**; synthesis off **8.25**; limiter off **8.52** | limiter off gives an independent envelope range of **11.94 dB** but a true peak of **−0.49 dBTP** — it is not an acceptable export. Turning off the final safety stage buys no recovered dynamics worth shipping; it only gives back the over-peak |
+| squashed **and clipped**, before → after | app DR **8.65 → 8.69 dB**; card **squashed,clipping → squashed** | the independent envelope is **12.75 → 11.63 dB**, true peak −3.03 → **−2.10 dBTP**, and the flat-run counter is 0 after the chain. With de-clip off the app reads 8.36; adding de-clip first brings it to 8.70, and adding click, de-ess/hiss and measured EQ afterwards leaves it at 8.70: later stages do not undo the repair |
+| the information the file has already lost | source hit peaks **−13.02 / −6.18 / −0.98 dBFS** → compressed **−1.87 / −0.13 / 0.00 dBFS** | a fast/slow “transient restoration” prototype has no evidence for which original peak existed; at k = 0.3 it produces **+4.13 / +5.87 / +6.00 dBFS** (and the stronger settings do the same). That is a clipper, not a restoration, so it is not shipped |
+
+This fixes the policy in the algorithm rather than in a label. A file with `dynamicRangeDb < 12` already gets reduced glue and warmth; this round adds **no** transient shaper and no second compressor. A squashed master remains `squashed` after processing because its defining defect is missing envelope information, not a frequency band or a repairable plateau. If it is also clipped, de-clip runs first and the card loses only `clipping`; if it is hot, the true-peak limiter remains last and holds the export ceiling. The app therefore says exactly what it did: it repaired the clipping it could measure, kept the dynamics it received, and did not invent dynamics it cannot know.
+
+**The matrix now measures both sides of the claim.** Section 15 has one row for the independent envelope statistic and one for `dynamicRangeDb`; the stage-control values and the cumulative repair order are in `tools/work/wr39.txt` (unclipped squashed fixture) and `tools/work/wr38.txt` (clipped/encoded fixture). The acceptance matrix is now **127 rows / 32 defect classes**. No effect was added because every proposed restoration either failed to recover the known peaks or violated the true-peak contract.
+
+**Suites:** dsp 160, audit 335, web 137, e2e 108, tuning 17 — exit 0.
+
 ### Measured and closed — the arrival's own top end at the last two pops, and the statistic that cannot gate it
 
 **The last crackle lever is closed by a measurement, not by an argument.** The matrix's worn record counts **2 of 72**

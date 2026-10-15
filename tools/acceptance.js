@@ -870,8 +870,12 @@ mark('section 15');
    * the file's own 98th percentile sits almost on its 5th — and squashed hard
    * enough that the *app* says so. A row named after a defect class has to be a
    * file the app actually scores as one, and this fixture did not: measured on
-   * the fixture as it shipped (the envelope re-applied at power 0.12, then
-   * tanh ×1.6), the app reads dynamicRangeDb **12.2** and the card comes back
+   * the accepted fixture after the render, the class remains `squashed` by both
+   * the app's dynamic-range statistic and the independent envelope meter — that
+   * is the honest result for information the mastering process has already
+   * destroyed, not a missing effect.
+   * The old fixture was also invalid: its envelope was re-applied at power
+   * 0.12, then tanh ×1.6; the app reads dynamicRangeDb **12.2** and the card comes back
    * "hiss". Driving the *saturation* instead is the wrong knob — 3.2 → 10.9 dB
    * "healthy", 5.0 → 9.3 dB "clipping", 7.0 → 7.7 dB "squashed,clipping" — the
    * dynamic range of an over-limited master comes from its *envelope*, not from
@@ -904,8 +908,13 @@ mark('section 15');
     return 20 * Math.log10((lv[Math.floor(lv.length * 0.98)] + 1e-12) / (lv[Math.floor(lv.length * 0.05)] + 1e-12));
   };
   row('squashed master', '20 ms envelope p98 − p05 (dB)', crest(flat), crest(r.out[0], r.lat),
-    'the app reads ' + N(r.m.dynamicRangeDb, 1) + ' dB (its own "squashed" line is 9) · card '
-    + r.dry.issues.join(',') + ' · glue dose ' + N(r.P.glue, 2) + ' · warmth dose ' + N(r.P.warmth, 2));
+    'the app reads ' + N(r.m.dynamicRangeDb, 1) + ' → ' + N(r.mo.dynamicRangeDb, 1) + ' dB (its own "squashed" line is 9) · card '
+    + r.dry.issues.join(',') + ' → ' + (r.wet.issues.join(',') || 'healthy') + ' · glue dose ' + N(r.P.glue, 2) + ' · warmth dose ' + N(r.P.warmth, 2)
+    + ' · the independent envelope meter is the row; the app metric is the row below');
+  row('squashed master', 'app dynamicRangeDb (dB)', r.m.dynamicRangeDb, r.mo.dynamicRangeDb,
+    'the class is deliberately not repaired: card ' + r.dry.issues.join(',') + ' → ' + (r.wet.issues.join(',') || 'healthy')
+    + ' · wr39 stage controls: de-clip is off on this clean squashed fixture; glue off 8.34 app dB, warmth off 8.34, '
+    + 'synthesis off 8.25, limiter off 8.52 — the later stages do not invent dynamics, and the final limiter is the export ceiling');
 }
 mark('section 16');
 /* 16 ── an out-of-phase bottom ──────────────────────────────────────────── */
