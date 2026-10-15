@@ -86,6 +86,14 @@
       const params = Presets.buildParams(resolved, metrics, power);
       params.bypass = 0;                       // A/B is handled separately
       params.autoLevel = 1;
+      /* A lossy export pays the encoder's own overshoot out of the ceiling: the
+       * promise is about the file the user keeps, not about the render (measured
+       * through this path — the 128 kbit/s export of a dense master came back
+       * 2.0 dB over its ceiling and was named `truePeak` on its own re-upload,
+       * tools/work/tp2.js). The monitor builds its parameters here too, so what
+       * you hear is still what you save, at every format and bitrate; a ceiling
+       * that was switched off (0) stays off. */
+      if (params.tpCeil < 0) params.tpCeil -= Presets.codecMargin(State.format, State.mp3Rate);
       return params;
     },
     signature(card) {

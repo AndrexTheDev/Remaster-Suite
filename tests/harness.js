@@ -39,6 +39,35 @@ function loadProcessor(sr) {
   return P;
 }
 
+/**
+ * Load the processor with a few exact string replacements applied first, so a
+ * test can move one constant or one line and measure what that would cost.
+ * Each patch must match exactly once; a silent no-match would be measured as
+ * "the change did nothing", which is the one wrong answer a sweep must not give.
+ */
+function loadProcessorEdited(patches, sr) {
+  const file = path.join(ROOT, 'assets', 'worklets', 'remaster-processor.js');
+  let code = fs.readFileSync(file, 'utf8');
+  for (const [find, replace] of patches) {
+    const n = code.split(find).length - 1;
+    if (n !== 1) throw new Error('patch matched ' + n + ' times: ' + String(find).slice(0, 60));
+    code = code.replace(find, replace);
+  }
+  const rate = sr || 48000;
+  const factory = vm.runInThisContext(
+    `(function(sampleRate, AudioWorkletProcessor, registerProcessor) {\n${code}\n})`,
+    { filename: 'remaster-processor.edited.js' }
+  );
+  const registry = {};
+  class AudioWorkletProcessorStub {
+    constructor() { this.port = { postMessage() {}, onmessage: null }; }
+  }
+  factory(rate, AudioWorkletProcessorStub, (name, cls) => { registry[name] = cls; });
+  const P = registry['remaster-processor'];
+  if (!P) throw new Error('remaster-processor was not registered');
+  return P;
+}
+
 let dspCache = null;
 
 /** Load the shared DSP utilities exactly as the browser loads them. */
@@ -50,25 +79,36 @@ function loadDsp() {
 
 const DEFAULT_PARAMS = {
   power: 1, bypass: 0, sub: 0, subRatio: 0.5, exciter: 0, air: 0, dehiss: 0,
-  declick: 0, reso: 0, glue: 0, warmth: 0, tilt: 0,
+  declip: 0, declipLevel: -0.1, declick: 0, reso: 0, glue: 0, warmth: 0, tilt: 0,
   band0: 0, band1: 0, band2: 0, band3: 0, band4: 0, band5: 0,
   noiseFloor: -70, autoLevel: 1,
   // the per-song stages (see remaster-processor.js): a high-pass corner, the
   // sibilance control, the mono-maker, the glue timing, the de-hisser split and
   // the twelve bands of the corrective EQ
-  infraHP: 0, deess: 0, bassMono: 0, glueTime: 0.5, hissF: 3200,
+  infraHP: 0, deess: 0, bassMono: 0, glueTime: 0.5, hissF: 3200, tpCeil: 0,
   eq0: 0, eq1: 0, eq2: 0, eq3: 0, eq4: 0, eq5: 0,
   eq6: 0, eq7: 0, eq8: 0, eq9: 0, eq10: 0, eq11: 0,
 };
 
 /**
- * Render `input` through the worklet in 128-frame quanta.
+ * Render `input` through the worklet in 128-frame quanta, and report the
+ * latency the processor declares for those parameters (in samples). A stage
+ * with look-ahead (the de-clicker) delays the output while it is engaged, so a
+ * caller that intends to measure what the chain *changed* has to shift the dry
+ * side by `latency` first.
  * @param {object} Processor  class returned by loadProcessor()
  * @param {Float32Array[]} input
  * @param {object} params     flat parameter map
+ * @returns {{out: Float32Array[], latency: number}}
  */
-function render(Processor, input, params, blockSize) {
+function renderEx(Processor, input, params, blockSize) {
   const bs = blockSize || 128;
+  /* `input` is a *list* of channels. Handed a bare Float32Array — the shape
+   * `U.enc(...)[0]` and `U.dec(...)` look like after an index — this function
+   * used to map over the *samples*, allocating a full-length array per sample
+   * and dying of an out-of-memory abort with no JS frame in the trace. It cost
+   * half an hour once; it says so now. */
+  if (typeof input[0] === 'number') throw new TypeError('renderEx: input must be an array of channels, got a bare sample array');
   const proc = new Processor({ processorOptions: { channels: input.length } });
   const frames = input[0].length;
   const out = input.map((c) => new Float32Array(frames));
@@ -81,7 +121,21 @@ function render(Processor, input, params, blockSize) {
     const outBlocks = out.map((c) => c.subarray(pos, pos + n));
     proc.process([inBlocks], [outBlocks], arrays);
   }
-  return out;
+  /* The look-ahead, under both spellings this repo has used for it: the harness
+   * called it `latency`, the acceptance matrix's `run()` re-labels it `lat`, and
+   * every reader of either writes `(lat || 0)`. A result that carries only one
+   * of the two names therefore reads as **zero samples** at the other name —
+   * silent, and exactly the sample count a row is trying to measure. That is how
+   * the acceptance's drum-performance row came to report 1.79 dB of peak damage
+   * the de-clicker does not do (`tools/acceptance.js`, and the round that fixed
+   * it): the off render was read with `.lat`, 88 samples of limiter delay early.
+   * The result carries both, so neither name can be the wrong one. */
+  return { out, latency: proc.latency || 0, lat: proc.latency || 0 };
+}
+
+/** Render and return the output channels only. See renderEx for the latency. */
+function render(Processor, input, params, blockSize) {
+  return renderEx(Processor, input, params, blockSize).out;
 }
 
 /* ------------------------------------------------------------ signal makers */
@@ -319,7 +373,8 @@ function summarize() {
 }
 
 module.exports = {
-  ROOT, loadProcessor, loadDsp, render, DEFAULT_PARAMS,
+  renderEx,
+  ROOT, loadProcessor, loadProcessorEdited, loadDsp, render, DEFAULT_PARAMS,
   tone, noise, pink, mix, mul, filter, rng, peak, songEnvelope, addCrackle, normalize,
   garageSim, cassetteSim, vinylSim, lowBitrateSim, comboSim,
   ok, section, summarize, stats: () => ({ passed, failed }),

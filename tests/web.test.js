@@ -272,7 +272,12 @@ async function run() {
   const p1 = win.RSApp.P.params(card);
   const scaled = ['air', 'exciter', 'dehiss', 'reso'].some((k) => Math.abs(p1[k] - p0[k]) > 1e-6);
   ok(scaled, 'the single power slider scales the whole chain');
-  ok(p1.band5 < p0.band5 + 0.001 && p1.band5 !== p0.band5, 'equaliser bands scale with power too');
+  // The top band's job depends on the file: a dull one gets a 7 kHz lift, a hot
+  // one gets a cut (and the lift stands down entirely — see `airHold` in
+  // presets.js). What the slider promises is that whatever that band is doing at
+  // 100 % is done by *less* of it at 50 % — a lift shrinks, a cut shrinks.
+  ok(p1.band5 !== p0.band5 && Math.abs(p1.band5) < Math.abs(p0.band5) + 1e-6,
+    'equaliser bands scale with power too', 'band5 ' + p0.band5.toFixed(3) + ' → ' + p1.band5.toFixed(3));
 
   section('flow · full render and save');
   win.RSApp.State.format = 'wav';

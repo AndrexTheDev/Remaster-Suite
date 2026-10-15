@@ -49,6 +49,7 @@
     exciter: 0.26,     // harmonic exciter
     air: 0.30,         // 8–16 kHz air synthesis (dosed by need × deriveRoom)
     dehiss: 0.92,      // downward expander (a repair — allowed to work hard)
+    declip: 0.85,      // flat-top (clipping) reconstruction — a repair
     declick: 0.85,     // impulse repair
     glue: 0.35,        // glue compression
     warmth: 0.45,      // saturation
@@ -57,7 +58,29 @@
     // where something was measured: hum is notched by the measured mains level,
     // boxiness by the measured resonance, width by the measured image.
     hum: 0.85,         // mains notches (−36 dB at the fundamental at 0.85)
-    box: 3.5,          // dB taken out of the strongest measured resonance
+    // dB taken out of the strongest measured resonance. This was 3.5 — a third
+    // of an octave of safety against a mis-placed notch — and it turned out to
+    // be the binding constraint rather than the measurement: on a +12 dB Q-4
+    // ring over a bed, the scan reports 5.5 dB of excess, and 3.5 dB of cut left
+    // the ring half audible above the same bed (independent meter, every depth
+    // from 0 to 9 dB). What a shallow cut was buying is now bought by the
+    // *measurement*: the peak has to sit ≥ 3 dB above its own local trend, at
+    // Q ≥ 3, inside 150–1800 Hz, and it is read from the quiet-frame spectrum —
+    // sound that is there when the music is not.
+    // …and the ceiling was 8 until a stronger ring showed what an open-loop
+    // cap does at the top of its range. Measured on +18 and +21 dB Q-4 rings
+    // over the same bed (the scan reports 8.5 and 10.0 dB, above anything the
+    // card's own "boxy" scale saturates at): at 8 dB of cut the *export is still
+    // diagnosed boxy* — the app's own scan reads 3.5 and 4.9 dB of excess at
+    // 223 Hz on the file it just wrote — while 10 and 12 dB close both (scan
+    // 0.0, no resonance listed). A wider notch is not the lever (Q 4 instead of
+    // 6 moves the residue 0.87 → 0.60 dB and the scan *up* to 3.9), and the cost
+    // of the deeper cut stays where the design wants it: over those rings the
+    // notch's own third of an octave loses 5.2–6.2 dB and the two neighbouring
+    // third-octaves move 1.0–1.4 dB. Rings the scan reports at ≤ 5.5 dB — which
+    // is everything the acceptance fixture and the audit's own room fixture
+    // write, and where 1.45 × the report is still ≤ 8 — are untouched by this.
+    box: 12,
     width: 0.55,       // stereo width restoration (≈ +3.4 dB of side signal)
     airRoom: 0.95,     // how much top end the synthesiser may rebuild
     eq: 6,             // dB the per-song corrective EQ may move a band in auto
@@ -73,11 +96,21 @@
    * worklet's own caps still hold). This is where the profiles stay audibly
    * different from each other instead of all converging on the same gentle
    * result. */
-  const MANUAL = {
+  const MANUAL = Object.assign({}, CEILING, {
     reso: 0.80, sub: 0.80, exciter: 0.70, air: 0.80,
-    dehiss: 0.95, declick: 0.95, glue: 0.55, warmth: 0.65, tilt: 0.50,
+    dehiss: 0.95, declip: 0.95, declick: 0.95, glue: 0.55, warmth: 0.65, tilt: 0.50,
     eq: 9,             // a profile the user picked may correct more of the shape
-  };
+    // The repair ceilings are *inherited* rather than repeated: the mains
+    // notches, the measured resonance, the stereo width and the air ceiling are
+    // dosed by their measurement in both modes, and a manual profile spends more
+    // of the colour and the synthesis, not of a repair. They have to be present
+    // in this table at all, which they were not — `clamp(x, 0, undefined)`
+    // returns x, and `undefined * n` is NaN, so the picked profiles silently ran
+    // the resonance notch at 0 dB (on a fixture with a measured 5.5 dB ring) and
+    // the width stage at NaN, i.e. off, while the hum ceiling was not applied
+    // either. Measured with `RP.buildParams('vinyl', m, 0.7)` before the fix:
+    // boxG1 = 0 at a frequency the scan had just reported.
+  });
 
   /* -------------------------------------------------------------------------
    * Ceilings (100 % power) per profile
@@ -276,6 +309,74 @@
     return out;
   }
 
+  /**
+   * Did a codec actually take something away?
+   *
+   * A hard spectral cliff is the signature of lossy encoding, and the
+   * measurement finds it — but *where* the cliff sits decides whether there is
+   * anything to repair. A 320 kbit/s MP3 cuts at about 20 kHz, i.e. above what
+   * a listener hears: the label "low bitrate" there is not a finding, it is the
+   * edge of the analysis band. Measured on one programme encoded at 96, 128,
+   * 192, 256 and 320 kbit/s, every one of them reported a cliff between 19.2
+   * and 19.5 kHz, and the app called all five "low bitrate" — including, most
+   * visibly, the 320 kbit/s file the *export* had just written, which made
+   * re-uploading an export look like a defect that had been there all along.
+   *
+   * Below this point the loss is real and the chain that rebuilds the top
+   * octave is the right answer; above it there is nothing missing to rebuild.
+   */
+  function codecLoss(m) {
+    // Two ways a lossy stage can have removed something audible, and the
+    // difference between them is *where* the wall is:
+    //
+    //  · a measured cliff inside the top octave (4–17 kHz) is a codec's
+    //    signature, whatever the programme around it sounds like. A 128 kbit/s
+    //    MP3 cuts at ~14.5 kHz and this fires on it;
+    //  · a bandwidth ceiling below 17 kHz *can* be the same thing, but it can
+    //    just as well be a dull programme — an old transfer that stops at 8 kHz
+    //    because that is all the medium had. That one is named by its own card
+    //    ("dull top end") and its treatment is the same air synthesis, so the
+    //    codec name is only used when the file's own dullness does *not*
+    //    explain the ceiling. `min(hfCutoff, cliffHz)` alone got this wrong in
+    //    both directions: it called every dull record that had ever been
+    //    encoded a low-bitrate file — including this app's own 320 kbit/s
+    //    export, which was the complaint that started the round — while a wall
+    //    at 7.5 kHz (below the old cliff search's floor) was invisible.
+    // …and both branches ask for the *size* of what they found, not just its
+    // location. Measured, that distinction is the whole difference between the
+    // app naming its own export and staying quiet about it:
+    //
+    //   · branch 1 — the cliff the search reports must be a cliff. The search
+    //     returns the window with the largest drop anywhere in 4–19.5 kHz, and a
+    //     smooth −12 dB/octave programme still has a largest window (measured: a
+    //     bright pink bed 6.1 kHz @ 2.4 dB, a cassette sim 5.1 kHz @ 2.6, a
+    //     vinyl sim 15.1 kHz @ 4.6). `brickwall` is that drop measured on the
+    //     same definition a codec wall is measured with (9 dB); requiring it
+    //     keeps every measured codec (its cliffDb is 42–74 dB) and drops the
+    //     slope-only cases;
+    //   · branch 2 — a bandwidth ceiling is a codec's only when the spectrum
+    //     *falls off a cliff at it*: measured, the fall over the 1.6 kHz above
+    //     the ceiling is 39–55 dB for a real encoder wall (96 kbit/s: 52.2,
+    //     128: 39.4) against 10–20 dB for a medium's slope and 24.6 dB for the
+    //     app's own 320 export after its de-hisser took the hiss out of the top
+    //     octave. The threshold sits at 32 dB, inside that gap.
+    //   One boundary of this rule, measured and left as it is: the fall is
+    //   measured into the file's *own* floor, so a file with a digital-silence
+    //   floor (a synthetic bed, a file whose noise was already removed) and a
+    //   low-pass reads as a wall — the acceptance suite's own harsh fixture, a
+    //   pink bed low-passed at 9 kHz with no noise at all, keeps its "codec"
+    //   line for exactly that reason, and it did before this rule too. On real
+    //   material the floor is what makes the two populations separable, and a
+    //   file with nothing above 14 kHz and nothing below it either *was*
+    //   band-limited by something.
+    const brickwall = clamp(m.brickwall || 0, 0, 1);
+    const cliff = m.cliffHz || 0;
+    if (cliff > 0 && cliff < 17000 && brickwall > 0) return true;
+    const cut = m.hfCutoff || 0;
+    const dull = clamp(Math.max(m.dullIndex || 0, m.topLoss || 0), 0, 1);
+    return cut > 0 && cut < 17000 && dull < 0.6 && (m.cutDropDb || 0) >= 32;
+  }
+
   function classify(m) {
     const cut = m.hfCutoff || 0;
     const crackle = clamp(m.crackleIndex, 0, 1);
@@ -290,7 +391,13 @@
     const hiss = clamp(m.hissAmount, 0, 1);
     const clean = clamp(m.cleanliness, 0, 1);
     const dull = clamp(Math.max(m.dullIndex || 0, m.topLoss || 0), 0, 1);
-    const brick = clamp(m.brickwall, 0, 1);
+    // …and the brickwall only counts where it is a *codec* wall (see
+    // codecLoss): the score itself is honest — there is a wall, and it drops
+    // 12 dB over 1.6 kHz — but a wall at 19 kHz took away nothing anybody
+    // hears, and a wall is where streaming services, codecs and this app's own
+    // export put one. Gating the *interpretation* is what keeps a 320 kbit/s
+    // re-upload out of the low-bitrate profile.
+    const brick = codecLoss(m) ? clamp(m.brickwall, 0, 1) : 0;
     const thin = clamp(m.bassRoll, 0, 1);
     const mud = clamp(m.mudScore, 0, 1);
     const harsh = clamp(m.harshness, 0, 1);
@@ -315,8 +422,11 @@
     // this split, the most common record in a private archive — an old vinyl
     // rip that was later pushed through a 128 kbit/s encoder — lost its codec
     // treatment exactly because it was also hissy and crackly.
-    s.lowbitrate = clamp(0.62 * brick
-      + (0.30 * clean * (1 - hiss) + 0.16 * dull * (1 - flat)) * (1 - 0.5 * hiss) * (1 - 0.5 * crackle), 0, 1);
+    // …and the cliff has to be *inside* the audible top octave to count (see
+    // `codecLoss`): a cliff at 20 kHz is the analysis band edge, not a bitrate.
+    s.lowbitrate = clamp((0.62 * brick
+      + (0.30 * clean * (1 - hiss) + 0.16 * dull * (1 - flat)) * (1 - 0.5 * hiss) * (1 - 0.5 * crackle))
+      * (codecLoss(m) ? 1 : 0), 0, 1);
     // 60s/70s garage or one-mic room session: thin, boxy, dull, noisy, analogue —
     // and, because it was cut in a room with whatever wiring was there, often
     // hummy as well
@@ -357,7 +467,24 @@
     //  · topLoss  ✔ 6–12 kHz sits below the −3 dB/oct reference line
     //  · brickwall ✔ a codec cliff cut the top off, which is a known loss
     const topDeficitDb = clamp((m.topLoss || 0) * 22, 0, 22);
-    const codecDeficitDb = clamp((m.brickwall || 0) * 12, 0, 12);
+    /* …and the *cliff* is only a loss when it is inside the audible top. The
+     * file's own test for that already exists — `codecLoss` is what decides
+     * whether a cliff is evidence of a bitrate at all, and it asks whether the
+     * content ends below 17 kHz. The deficit has to ask the same question,
+     * because a wall is not a bitrate: 96–320 kbit/s all put the encoder's
+     * anti-alias filter at 19.1–19.4 kHz and remove *nothing* (measured: every
+     * band 4–16 kHz within 0.4 dB). Pricing that wall at the full 12 dB is how
+     * a healthy modern master — 320 kbit/s, topLoss 0.00, dullIndex 0.00 —
+     * came out of the chain +1.4 dB bright in 8–16 kHz, and how the harness's
+     * own low-bitrate sims (synthetic walls at 17.7/18.8 kHz, topLoss 0.25 and
+     * 0.09) got 10–12 dB of demand out of the wall alone. What is *genuinely*
+     * missing is measured either way, by `topLoss` and `dullIndex`, and those
+     * carry the demand for such a file on their own; the wall adds nothing to
+     * it. Below 17 kHz — a cliff that cut the band an "s" lives in — the wall
+     * is priced in full, exactly as before.
+     */
+    const cliffPrices = codecLoss(m) ? 1 : 0;
+    const codecDeficitDb = clamp((m.brickwall || 0) * 12 * cliffPrices, 0, 12);
     // the top octave is masked by everything below it, so a given dB deficit up
     // there is worth less than the same deficit in the 6–12 kHz region
     const airDeficitDb = clamp(Math.max(topDeficitDb * 1.15, codecDeficitDb, (m.dullIndex || 0) * 10 * 0.9), 0, 24);
@@ -384,6 +511,38 @@
     // result and has to be allowed to work harder.
     const ragged = clamp(m.hfRagged || 0, 0, 1);
     const srcShift = clamp((7000 - (m.cliffHz || 20000)) / 4500, 0, 1);
+    /**
+     * …and where the *hole* is, which decides which tool may fill it.
+     *
+     * A wall at 15.5 kHz removed 15.5–20 kHz; the 7 kHz shelf boosts 7–15 kHz.
+     * On this app's own codec fixture the law asked for +2.4 dB there — a band
+     * the encoder had *not* touched, and the band a sibilant "s" lives in — so
+     * the app's export came back diagnosed as `sibilance` (5–9 kHz measured
+     * +2.5 dB over its own trend, against +0.2 on the input). The restoration
+     * at 15 kHz and up is real and must stay; it just belongs to the
+     * synthesiser, which works above 8.2 kHz from whatever survived just below
+     * the cliff, not to a shelf that reaches down through the "s".
+     */
+    /**
+     * …and *which instrument* may fill the hole, which is decided by where the
+     * hole is. Measured with the toolkit's encoder on the acceptance bed (the
+     * decode against the pre-encode original, per band):
+     *
+     *   32 kbit/s · cliff  7254 Hz   6 kHz −1.4   8 kHz −3.1  12 kHz −6.7
+     *   48 kbit/s · cliff 10254 Hz   8 kHz −0.3  10 kHz −1.2  12 kHz −2.5
+     *   64 kbit/s · cliff 15533 Hz   8 kHz +0.2  12 kHz +0.2  14 kHz −0.1  16 kHz −0.8
+     *
+     * A wall at 7–10 kHz cut the band a 7 kHz shelf lifts: the shelf is the
+     * right instrument and stays. A wall at 15.5 kHz cut *nothing* below 14 kHz,
+     * so a shelf there is not restoring anything — it is a 2.4 dB lift across
+     * 7–15 kHz, the band an "s" lives in, and this app's own export then came
+     * back from a re-upload diagnosed `sibilance` (5–9 kHz measured +2.5 dB over
+     * the file's own trend against +0.2 on the input). Above 9.5–12 kHz the
+     * shelf stands down and the synthesiser — whose output starts at 8.2 kHz and
+     * is derived from the band that survived just below the cliff — does the
+     * restoration on its own.
+     */
+    const wallAboveSib = clamp(m.brickwall || 0, 0, 1) * smoothstep(9500, 12000, m.cliffHz || 0);
     const airRoom = clamp(0.5 + 0.40 * srcShift * (1 - ragged), 0.5, 0.90);
 
     // Automatic mode stays inside the published budget (never below 0.30);
@@ -397,6 +556,19 @@
     // how much low end is missing (bassRoll = 34–58 Hz below the −3 dB/oct line)
     const subDeficitDb = clamp((m.bassRoll || 0) * 16, 0, 16);
     const subPresentDb = clamp(band(0), -12, 12);            // > 0 = the source already humps there
+    /* …and whether there is anything *down there* to work from. The
+     * sub-harmonic synthesiser tracks the fundamental through a low pass — it
+     * has to, or it would double a record's second harmonic instead of its
+     * fundamental — so on a file whose bottom octave is empty it has no source
+     * at all. Measured on a file high-passed at 200 Hz (`subHoleDb` −25.6): the
+     * synthesiser stayed silent (34–58 Hz −96.7 → −95.9 dBFS) while the tone
+     * curve's 60 Hz shelf wrote 3.5 dB into the same empty band and the
+     * corrective EQ cut the low mids by 2.5–3.4 dB — the region that carries
+     * that recording's bass came out 2.4 dB *further* below 300–900 than the
+     * untouched file. A hole (below −12 dB) is not a balance: nothing is dosed
+     * into the empty band, the synthesiser looks where the content actually
+     * starts, and the low-mid cuts stand down. */
+    const subHole = m.subHoleDb === undefined ? 1 : smoothstep(-26, -12, m.subHoleDb);
 
     // how much is *too much*
     const mudExcessDb = clamp((m.mudScore || 0) * 12, 0, 12);
@@ -424,6 +596,19 @@
     const hissNeed = clamp((m.hissAmount || 0) * clamp((m.noiseConfidence || 0) * 1.5, 0, 1), 0, 1);
     const crackleNeed = clamp(m.crackleIndex || 0, 0, 1);
 
+    /* ── clipping (flat tops) ──────────────────────────────────────────────
+     * Two independent numbers have to agree before a file is called clipped
+     * (see the analyser's flat-top pass): how much of it sits in flat runs at
+     * its *own peak level*, and how much peak those runs imply was cut off.
+     * Either one alone is wrong — a loud sine that was never clipped has a lot
+     * of the first and 0.07 dB of the second (measured), and a single stray
+     * pair of equal samples has the second and none of the first. The dose is
+     * a repair, so it is gated, never scaled to taste: below 0.002 % of flat
+     * samples at the peak level there is nothing to reconstruct. */
+    const clipShare = clamp(m.clipFlatRatio || 0, 0, 1);
+    const clipImplied = clamp(m.clipOvershootDb || 0, 0, 6);
+    const clipNeed = smoothstep(0.00002, 0.0008, clipShare) * smoothstep(0.7, 1.6, clipImplied);
+
     /* ── the six per-song decisions ────────────────────────────────────────
      * Everything above is a *problem* the profile then treats. Everything below
      * is a property of this one file — a rumble it has, a sibilance it has, an
@@ -434,8 +619,58 @@
     // Sibilance: the 5–9 kHz band above the trend the file's own mids predict.
     // 2.5 dB is the dead zone (that is an "s" being present), 8 dB is a
     // problem; a de-esser is a *repair*, so it needs evidence, not a hunch.
-    const sibDb = clamp(m.sibExcessDb || 0, 0, 16);
-    const sibNeed = smoothstep(2.5, 8, sibDb);
+    // Sibilance arrives in bursts: a singer's "s" occupies a few percent of the
+    // file, so a statistic averaged over the whole song barely moves for the
+    // defect it is supposed to find. Two measurements answer it now: the old
+    // median-based `sibExcessDb` (the right question for a top end that is
+    // *uniformly* too hot) and `sibPeakDb`, the per-frame scan of how far the
+    // loudest 5–9 kHz moments sit above the file's own typical balance — which
+    // is the right question for intermittent sibilance. Measured: clean
+    // recordings read 0.7–1.0 dB on the scan, a vocal with 120 ms "s" bursts
+    // 8 dB above its trend reads 2.2–4.9. Without it the de-esser never
+    // engaged on such a file (dose 0.00) and the only defect in the acceptance
+    // matrix that went unrepaired was this one.
+    /* …and only the *scan* may arm the stage, because the stage is a burst
+     * detector too: 10 ms windows, 140 ms hold, ducking the 7 kHz band while a
+     * burst lasts. The median statistic cannot arm it — a steady tilt raises the
+     * 5–9 kHz band and the trend above it by the same amount, and the de-esser
+     * has nothing to duck because nothing is a burst. This app's own top-end
+     * shelf is exactly such a steady tilt: a 64 kbit/s file came back from its
+     * own 320 kbit/s export with `sibExcessDb` 0.23 → 1.66 and `sibPeakDb`
+     * 0.95 → 1.06 (the bursts are untouched, as they should be), and under a
+     * manual profile — which lifts the same shelf harder — the export was then
+     * diagnosed `sibilance` and the chain ducked the band it had just lifted:
+     * the de-esser armed by its own tone stage. A *clearly measured* tilt
+     * (≥ 2 dB) may still add to the dose, up to the size of the correction
+     * itself, so a file that is both bursty and uniformly bright is treated
+     * harder; it can never *become* the evidence. */
+    /* …and the bonus may only scale a *proven burst*. The paragraph above says
+     * the median statistic can never become the evidence, and it could: a
+     * sustained cymbal wash (an acceptance fixture — a bright wash over a quiet
+     * bed) reads `sibExcessDb` +5.07 with a scan of 0.00, and at 2 × 0.58 that
+     * was 1.16 dB of `sibDb` — enough, on a slightly brighter file, to name
+     * `sibilance` and duck the top end of material whose only property is that
+     * it is made of cymbals. The bonus now needs the scan to be past its own
+     * dead zone: below 2.5 dB the file is not a burst file, and the median term
+     * has nothing to amplify (measured: the wash 0.00, the +6 dB codec tilt in
+     * the audit suite 0.86, both below the window; the acceptance "s" fixture
+     * 5.63, above it). */
+    const bursty = smoothstep(2.5, 5, m.sibPeakDb || 0);
+    /* …and a file the scan calls *sustained* (its median frame is already narrow
+     * and 7 kHz-heavy — a singer whose "s" never stops) may use the median
+     * statistic as evidence without the burst gate, because the case the gate
+     * protects against is exactly the one the scan's shape test now rejects: a
+     * wash. Measured, scan + excess → `sibDb` (probe `tools/work/sib6.js`):
+     * the audit's continuous sibilant 1.98 + 1.33 = 3.31 (de-esser 0.51, and
+     * 0.07 without the flag), the acceptance wash 0.00 + 0.00, the +6 dB codec
+     * tilt 0.86 + 0.00. */
+    const sibDb = clamp((m.sibPeakDb || 0)
+      + 2 * smoothstep(2, 8, m.sibExcessDb || 0) * (m.sibSustained ? 1 : bursty), 0, 16);
+    // Threshold and slope are its own: the per-frame scan reads 0.7–1.0 dB on a
+    // clean recording and 2.2–4.9 dB on one with real "s" bursts, so the window
+    // starts above the noise and reaches full correction inside the range the
+    // defect actually occupies.
+    const sibNeed = smoothstep(1.4, 4.2, sibDb);
 
     // Sub-sonic rumble, measured where only rumble can be: in the quiet
     // passages. Two guards, because this is the one measurement a *clean*
@@ -445,17 +680,74 @@
     //   · the mains score — a 50/60 Hz line leaks into the band *below* it at
     //     any sane FFT resolution, and a hum is a notch, not a reason to take
     //     the bottom off the record.
+    // The knee sits where the panel in `infraExcessDb` says the two populations
+    // separate. Clean material — a flat bed, the same bed with +6 and +10 dB
+    // shelves below 150 Hz, a plain vinyl sim, the garage sim whose bed is
+    // high-passed at 150 Hz — reads 1.0, 2.2, 3.2, −11.8 and −24.2 dB. Material
+    // with real below-45 Hz energy reads 6.4 (the acceptance rumble fixture),
+    // 15.2 (the worn fixture with a rumble under it) and 16.0 (rumble alone).
+    // The knee therefore opens just above the loudest clean reading.
     const infraDb = clamp(m.infraExcessDb || 0, 0, 26);
-    const infraNeed = smoothstep(9, 20, infraDb) * smoothstep(0.12, 0.45, conf)
+    const infraNeed = smoothstep(4.5, 11, infraDb) * smoothstep(0.12, 0.45, conf)
       * (1 - 0.5 * clamp(m.humScore || 0, 0, 1));
+    /* What this cannot do, measured, because the guard is a cascade of four
+     * 2-pole high passes at its corner and it *costs* something: a sustained
+     * music note in the bottom end. On one bed with a rumble ladder and a
+     * club-style 35 Hz note (all measured through the chain, bands from the
+     * app's own statistic unless said otherwise):
+     *
+     *   rumble at 0 dB rel.   8-20 Hz 54.9 → 26.1 · 20-35 54.8 → 45.8 · music 30-45 -3.2 dB
+     *   the same bed with a sustained 35 Hz note (the club control, re-measured
+     *   for the two-rung law): the statistic reads 14.7 dB of "excess" — above
+     *   the knee — and the 18-24 Hz rung costs the note 3.4 dB where the
+     *   saturated 42 Hz rung costs it 19.1 dB. The note never reaches the rung
+     *   unforced: the confidence gate gives that fixture 0 Hz, because a
+     *   passage with the note in it is not a quiet passage.
+     *
+     * Three candidate witnesses that would tell the two apart were measured and
+     * each fails, so do not re-derive them:
+     *   · level — the quiet passage's 20-45 Hz against the level the music
+     *     reaches (loud 90-203): monotone in rumble level, and the 35 Hz note
+     *     reads -10.2 where a full-scale rumble reads -21.6. The note is
+     *     *louder* than the rumble;
+     *   · stationarity — loud frames against quiet frames: note 6.8 vs 10.8,
+     *     rumble 10.1 vs 16.3. Both negative, 3 dB apart;
+     *   · tonality — the peakiness of the quiet frames' 20-45 Hz band over six
+     *     narrow probes: a full-scale rumble 5.3 dB, the note 7.1 dB. 1.8 dB.
+     * A sustained sub-bass note and a turntable floor are the same thing to
+     * every measurement the app owns; what keeps the note out of the repair is
+     * the *confidence* gate, not its shape. Where the gate does open, the cost
+     * is the price of the repair on a file whose quiet floor is the defect —
+     * measured this round: the club note 3.4 dB at the low rung, 19.1 dB at the
+     * saturated one. The arm threshold stays where the clean population says it
+     * separates (measured: the club note reads 14.7 dB of "excess" where the
+     * acceptance §4 bed alone reads -6.4 and a musical bass fixture — a kick
+     * plus a 41-82 Hz line — 3.8), rather than being raised until no music can
+     * ever trip it. The corner's second rung is documented at 9a below. */
 
-    // An out-of-phase bottom: the channels are correlated in the mids but
-    // *cancel* below 200 Hz. Only stereo material can have it, and only when
-    // there is real side energy down there to cancel in the first place.
+    // An out-of-phase bottom: the channels agree in the mids but the bottom of
+    // one channel is *inverted*, so it cancels below 200 Hz. Only stereo
+    // material can have it, and only when there is real side energy down there
+    // to cancel in the first place. The frontier is between a *cancelling* and a
+    // merely *decorrelated* bottom, and it is drawn on the negative side because
+    // zero is not the defect: measured, the audit's inverted-bass fixture reads
+    // −0.82 in the low band and the acceptance §16 fixture (one channel's bottom
+    // inverted by 1.9×) −0.49, while two independent pink noises — a legitimately
+    // *wide* stereo image, i.e. the thing that must not be repaired — read +0.06
+    // and were treated as full need by the old curve, which put the truth at
+    // +0.55 and the defect's *absence* at +0.05. The mono-maker was therefore
+    // folding the bottom of well-made wide mixes: on the engine's own
+    // stereo-integrity fixture the old curve moved the file's correlation
+    // 0.03 → 0.32, past the ±0.25 the suite allows — and the suite is right to
+    // allow no more. Need now reaches full only where a cancellation does
+    // (≤ −0.35) and is zero at +0.05: the same wide fixture reads 0.03 → 0.03
+    // (Δ 0.00) and is not named, a mild cancellation (0.35×) reads +0.97 and is
+    // left alone, and both inverted fixtures above still ask for the stage in
+    // full (bassMono 1.00).
     const st = m.stereo || {};
     const lowRho = (m.channels > 1 && isFinite(st.low)) ? st.low : 1;
     const widenGuard = m.channels > 1 && isFinite(st.mid) ? 1 : 0;
-    const phaseNeed = widenGuard * smoothstep(0.55, 0.05, lowRho);
+    const phaseNeed = widenGuard * smoothstep(0.05, -0.35, lowRho);
 
     // How percussive the material is (crest factor: a bed of sound sits at
     // 12–15 dB, hits and notes at 18–22 dB). It decides how the glue
@@ -477,13 +769,25 @@
     const headroom = peakDb <= -1 ? 1 : clamp(1 - 0.6 * (peakDb + 1), 0.4, 1);
     const dense = (m.dynamicRangeDb !== undefined && m.dynamicRangeDb < 12) ? 1 : 0;
 
+    /* Scale freedom: the doses below are *not* gain-free, and must not be — they
+     * are the compensation for the absolute thresholds inside the worklet. Every
+     * parameter that carries the level in dBFS (refDb, hissFloor, noiseFloor,
+     * declipLevel) moves by exactly the gain of the input, so a compressor
+     * threshold or a hiss floor lands on the same point of the signal whether the
+     * transfer arrived at −3 or at −40 dBFS, and the two halves cancel: the card,
+     * the issue list, the chain's action per band and the delivered defect
+     * statistic are the same at every input level. A new parameter that reads a
+     * level has to carry it the same way, or the chain stops being scale-free —
+     * the audit row `scale freedom` and the probes tools/work/dc10.js … dc18.js
+     * are what say so, and the row re-measures the lot at 0 and −12 dB. */
+
     return {
-      topDeficitDb, codecDeficitDb, airDeficitDb, subDeficitDb, subPresentDb,
+      topDeficitDb, codecDeficitDb, airDeficitDb, subDeficitDb, subPresentDb, subHole, wallAboveSib,
       mudExcessDb, harshExcessDb, boxExcessDb,
-      hissNeed, crackleNeed, humNeed, headroom, dense,
+      hissNeed, crackleNeed, clipNeed, clipShare, clipImplied, humNeed, headroom, dense,
       // normalised needs (0..1) used by the doses
       needTop: clamp(topDeficitDb / 18, 0, 1),
-      needAir: clamp(Math.max(airDeficitDb / 20, (m.brickwall || 0) * 0.9), 0, 1),
+      needAir: clamp(Math.max(airDeficitDb / 20, (m.brickwall || 0) * 0.9 * cliffPrices), 0, 1),
       deriveRoom,
       needSub: clamp(subDeficitDb / 12, 0, 1),
       humNeed, resoNeed: clamp((resoExcess - 2) / 8, 0, 1), resoExcess,
@@ -638,6 +942,13 @@
       return Math.sign(g) * Math.max(0, Math.abs(g) - 1.5);
     });
     curve = smoothCurve(curve);
+    // …and with the bottom octave *empty* (see subHoleDb) the trend these bands
+    // are measured against has been dragged down by the hole itself: the
+    // 200–500 Hz region that then measures as a hump is where this recording's
+    // bass actually lives. Measured on a file high-passed at 200 Hz, taking that
+    // "hump" down by 2.5 dB at 200 Hz and 3.4 dB at 450 Hz put the 60–200 Hz
+    // region 2.4 dB further below the 300–900 Hz band than the untouched file.
+    const subHole = m.subHoleDb === undefined ? 1 : smoothstep(-26, -12, m.subHoleDb);
 
     // is the noise floor in this band known well enough to allow a boost?
     const conf = clamp((m.noiseConfidence || 0) * 1.5, 0, 1);
@@ -659,7 +970,9 @@
           g *= 0.55;                                   // floor unknown → be careful
         }
         // above a codec cliff the content was *removed*
-        if (m.brickwall > 0.25 && m.cliffHz && f > m.cliffHz * 1.0) g = Math.min(g, 0.8);
+        if (m.brickwall > 0.25 && codecLoss(m) && f > m.cliffHz * 1.0) g = Math.min(g, 0.8);
+      } else if (g < 0 && f <= 320 && subHole < 0.5) {
+        g = 0;                                         // a hole is not a balance
       } else if (g < 0 && f <= 80) {
         // Taking the bottom away is the one correction that can remove what the
         // recording actually has, so it needs more evidence than the dead zone:
@@ -715,7 +1028,7 @@
       D.needMud,                                       // 450 Hz       (cut)
       Math.max(D.needHarsh, D.needReso * 0.6),         // 1.3 kHz      (cut)
       D.needTop,                                       // 3.2 kHz      (lift)
-      D.needAir,                                       // 7 kHz shelf  (lift)
+      D.needAir * (1 - D.wallAboveSib),                // 7 kHz shelf  (lift)
     ];
     for (let i = 0; i < 6; i++) a.bands[i] *= dose[i];
 
@@ -728,14 +1041,19 @@
     for (let i = 0; i < 6; i++) {
       const ex = D.bandExcess[i];
       const beyond = Math.sign(ex) * Math.max(0, Math.abs(ex) - 1.5);
-      a.bands[i] -= clamp(beyond * 0.4, -2.5, 2.5);
+      // The top band's *lift* stands down where the wall is above the "s" band
+      // (see wallAboveSib — a shelf cannot fill a hole an octave above itself);
+      // its *cut* stays: that is the repair.
+      let adj = clamp(beyond * 0.4, -2.5, 2.5);
+      if (i === 5 && adj < 0) adj *= (1 - D.wallAboveSib);
+      a.bands[i] -= adj;
     }
 
     // extra shaping where the measurement was emphatic
-    a.bands[0] += 1.6 * D.needSub;
+    a.bands[0] += 1.6 * D.needSub * D.subHole;
     a.bands[3] -= 0.7 * D.needHarsh;
     a.bands[4] -= 1.2 * D.needHarsh;
-    a.bands[5] += 1.0 * D.needAir;
+    a.bands[5] += 1.0 * D.needAir * (1 - D.wallAboveSib);
 
     for (let i = 0; i < 6; i++) a.bands[i] = clamp(a.bands[i], -bandCap, bandCap);
 
@@ -748,6 +1066,23 @@
      * nothing at all (the old law added it because the profile said so, which
      * is exactly what made cassette and vinyl rips sound pumped up). */
     a.sub = a.sub * smoothstep(0.15, 0.60, D.needSub);
+    /* …and it looks where the content actually starts. Its analysis band is a
+     * 95 Hz low pass by design — a record's fundamental is what lives down
+     * there, and looking higher would double the second harmonic instead — but
+     * on a file whose bottom octave is *empty* there is nothing to track at
+     * 95 Hz: measured on a file high-passed at 200 Hz, the synthesiser stayed
+     * silent (34–58 Hz −96.7 → −95.9 dBFS) while the tone curve wrote into the
+     * same empty band. With a hole measured, the corner moves up to where the
+     * bass band is, so the octave it derives is one the recording can actually
+     * carry. Measured on the acceptance weak-bass fixture with the corner at
+     * 240 Hz: the tracker locks onto ~150 Hz (the strongest periodicity left in
+     * that band), so the derived octave lands at 75 Hz — the 34–58 Hz band
+     * reads −96.7 → **−85.6 dBFS**, i.e. 11 dB out of digital silence, and the
+     * 60–200 Hz band moves 0.7 dB. The stage is dosed as a *sub*: it sits under
+     * the band it was derived from (SUB_CAP 0.70 × dose × drive ≈ −14 dB
+     * relative to it), which is why the band the row measures moves less than
+     * the band the repair works in. */
+    a.subSrc = 95 + 145 * (1 - D.subHole);
     if (D.subPresentDb > 2.5) a.sub *= 0.4;             // already humps there
     if (m.correlation !== undefined && m.correlation < 0.25) a.sub *= 0.7;
     a.sub = clamp(a.sub * D.headroom, 0, cap.sub);
@@ -791,8 +1126,60 @@
     // strength on a gate: anything the measurement is sure about is applied in
     // full, and a marginal reading stays marginal.
     const hissDose = smoothstep(0.04, 0.40, D.hissNeed);
-    a.dehiss = clamp(a.dehiss * (0.5 + 0.5 * hissDose) + 0.25 * floorExtra * D.hissNeed, 0, cap.dehiss);
-    a.declick = clamp(a.declick * (0.5 + 0.5 * smoothstep(0.03, 0.40, D.crackleNeed)), 0, cap.declick);
+    // …and only when the analyser found top-end noise to subtract at all. The
+    // tilt step is that evidence: without it the worklet has no cap for the
+    // tilt key and falls back to the level key, which on a *stationary* top end
+    // cannot tell hiss from programme. Measured on a clean dull pink bed (a
+    // synthesizer-pad-like file, tilt step 0.04 dB) the profile's half dose took
+    // 4.3 dB off the 9–13 kHz band — a false positive, and the reason the
+    // intensity slider stopped being monotone: the repair fought the air
+    // synthesis that comes two stages later. A profile scales a measured
+    // repair; it does not invent one.
+    const hissEvidence = (m.hissTiltStepDb || 0) > 1.0;
+    a.dehiss = hissEvidence
+      ? clamp(a.dehiss * (0.5 + 0.5 * hissDose) + 0.25 * floorExtra * D.hissNeed, 0, cap.dehiss)
+      : 0;
+    // …and here the evidence has to be able to *overrule* the profile, because
+    // the profile is about the material and the measurement is about the defect.
+    // Measured: a drum recording with 9 pops/s was named `crackle` by the card
+    // (index 1.00) and then dosed 0.17 by the `garage` anchor — every pop stayed
+    // exactly where it was (index 1.00 → 1.00), a repair the app promised and
+    // did not make. A clean recording reads 0.02–0.13 on the same statistic, a
+    // worn one 0.99; from 0.55 up the anchor's modesty is overridden as far as
+    // the profile's own repair budget, and below 0.40 the dose stays the
+    // anchor's (scaled, as before, by how sure the reading is).
+    const crk = smoothstep(0.10, 0.55, D.crackleNeed);
+    a.declick = clamp(Math.max(a.declick * (0.5 + 0.5 * smoothstep(0.03, 0.40, D.crackleNeed)), cap.declick * 0.55 * crk), 0, cap.declick);
+    // The de-clipper is the same kind of stage — it only touches the samples
+    // its own detector flags as flat tops at the file's peak level — so the
+    // dose is the evidence, mapped onto the profile's repair budget.
+    // …and like every repair here, it runs on *evidence*. The floor is not
+    // cosmetic: the chain's own soft-clip guard leaves a few flat samples at the
+    // rail in its output, so a processed file measured again reports a flat-share
+    // of about 2e-5 — two flat tops per hundred thousand samples, which is the
+    // guard's residue and not damage. With the dose scaled from zero that reading
+    // was enough to switch the stage on at half strength on a *re-upload*, i.e.
+    // the app was de-clipping its own output. Below the floor the stage stays off.
+    a.declip = D.clipNeed > 0.15 ? clamp(cap.declip * (0.5 + 0.5 * D.clipNeed), 0, cap.declip) : 0;
+    // …and the level the detector keys on is this file's measured plateau
+    a.declipLevel = num(m.clipLevelDb, -0.1);
+
+    /* ── 6b · the export ceiling ───────────────────────────────────────────────
+     * Every streaming target is a *true-peak* target, and the numbers are not
+     * negotiable: −1 dBTP, or −2 dBTP when the master is louder than −14 LUFS
+     * (a hot master is the one that gets transcoded hard, so it is the one that
+     * needs more room). The app measures the file's own true peak — `ispDb` —
+     * so this is a decision the measurement can make on its own: what the file
+     * arrives with decides which ceiling the limiter is set to. A file that is
+     * already under it pays nothing for the stage (it is bit-transparent below
+     * the ceiling); a file that is over it finally stops arriving at the
+     * encoder overdriven. */
+    const loud = (m.loudness === undefined ? -70 : m.loudness) > -14;
+    a.tpCeil = loud ? -2 : -1;
+    /* …and that number is a promise about the file the user *keeps*. A lossy
+     * encoder re-shapes the waveform between the samples and its own overshoot
+     * comes out of the promise, so a lossy export lowers the render's ceiling by
+     * `codecMargin()` — measured, see its comment. */
 
     /* ── 7 · dynamics and warmth ──────────────────────────────────────────
      * Saturation adds density, so it belongs on sparse, dynamic recordings.
@@ -846,7 +1233,15 @@
     for (let i = 0; i < boxes.length; i++) {
       const r = boxes[i];
       const dose = smoothstep(3.2, 5.2, r.excessDb) * D.headroom;
-      const depth = Math.min(cap.box, 0.55 * r.excessDb) * dose;
+      // The scan reports a *narrow peak* against its local trend — that is how
+      // it finds a resonance at all — while the ring it names is wider than that
+      // peak, and the Q it reports under-reads the width too (a +12 dB Q-4 ring
+      // comes back as Q 6). Measured against an independent meter on that
+      // fixture, the ring only reaches the bed's own level at ≈ 1.5× the
+      // reported excess, and the sibling bands 110 and 440 Hz move by 0.3 dB
+      // across the whole 0…9 dB range: the notch stays a third of an octave, so
+      // the depth, not the width, is what has to match the measurement.
+      const depth = Math.min(cap.box, 1.45 * r.excessDb) * dose;
       // each notch carries its own allowance: two narrow notches half an octave
       // apart do not add up, so a shared budget only ever starved the second one
       const take = Math.min(depth, cap.box);
@@ -871,13 +1266,40 @@
      * file. Each is a repair: it is dosed by the measurement of the defect and
      * it does nothing at all when nothing was measured. */
 
-    // 9a · sub-sonic rumble → a high-pass at the measured corner. The corner
-    // *is* the amount, and it stays low on purpose: 18–30 Hz is where rumble
-    // lives and where no instrument does, so a 12 dB/octave filter there takes
-    // out what a turntable (or a desk, or a passing lorry) put in without
-    // touching the bass above it. A "repair" that reaches into 40 Hz would be
-    // taking the record's bottom away, which is the opposite of remastering.
-    a.infraHP = D.infraNeed > 0.02 ? clamp(18 + 12 * D.infraNeed, 0, 30) : 0;
+    // 9a · sub-sonic rumble → a high-pass at the measured corner, on two rungs.
+    // What this cannot do is a rumble *above* the corner: a turntable's bottom
+    // end reaches into the 30–80 Hz where the bass lives, and a high-pass that
+    // takes it out takes the music's bottom with it — measured, a 30 Hz corner
+    // costs a sustained 35 Hz note 7.6 dB and a 24 Hz corner 3.4 dB (the audit's
+    // "what the sub-sonic guard cannot do" holds those numbers). The rumble
+    // statistic is a radio below 45 Hz, so it only ever arms this stage where the
+    // music has nothing anyway; a rumble on top of the bass is left in place and
+    // named on the card rather than half-removed by a filter that cannot tell it
+    // from the bass.
+    //
+    // The corner *is* the amount: 18 Hz at the arm threshold, +6 Hz per unit of
+    // need — and a second rung above need 0.55 that reaches 42 Hz, the top of the
+    // 20–45 Hz band the statistic calls rumble. The rung exists because the low
+    // rung cannot deliver the repair on the floors that are *saturated*, measured
+    // on the acceptance §4 fixture (excess 15.5 dB, need 1.0): 18–24 Hz took it
+    // to 10.6 dB and left its quiet 20–45 Hz band 22.4 dB above the mids, i.e.
+    // exactly where it was; 42 Hz takes the statistic under the knee at 3.7 dB
+    // and that band to 7.2 dB. It is the 4-section depth and not the corner that
+    // spends the removal — 2 sections at the same 42 Hz leave 10.8 dB. The rung
+    // is not free, and its price is bounded by measurement: 42 Hz costs a
+    // sustained 35 Hz note 19.1 dB where the low rung costs it 3.4, and a 41.2 Hz
+    // line about 12 dB (between the sweep's 38 Hz / −9.3 dB and 45 Hz / −14.8 dB
+    // points). It is paid only where the *quiet passages* carry that band 8 dB or
+    // more above the file's own mids — energy no music is playing there — and the
+    // fixtures that stay out of it are pinned by the suites: the audit's rumbly
+    // bed sits exactly on the rung's onset (8.0 dB → 21.3 Hz, unchanged), §17's
+    // worn record reads need 0.27 (19.6 Hz, unchanged), a bed with a sustained
+    // 35 Hz note never reaches the rung at all (the confidence gate: the unforced
+    // law measures 0 Hz on it), and a musical bass fixture reads 3.8 dB of
+    // "excess" and gets no guard.
+    a.infraHP = D.infraNeed > 0.02
+      ? clamp(18 + 6 * D.infraNeed + 18 * smoothstep(0.55, 1, D.infraNeed), 0, 42)
+      : 0;
 
     // 9b · sibilance → the dynamic de-esser amount (up to the cap at full need)
     a.deess = clamp(0.85 * D.sibNeed * D.headroom, 0, 0.85);
@@ -919,6 +1341,43 @@
   }
 
   /**
+   * The room a lossy encoder needs, in dB, for a given export bitrate.
+   *
+   * The chain's true-peak ceiling is the platform's number, and the file the
+   * user keeps is the MP3, not the render. Measured through the app's own export
+   * path — lamejs out of assets/vendor, the app's 16-bit TPDF dither and its
+   * 72000-sample chunking, ffmpeg's `ebur128` as the independent meter
+   * (probes tools/work/tp1.js, tp2.js, tp3.js) — a dense master rendered *at*
+   * its ceiling comes back over it after the encoder has had its way:
+   *
+   *   bitrate        128      192      256      320 kbit/s
+   *   overshoot     +2.00    +0.60    +0.40    +0.40 dB   (worst of three dense masters)
+   *
+   * At 128 kbit/s that is 1.2-1.8 dB *over* the ceiling the chain promised and
+   * 0.2-0.9 dB over the general -1 dBTP a service asks for, and the app's own
+   * findings list then names `truePeak` on the re-upload of its own export —
+   * the same shape of dishonesty as the sinc that read 0.5 dB low. So the render
+   * pays the encoder's room up front: the table above, rounded up to the next
+   * tenth. Material that stays under the ceiling is bit-transparent and pays
+   * nothing (a matrix row that renders at -3 dBTP moves by 0.00 dB); only a
+   * master whose limiter is already working gives up the level, and it gives it
+   * up in the monitor as well — the app builds the export's parameters once, so
+   * what you hear is still the file you get.
+   *
+   * @param {string} format 'mp3' or 'wav'
+   * @param {number} [kbps] the chosen MP3 bitrate
+   * @returns {number} dB to subtract from the ceiling
+   */
+  function codecMargin(format, kbps) {
+    if (format !== 'mp3') return 0;
+    const k = kbps || 320;
+    if (k <= 128) return 2.1;
+    if (k <= 192) return 0.8;
+    if (k <= 256) return 0.5;
+    return 0.5;
+  }
+
+  /**
    * Build the flat parameter map consumed by the AudioWorklet.
    * @param {string} presetId
    * @param {object} metrics
@@ -929,7 +1388,7 @@
   /** What a parameter means when the measurement could not provide a value. */
   const NEUTRAL = {
     autoLevel: 1, noiseFloor: -70, hissFloor: -80, airRoom: 0.5, airF: 6000, subRatio: 0.5,
-    humHz: 50, boxF1: 120, boxF2: 240, boxQ1: 3, boxQ2: 3,
+    humHz: 50, boxF1: 120, boxF2: 240, boxQ1: 3, boxQ2: 3, refDb: 0,
     hissF: 3200, glueTime: 0.5, infraHP: 0,
   };
 
@@ -961,6 +1420,60 @@
     // repair stages (de-hiss, de-click) engage a little earlier than the
     // creative ones — but never before the slider has left zero
     const repair = (x) => x * (0.35 + 0.65 * amt) * on;
+    /* The de-hisser's amount is a *measurement*, not a taste: the law already
+     * hands it the tilt step it found (capped by the card) and zero when the
+     * evidence is not there, so the intensity curve was scaling a number that
+     * has nothing to do with intensity — 0.830 of it at the default p = 0.7.
+     * It follows the `fix` policy the hum notch and the measured resonance
+     * notches already follow (see the assembly below), measured on the acceptance
+     * hiss fixture: in the frames the noise owns the band came down 7.69 →
+     * **8.79 dB** and the tilt step the card prints 10.18 → **8.39 dB**, against
+     * 0.13 → 0.20 dB on the frames the music owns; both clean-bed fixtures still
+     * measure a tilt step under 0.25 dB and a dose of exactly 0. The de-clicker
+     * and the de-clipper are *not* moved here, and that round is closed by
+     * measurement rather than by taste:
+     *   · the de-clicker's amount is a repair *depth*, and the curve is its
+     *     transient protection — applied as measured (0.861 instead of 0.715 at
+     *     the default) it buys **one** pop of a 72-pop fixture (3 → 2 above the
+     *     clean copy, pop energy −10.32 → −10.29 dB) and costs the kit
+     *     **6 dB of snare** (−62.1 → −55.8 dB, 13 dB on the acceptance
+     *     reproduction), 2.3× the touched samples (4.37 → 9.99 %) and 2.7× the
+     *     clean master (2.74 → 7.46 %); the audit suite pins that row;
+     *   · the de-clipper's amount is only the *detector's threshold*
+     *     (`implied > 1.2 − 0.7·amount` — the waveform decides the depth), and
+     *     it is already saturated where it matters: identical plateau error from
+     *     dose 0.05 to 1.0 on the tonal contract fixture and within 0.02 dB on a
+     *     hard-clipped noise fixture, so "as measured" would be a no-op that
+     *     only lowers the evidence bar the dsp suite just pinned.
+     *
+     * The de-esser belongs in the first group for the same reason and was the
+     * last one still in the second: its amount is `0.85 · sibNeed · headroom`,
+     * and `sibNeed` is the law's own reading of the file — the departure of the
+     * loudest frames from the file's balance, which is zero when no such
+     * departure was measured. The curve was taking **0.830** of it, and the
+     * stage under-delivered the rest, so the app's own output came back to it
+     * still sibilant: on §10's burst fixture the 7 kHz band of the loudest 20 %
+     * of frames came down **2.61 dB**, the scan the dose is computed from
+     * 5.46 → 3.26 dB, and the 320 kbit/s export was diagnosed `sibilance` again
+     * with **0.614** of dose asked for it (probe `tools/work/sib11.js`). As
+     * measured (0.850 at the default) the same rows read **3.06 dB**,
+     * **5.46 → 2.61 dB**, and the export reads **healthy** at 0.226 — under the
+     * law's 0.30 naming threshold, which the curved dose missed by a factor of
+     * two. The same file's own demand on the input is unchanged (the dose is the
+     * measurement); what changes is that the stage now spends it.
+     *
+     * The stage's *reference* is the second half of that deficit and is measured
+     * but **not** shipped: `slowDb` is a ~2 s mean that the bursts themselves
+     * raise, so the per-frame target reads 0.45 where the file's own departure
+     * says 0.79. Holding the reference while a burst window is open (probe
+     * `sib11.js`, variant `freeze`) takes the export's dose 0.260 → **0.055** and
+     * the scan → 2.41 — at the price of nearly doubling the de-esser's move on
+     * a *continuous* "s" (the loudest 20 % of frames −5.25 → **−6.43 dB** on the
+     * audit's own sibilant, a file whose every frame is a burst, so the
+     * reference never learns a body). That trade is not yet bounded by
+     * measurement here and is left where it is on purpose.
+     */
+    const repairMeasured = (x) => x * smoothstep(0, 0.20, p);
     // Measured defects are not a matter of taste: once the slider has left zero,
     // hum, boxiness and a collapsed image are fixed by the *measurement* — a
     // mains notch shallower than the hum leaves the hum, and one deeper than it
@@ -978,11 +1491,23 @@
       band3: bands[3], band4: bands[4], band5: bands[5],
       reso: a.reso * amt,
       sub: a.sub * amt,
+      subSrc: num(clamp(a.subSrc === undefined ? 95 : a.subSrc, 60, 260), 95),
       subRatio: a.subRatio,
       exciter: a.exciter * amt,
       air: a.air * amt,
-      dehiss: repair(a.dehiss),
+      dehiss: repairMeasured(a.dehiss),
+      // the de-clipper's own detector runs on the *measured* plateau level, so
+      // it stays dormant (amount 0) on anything that was not measured as
+      // clipped, whatever the slider says
+      declip: a.declip > 0 ? repair(a.declip) : 0,
+      declipLevel: num(clamp(a.declipLevel, -60, 0), -0.1),
       declick: repair(a.declick),
+      tpCeil: num(a.tpCeil, 0),
+      // …and the file's own peak, so the stages that are neither a repair nor
+      // an absolute target (the glue, the analogue warmth) place their
+      // thresholds relative to *this recording* instead of full scale. See the
+      // `refDb` parameter in remaster-processor.js.
+      refDb: num(clamp(metrics.peakDb, -60, 12), 0),
       glue: a.glue * amt,
       warmth: a.warmth * amt,
       tilt: a.tilt * p,
@@ -1004,7 +1529,7 @@
       // that was never measured out of the worklet — a NaN there would silently
       // switch the air band off.)
       airRoom: num(a.airRoom, 0.5),
-      airF: num(clamp((metrics.brickwall || 0) > 0.3 && metrics.cliffHz ? metrics.cliffHz * 0.72 : 6000, 2200, 6000), 6000),
+      airF: num(clamp((metrics.brickwall || 0) > 0.3 && codecLoss(metrics) ? metrics.cliffHz * 0.72 : 6000, 2200, 6000), 6000),
       noiseFloor: clamp(num(metrics.noiseFloorDb, -70), -95, -30),
       // The de-hisser's level reference is the HF band's RMS in the quiet
       // passages (`hissRefDb`), not the spectrum's band sum: the worklet gates on
@@ -1020,7 +1545,10 @@
       // not switch on at 2 %), the de-esser and the bass-mono stage are
       // amounts, and the corrective EQ follows `amt` like every other band.
       infraHP: num(fix(a.infraHP), 0),
-      deess: num(repair(a.deess), 0),
+      // …and the de-esser's is a measurement too: `sibNeed` is zero unless the
+      // scan measured a departure, so the intensity curve was scaling the
+      // file's own reading (see the paragraph above `repairMeasured`).
+      deess: num(repairMeasured(a.deess), 0),
       bassMono: num(fix(a.bassMono), 0),
       glueTime: num(a.glueTime, 0.5),
       hissF: num(clamp(a.hissF, 2000, 8000), 3200),
@@ -1121,7 +1649,7 @@
         act('exciter', p.exciter || 0));
       add('airLost', clamp(D.needAir, 0, 1), dbv(D.airDeficitDb), act('air', p.air || 0));
     }
-    if ((m.brickwall || 0) > 0.25 && m.cliffHz) {
+    if ((m.brickwall || 0) > 0.25 && codecLoss(m)) {
       add('codec', clamp(m.brickwall, 0, 1), { n: m.cliffHz, unit: 'hz' },
         act('rebuild', p.airF || 0, 'hz'));
     }
@@ -1157,12 +1685,24 @@
     /* ── level, dynamics, medium ───────────────────────────────────────── */
     const dr = m.dynamicRangeDb === undefined ? 18 : m.dynamicRangeDb;
     if (dr < 12) add('dense', clamp((12 - dr) / 8, 0, 1), dbv(dr), act('noSquash', null));
-    if ((m.clipRatio || 0) > 0.002) {
-      add('clipping', clamp(m.clipRatio * 40, 0, 1), pct(m.clipRatio * 100), act('headroom', null));
+    // Clipping has two sides, and the app now does something about one of them.
+    // A rail (the old `clipRatio`) is the loud half; the signature that matters
+    // more is a *plateau* just under full scale, which is what a limited master
+    // has and what a listener hears as a buzz. Both feed one finding; when the
+    // de-clipper runs, the finding carries the repair instead of a warning.
+    const clipEv = m.clipEvidence === undefined ? 0 : m.clipEvidence;
+    const clipSev = Math.max(clipEv, (m.clipRatio || 0) > 0.002 ? 0.6 : 0);
+    if (clipSev > 0.05) {
+      const overshoot = m.clipOvershootDb === undefined ? null : dbv(m.clipOvershootDb);
+      if ((p.declip || 0) > 0) add('clipping', clamp(clipSev, 0, 1), overshoot, act('declip', m.clipOvershootDb || 0, 'db'));
+      else add('clipping', clamp(clipSev, 0, 1), overshoot, act('headroom', null));
     }
     if (m.peakDb > -1) add('hotPeak', clamp((m.peakDb + 3) / 3, 0, 1), dbv(m.peakDb), act('ceiling', null));
-    if (m.ispDb !== undefined && m.ispDb > m.peakDb + 0.1 && m.ispDb > -1) {
-      add('truePeak', clamp((m.ispDb + 1) / 1.5, 0, 1), dbv(m.ispDb), act('truePeak', null));
+    if (m.ispDb !== undefined && m.ispDb > -1.05) {
+      // the *measured* true peak against the ceiling the chain will hold it to
+      const ceil = (p.tpCeil === undefined || p.tpCeil === 0) ? 0 : p.tpCeil;
+      add('truePeak', clamp((m.ispDb + 1) / 1.5, 0, 1), { n: m.ispDb, unit: 'dbtp' },
+        ceil < 0 ? act('truePeak', ceil, 'dbtp') : act('ceiling', null));
     }
     const dcDb = m.dcOffsetDb === undefined ? -120 : m.dcOffsetDb;
     if (dcDb > -46) add('dcOffset', clamp((dcDb + 60) / 14, 0, 1), dbv(dcDb), act('dcGuard', null));
@@ -1206,22 +1746,40 @@
     if (d.hum > 0.35) push('hum', d.hum);
     if (d.brick > 0.4) push('codec', d.brick);
     if (d.harsh > 0.35) push('harsh', d.harsh);
-    if (m.clipRatio > 0.002) push('clipping', 0.6);
+    if ((m.clipEvidence || 0) > 0.05) push('clipping', clamp(m.clipEvidence, 0, 1));
+    else if (m.clipRatio > 0.002) push('clipping', 0.6);
     if (m.dynamicRangeDb < 9) push('squashed', 0.5);
-    if (m.correlation < 0.2 && m.channels > 1) push('narrow', 0.5);
     // the per-song findings are part of the sentence as well: they are the ones
     // a profile cannot know about
     const D = demand(m, d);
     if (D.sibNeed > 0.3) push('sibilance', D.sibNeed);
     if (D.infraNeed > 0.3) push('rumble', D.infraNeed);
     if (D.phaseNeed > 0.3) push('outOfPhase', D.phaseNeed);
+    /* A narrow stereo image, on the licence of its own repair: this used to be
+     * `m.correlation < 0.2`, which is the *opposite* of a narrow image — a
+     * narrow one is a *correlated* one (ρ → 1; the law at `widenNeed` says so and
+     * the card's own row is keyed on it). Measured before the fix, the engine's
+     * wide-stereo pair — two independent pink noises, ρ = 0.030, the widener asked
+     * for nothing (dose 0.000) and the image came out untouched at 0.031 — was
+     * named `narrow` in the sentence, i.e. the app telling the user "almost mono"
+     * about the widest file it can be handed, while a genuinely narrow pair
+     * (ρ = 0.982, dose 0.457) was named nothing. The threshold is the one the
+     * card's own row uses (0.15), so the sentence and the card cannot disagree. */
+    if (D.widenNeed > 0.15) push('narrow', clamp(D.widenNeed, 0, 1));
     if (m.dcOffsetDb !== undefined && m.dcOffsetDb > -46) push('dc', 0.5);
     if (!issues.length) push('healthy', 1);
     issues.sort((a, b) => b.weight - a.weight);
     return {
       id: d.id,
       chain: (d.chain || [{ id: d.id, w: 1 }]).map((c) => c.id),
-      issues: issues.slice(0, 3).map((i) => i.key),
+      // The card names what was found, in order of weight. Three was the old
+      // cap, and the toolkit's end-to-end loop is what caught it: a worn record
+      // that was also saved as a 128 kbit/s MP3 comes back with crackle, hiss,
+      // hum, rumble *and* a codec wall — five real findings — and the card named
+      // three of them, so the hum never appeared even though the chain was
+      // notching it. (The demand-based findings below are ordered with it, so
+      // this is a display cap only.)
+      issues: issues.slice(0, 5).map((i) => i.key),
       confidence: d.confidence, scores: d.scores,
     };
   }
@@ -1232,7 +1790,7 @@
     return classify(metrics).id;
   }
 
-  const API = { PRESETS, PRESET_ORDER, CEILING, MANUAL, PROFILE_EQ, CHAIN_MIN, TONE_MIN, classify, chainOf, evidence, mixAnchors, demand, adapt, resolve, buildParams, diagnose, recipe, eqCurve, curveDb, biquadDb, profileDb };
+  const API = { PRESETS, PRESET_ORDER, CEILING, MANUAL, PROFILE_EQ, CHAIN_MIN, TONE_MIN, classify, chainOf, evidence, mixAnchors, demand, adapt, resolve, buildParams, diagnose, recipe, eqCurve, curveDb, biquadDb, profileDb, codecMargin };
   global.RSPresets = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

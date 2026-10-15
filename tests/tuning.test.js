@@ -122,7 +122,16 @@ H.section('tuning · the automatic result stays inside its envelope');
   const problems = [];
   const rows = [];
   for (const [name, sig] of Object.entries(sources)) {
-    const { out, id, power } = renderAuto(sig);
+    const { out, id, power, params, metrics } = renderAuto(sig);
+    // …with one exception, and it is a promise of its own. Two things push the
+    // output level down, and both are the *file's* headroom rather than a
+    // tolerance: reconstruction (peaks restored above the file's own peak need
+    // room under full scale) and the true-peak limiter (a master that arrived
+    // over the ceiling has to come down to reach it). The level promise is
+    // suspended by exactly those two measured amounts — and by nothing else.
+    const clipRoom = (params.declip || 0) > 0 ? Math.max(0, metrics.clipOvershootDb || 0) : 0;
+    const tpRoom = (params.tpCeil || 0) < 0 ? Math.max(0, (metrics.ispDb || -70) - params.tpCeil) : 0;
+    const room = clipRoom + tpRoom;
     const li = bandLevels(sig), lo = bandLevels(out);
     const row = { name, id, power, deltas: [] };
     for (let i = 0; i < BANDS.length; i++) {
@@ -138,7 +147,8 @@ H.section('tuning · the automatic result stays inside its envelope');
     }
     const rmsDelta = db(rms(out) / rms(sig));
     row.rmsDelta = rmsDelta;
-    if (Math.abs(rmsDelta) > 1.5) problems.push(name + ' rms ' + rmsDelta.toFixed(2) + ' dB');
+    if (rmsDelta < -1.5 - room || rmsDelta > 1.5) problems.push(name + ' rms ' + rmsDelta.toFixed(2) + ' dB');
+
     // …and the *music* has to come out as loud as it went in: the level match
     // works on 300 Hz – 3.4 kHz, so that band is the promise. The broadband RMS
     // may move by more than that simply because a restored top octave adds
@@ -146,7 +156,9 @@ H.section('tuning · the automatic result stays inside its envelope');
     const midDelta = DSP.bandLevel(DSP.spectrum([out], SR, { fftSize: 8192, maxFrames: 120 }), 300, 3400) -
       DSP.bandLevel(DSP.spectrum([sig], SR, { fftSize: 8192, maxFrames: 120 }), 300, 3400);
     row.midDelta = midDelta;
-    if (Math.abs(midDelta) > 0.8) problems.push(name + ' mid ' + midDelta.toFixed(2) + ' dB');
+    if (Math.abs(midDelta) > 0.8 + room) {
+      problems.push(name + ' mid ' + midDelta.toFixed(2) + ' dB' + (room ? ' (headroom ' + clipRoom.toFixed(2) + ' clip + ' + tpRoom.toFixed(2) + ' true peak)' : ''));
+    }
     // The peak may rise — adding a bottom and a top octave does that — but it may
     // never rise *into the soft-clip guard*: material that was below the knee has
     // to come out below it, with the guard transparent (distortion added to a
@@ -224,9 +236,14 @@ H.section('tuning · the repair never becomes the feature');
   const TOP = [6000, 16000];
   const rows = [];
   const measure = (name, params, sig) => {
-    const out = H.render(Processor, [sig], params)[0];
+    const { out, latency } = H.renderEx(Processor, [sig], params);
+    // The chain delays its output by `latency` samples while the de-clicker is
+    // engaged (its look-ahead — see DeClicker in the worklet). Compare like for
+    // like: without this shift the difference is the delay of the whole
+    // signal, not what the chain changed.
     const change = new Float32Array(out.length);
-    for (let i = 0; i < out.length; i++) change[i] = out[i] - sig[i];
+    for (let i = 0; i < latency; i++) change[i] = 0;
+    for (let i = latency; i < out.length; i++) change[i] = out[i] - sig[i - latency];
     const mid = DSP.bandLevel(DSP.spectrum([out], SR, { fftSize: 8192, maxFrames: 120 }), MID[0], MID[1]);
     const top = DSP.bandLevel(DSP.spectrum([change], SR, { fftSize: 8192, maxFrames: 120 }), TOP[0], TOP[1]);
     const below = mid - top;                       // how far the change sits under the music

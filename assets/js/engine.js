@@ -7,8 +7,12 @@
  *   offline — an OfflineAudioContext, used for the real, full-length render
  *             that ends up in the WAV/MP3 file.
  *
- * Because the chain is minimum-phase and zero latency, the two are sample-for-
- * sample identical: what you hear is what you save.
+ * The chain is minimum-phase throughout, so the two are sample-for-sample
+ * identical: what you hear is what you save. The one stage that delays is the
+ * de-clicker, whose look-ahead shifts the output by 65 samples (its spike window
+ * plus the millisecond the ring behind it is fitted over)
+ * at 48 kHz while it is engaged — the same in both paths, and the A/B crossfade
+ * delays its dry side with it, so nothing about the comparison changes.
  * ========================================================================== */
 (function (global) {
   'use strict';

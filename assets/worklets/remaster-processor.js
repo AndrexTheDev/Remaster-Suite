@@ -6,7 +6,7 @@
  *   input ─┬───────────────────────────────────────────────┐ (dry)
  *          │                                               │
  *          ├─ DC guard ─ Static EQ bank (6 bands)           │
- *          ├─ Dynamic de-resonator (7 probing bands)       │
+ *          ├─ Dynamic de-resonator (6 probing bands)       │
  *          ├─ Harmonic exciter (3 bands, even + odd)       │
  *          ├─ Air synthesizer 8–16 kHz (+ de-esser)        │
  *          ├─ Sub-harmonic synthesizer 30–60 Hz            │
@@ -310,10 +310,17 @@ class ExciterBand {
   }
   reset() { this.pre.reset(); this.post.reset(); this.env.v = 0; this.sig = 0; this.prog = 0; }
   /** programme-presence gate: harmonics follow the music, never the noise */
-  setNoise(noiseLin) {
-    // harmonic generation follows the music. The reference is the measured
-    // noise floor but capped, so a noisy estimate can never mute the effect.
-    this.gLo = clamp(noiseLin * 1.5, 1e-6, 0.02);
+  setNoise(noiseLin, refLin) {
+    // Harmonic generation follows the music. The reference is the measured
+    // noise floor, and it is capped so a noisy estimate can never mute the
+    // effect — but the cap is *relative to the file's own peak* (see `refDb`).
+    // Absolute, a cap at 0.02 bites only on a loud file: on the vinyl fixture
+    // the reference came out 0.0214 at full scale and 0.002 14 at −20 dBFS, so
+    // the gate sat at a different level *relative to the music* and the same
+    // dose generated a measurably different amount of harmonics (−44 dB
+    // between the two renders). For a file at full scale `refLin` is 1 and the
+    // cap is exactly the old 0.02.
+    this.gLo = clamp(noiseLin * 1.5, 1e-6, 0.02 * refLin);
     this.gInv = 1 / Math.max(this.gLo * 5.0, 1e-9);
   }
   /** @returns {number} generated harmonic signal */
@@ -386,8 +393,10 @@ class AirSynth {
     this.deess.reset(); this.env.v = 0; this.dEnv.v = 0; this.dAvg.v = 0;
     this.dRamp.reset(1); this.prog = 0;
   }
-  setNoise(noiseLin) {
-    this.gLo = clamp(noiseLin * 1.5, 1e-6, 0.02);
+  setNoise(noiseLin, refLin) {
+    // …capped relative to the file's own peak for the same reason as the
+    // exciter's (see above): an absolute cap is a level-dependent policy.
+    this.gLo = clamp(noiseLin * 1.5, 1e-6, 0.02 * refLin);
     this.gInv = 1 / Math.max(this.gLo * 5.0, 1e-9);
   }
   /**
@@ -485,6 +494,7 @@ class SubSynth {
     this.lp2 = new Biquad(); this.lp2.setLowpass(sr, 95, 0.707);
     this.lp3 = new Biquad(); this.lp3.setLowpass(sr, 95, 1.31);
     this.outLP = new Biquad(); this.outLP.setLowpass(sr, 88, 0.707);
+    this.srcHz = 95;
     this.env = new EnvFollower(sr, 0.006, 0.150, SUB_DECIM);
     this.gate = new Ramp(SUB_DECIM, 0);
     this.phase = 0;
@@ -499,6 +509,25 @@ class SubSynth {
     this.env.v = 0; this.gate.reset(0); this.phase = 0; this.schmitt = 0;
   }
   setNoise(noiseLin) { this.gLo = Math.max(noiseLin * 2.5, 1e-6); }
+  /**
+   * Where to look for the fundamental. 95 Hz is the design corner: that is
+   * where a recording's own fundamental lives, and looking higher would double
+   * the second harmonic of a normal bass line. A recording whose bottom octave
+   * is *empty* has nothing there to track, so the corner moves up to the band
+   * that does carry the bass — its octave (200 Hz → 100 Hz) is then a note the
+   * recording can actually carry. Measured on a file high-passed at 200 Hz:
+   * at the fixed corner the synthesiser stayed silent (34–58 Hz −96.7 → −95.9
+   * dBFS); from 240 Hz it fills 60–200 Hz by 5.4 dB.
+   */
+  setSource(hz) {
+    const f = Math.max(60, Math.min(260, hz || 95));
+    if (Math.abs(f - this.srcHz) < 0.5) return;
+    this.srcHz = f;
+    this.lp1.setLowpass(this.sr, f, 0.54);
+    this.lp2.setLowpass(this.sr, f, 0.707);
+    this.lp3.setLowpass(this.sr, f, 1.31);
+    this.outLP.setLowpass(this.sr, f * 0.93, 0.707);
+  }
   /** @returns {number} sub-harmonic signal at one octave below the bass */
   tick(x, ratio) {
     const s = this.lp3.process(this.lp2.process(this.lp1.process(x)));
@@ -537,6 +566,49 @@ class SubSynth {
 /* -------------------------------------------------------------------------- */
 
 const DEESS_DECIM = 4;
+/**
+ * How long a detected sibilant stays corrected, in milliseconds.
+ *
+ * The gate is a fast/slow ratio of the 5.2–9.5 kHz band: the fast envelope
+ * (2 ms attack, 30 ms release) against the slow one (60 ms attack, 250 ms
+ * release). That catches the *onset* of an "s" and nothing else — inside a real
+ * sibilant, which lasts 60–150 ms, the slow envelope catches up within ~60 ms,
+ * the ratio drops back under `sense` and the correction stops. Measured on a
+ * fixture with 120 ms "s" bursts 8 dB above the trend: at dose 0.45 the burst's
+ * own band level moved by 0.15 dB (acceptance matrix, sibilance row) — the stage
+ * was correcting the first third of every "s" and letting the rest through.
+ *
+ * The hold keeps the last detected cut alive for the length of a sibilant, so
+ * the whole "s" is tamed, and releases over `DEESS_REL_MS` afterwards so the
+ * gain cannot step and click. It only ever extends a correction that the ratio
+ * key asked for: music with no sibilance never triggers it.
+ */
+const DEESS_HOLD_MS = 140;
+const DEESS_REL_MS = 60;
+/** Attack of the *filter gain* (not of the detector), in milliseconds. */
+const DEESS_ATK_MS = 3;
+/** Length of one detector frame, in milliseconds — the same window the analyser
+ *  uses for `sibPeakDb`, so stage and measurement answer the same question. */
+const DEESS_FRAME_MS = 10;
+/** How long the file's own band ratio is averaged over, in seconds. */
+const DEESS_AVG_SEC = 2;
+/** dB above that average where a frame starts to count, and the dB at which the
+ *  correction is complete. */
+const DEESS_TRIG_DB = 1.5;
+const DEESS_FULL_DB = 5;
+/** The repaired band: two peaks rather than one. A single peak wide enough to
+ *  cover 5.2–9.5 kHz (Q ≈ 0.85) reaches down to 3 kHz and dulls the vocal body
+ *  by a decibel during every "s" (measured); a single peak narrow enough to
+ *  leave 3–4 kHz alone (Q ≈ 1.5) misses a third of the band. Two narrower peaks
+ *  cover it between them with less spill on either side. */
+const DEESS_HZ = 6400;
+const DEESS_HZ2 = 8800;
+const DEESS_Q = 1.3;
+/** dB of cut in each of the two peaks, at full dose and a fully triggered
+ *  detector. Twice the peak count of a single-band de-esser is not twice the
+ *  cut: the band's average attenuation across 5–10 kHz comes out at roughly a
+ *  third of this figure, which is the number the acceptance matrix measures. */
+const DEESS_MAX_DB = 15;
 
 /**
  * Sibilance is not a level, it is a *ratio*: the 5–9.5 kHz band sitting well
@@ -553,40 +625,106 @@ const DEESS_DECIM = 4;
  */
 class DeEsser {
   constructor(sr) {
-    this.hp1 = new Biquad(); this.hp1.setHighpass(sr, 5200, 0.707);
-    this.hp2 = new Biquad(); this.hp2.setHighpass(sr, 5200, 0.707);
-    this.lp1 = new Biquad(); this.lp1.setLowpass(sr, 9500, 0.707);
-    this.lp2 = new Biquad(); this.lp2.setLowpass(sr, 9500, 0.707);
-    this.fast = new EnvFollower(sr, 0.002, 0.030, DEESS_DECIM);
-    this.slow = new EnvFollower(sr, 0.060, 0.250, DEESS_DECIM);
-    this.ramp = new Ramp(DEESS_DECIM, 1);
-    this.sense = 1.35;              // how far above its own average a burst counts
+    this.sr = sr;
+    /* Detector: two bands, 5.2–9.5 kHz and the 2.4–4 kHz "body" region, compared
+     * per 10 ms frame. Sibilance is a *balance* defect — an "s" is the top band
+     * standing well above the file's own body — and the comparison is what makes
+     * the detector specific. Two earlier versions keyed on the sibilance band
+     * alone, first as a fast/slow envelope ratio and then with a hold on top of
+     * it, and both measured the same wrong thing: any transient in the band is a
+     * fast/slow excess. With the real auto parameters on the acceptance fixture
+     * the stage was active 79 % of the time on material whose "s" bursts occupy
+     * 12 %, and it took the file's whole top end down with it (the analyser's
+     * median sibilance excess went from +1.1 dB to −0.4 dB: a de-esser that
+     * dulls a recording is not a repair).
+     *
+     * The ratio is measured against *the file's own typical ratio*, tracked over
+     * ~2 s. A singer's "s" stands 6–10 dB above that; broadband hiss raises both
+     * bands and leaves the ratio alone; a moving envelope moves both bands with
+     * it. This mirrors the analyser's `sibPeakDb`, which is the number the dose
+     * is computed from, so the stage and the measurement answer the same
+     * question. */
+    this.hiB = new Biquad(); this.hiB.setBandpass(sr, 7000, 0.9);
+    this.refB = new Biquad(); this.refB.setBandpass(sr, 3200, 0.9);
+    this.frame = Math.max(64, Math.round(sr * DEESS_FRAME_MS / 1000));
+    this.n = 0;
+    this.sumHi = 0;
+    this.sumRef = 0;
+    /* the file's own balance, ~2 s, updated once per frame */
+    this.slowDb = null;
+    this.slowCoef = Math.exp(-1 / Math.max(1, 100 * DEESS_AVG_SEC));
+    this.cut = 0;
+    this.hold = 0;
+    this.holdLen = Math.max(1, Math.round(sr * DEESS_HOLD_MS / 1000));
+    /* −80 dBFS of band level: below that the "ratio" is the noise floor's shape */
+    this.slowFloor = -80;
+    this.relCoef = Math.exp(-1 / Math.max(1, sr * DEESS_REL_MS / 1000));
+    this.atkCoef = Math.exp(-1 / Math.max(1, sr * DEESS_ATK_MS / 1000));
+    this.peak = new Biquad();
+    this.peak2 = new Biquad();
+    this.gDb = 0;
+    this.lastDb = null;
+    this.applied = 0;
   }
   reset() {
-    this.hp1.reset(); this.hp2.reset(); this.lp1.reset(); this.lp2.reset();
-    this.fast.v = 0; this.slow.v = 0;
-    this.ramp.reset(1);
+    this.hiB.reset(); this.refB.reset(); this.peak.reset(); this.peak2.reset();
+    this.n = 0; this.sumHi = 0; this.sumRef = 0;
+    this.slowDb = null; this.cut = 0; this.hold = 0;
+    this.gDb = 0; this.lastDb = null; this.applied = 0;
   }
   tick(x, amount) {
     if (amount <= 0.0001) {
-      if (this.ramp.t !== 1) this.ramp.reset(1);
+      if (this.gDb !== 0) {
+        this.gDb = 0;
+        this.peak.setPeak(this.sr, DEESS_HZ, DEESS_Q, 0);
+        this.peak2.setPeak(this.sr, DEESS_HZ2, DEESS_Q, 0);
+        this.lastDb = 0;
+      }
+      this.cut = 0; this.hold = 0;
       return x;
     }
-    const hf = this.lp2.process(this.lp1.process(this.hp2.process(this.hp1.process(x))));
-    const a = hf < 0 ? -hf : hf;
-    const e = this.fast.tick(a);
-    const s = this.slow.tick(a);
-    let g = 1;
-    if (s > 1e-7 && e > s * this.sense) {
-      // up to 12 dB of excess maps to the full correction; the amount decides
-      // how much of it is actually taken
-      const over = e / (s * this.sense);
-      const cut = clamp(Math.log(over) / Math.log(4), 0, 1);
-      g = 1 - amount * cut * 0.62;
+    /* ---- detection, once per 10 ms frame ---- */
+    const h = this.hiB.process(x);
+    const r = this.refB.process(x);
+    this.sumHi += h * h;
+    this.sumRef += r * r;
+    if (++this.n >= this.frame) {
+      const hiDb = 10 * Math.log10(this.sumHi / this.n + 1e-20);
+      const refDb = 10 * Math.log10(this.sumRef / this.n + 1e-20);
+      const ratio = hiDb - refDb;
+      if (this.slowDb === null) this.slowDb = ratio;
+      else this.slowDb = ratio + this.slowCoef * (this.slowDb - ratio);
+      /* the body band has to be doing something, or the ratio is just the noise
+       * floor's shape; and the excess has to clear the estimate's own noise */
+      let target = 0;
+      if (refDb > this.slowFloor && this.slowDb !== null) {
+        const excess = ratio - this.slowDb;
+        target = clamp((excess - DEESS_TRIG_DB) / DEESS_FULL_DB, 0, 1);
+      }
+      if (target > 0) {
+        if (target > this.cut) this.cut = target;
+        this.hold = this.holdLen;
+      } else if (this.hold > 0) {
+        this.hold -= this.frame;
+      } else {
+        this.cut = 0;
+      }
+      this.n = 0; this.sumHi = 0; this.sumRef = 0;
+    } else if (this.hold > 0) {
+      this.hold--;
+    } else if (this.cut > 0) {
+      this.cut *= this.relCoef;
     }
-    this.ramp.set(g);
-    const gg = this.ramp.tick();
-    return x - hf * (1 - gg);
+    /* ---- the gain, and the filter it drives ---- */
+    this.applied = -amount * this.cut * DEESS_MAX_DB;
+    const c = this.applied < this.gDb ? this.atkCoef : this.relCoef;
+    this.gDb = this.applied + c * (this.gDb - this.applied);
+    if (this.lastDb === null || Math.abs(this.gDb - this.lastDb) > 0.005) {
+      this.peak.setPeak(this.sr, DEESS_HZ, DEESS_Q, this.gDb);
+      this.peak2.setPeak(this.sr, DEESS_HZ2, DEESS_Q, this.gDb);
+      this.lastDb = this.gDb;
+    }
+    return this.peak2.process(this.peak.process(x));
   }
 }
 
@@ -595,6 +733,45 @@ class DeEsser {
 /* -------------------------------------------------------------------------- */
 
 const HISS_DECIM = 8;
+/**
+ * How fast the de-hisser's gate may *follow its own key*.
+ *
+ * Both are time constants on the correction (the dB the gate takes out), applied
+ * at the decimated update rate. Closing is slower than opening — but it used to
+ * be 250 ms on an argument about *pops*: the key is a 2048-sample (43 ms)
+ * sliding RMS of 4–16 kHz, and a pop is a broadband burst whose energy
+ * *dominates that window* out of all proportion to its length (twenty samples at
+ * full scale against 2048 of music at −34 dB: +14 dB of apparent tilt for 43 ms),
+ * so a gate that follows its key sample-by-sample slams shut at every pop and
+ * leaves a 43 ms hole: measured then, 38 HF frames above 15 dB of crest against 3
+ * with the de-hisser off.
+ *
+ * That measurement was taken with the de-hisser *in front* of the de-clicker.
+ * Since the order was turned around ("noise repair, most impulsive first" — see
+ * process()), a pop no longer reaches this key as a bare spike: the level term
+ * vetoes the tilt term's spike anyway (a burst drives `e` above t1, lvl → 1,
+ * cutLevel → 0, and the *smaller* of the two wins), and the de-clicker repairs
+ * what is left *behind* this stage. Re-measured on the same fixture the old
+ * claim used — a vinyl simulation with 108 injected pops — the pop witnesses are
+ * identical at 60 ms, at 250 ms and with the de-hisser switched off: the HF crest
+ * witness is 101 frames on the upload and **1** after the chain, and the
+ * independent pop meter (its own RBJ 4 kHz band at the fixture's own pop
+ * positions) reads **−15.66 dB** over the clean copy. What the closing lag still
+ * costs is the repair itself — measured on the hiss fixtures at the doses the
+ * law asks for, as the band the repair owns:
+ *
+ *   close      100 ms of gate lag    hiss-owned band   music-owned   loud
+ *   250 ms      (as it was)                  6.06 dB      −0.02 dB   −0.24 dB
+ *   120 ms                                   7.26         +0.07      −0.24
+ *    60 ms      (as it is now)               7.94         +0.18      −0.23
+ *    30 ms                                   8.32         +0.30      −0.23
+ *
+ * — +1.9 dB of the noise for ≤0.2 dB of the music's own top end in frames the
+ * noise does not own, and nothing else moves. Opening has to stay fast (8 ms):
+ * opening is what keeps a musical transient from being dulled.
+ */
+const HISS_CLOSE_MS = 60;
+const HISS_OPEN_MS = 8;
 /**
  * The band the top end is compared with when looking for hiss (700 Hz – 3 kHz).
  * The analyser measures the *same* two bands — 4–16 kHz against this one — so the
@@ -605,8 +782,43 @@ const HISS_MID_HZ = 1450;
 const HISS_MID_Q = 0.63;
 /** Lower edge of the band the analyser measures as "the top end" (4–16 kHz). */
 const HISS_KEY_HZ = 4000;
+/**
+ * How much of the requested cut the floor regime delivers as a *shelf* above the
+ * repair corner, on top of what the split can do.
+ *
+ * The split cannot deliver the amount it asks for, and the reason is structural:
+ * `low + high` is the Linkwitz-Riley allpass, so `low + high·g` also sums back a
+ * *unit-magnitude copy* of the whole signal at the gate's gain, and the low
+ * branch's remainder subtracts from it. Measured as a static transfer with the
+ * gate held closed (probe hiss13, white noise at the floor, request −22 dB):
+ * −5.8 dB at 4 kHz, −10.3 at 6 kHz, −13.8 at 8 kHz, −18.1 at 12 kHz — 26 %, 47 %,
+ * 63 %, 82 % of the request, with the deficit concentrated right above the
+ * crossover, which is where the hiss of a worn record actually sits. A steeper
+ * split (LR8) buys 1.0–1.4 dB at 6–8 kHz, a lower crossover 0–1 dB on the worn
+ * record: neither is the lever (probe hiss10).
+ *
+ * Making the split steeper is therefore not the lever. On the §2 acceptance
+ * fixture's own pause frames (probe hiss24, median per-band level over the 49
+ * frames whose top end is the noise's) the chain used to leave 11 / 16 / 17 / 17
+ * / 17 / 18 / 21 dB above the clean copy at 1/2/3/4/6/8/12 kHz and now leaves 9 /
+ * 12 / 12 / 11 / 8 / 8 / 10 — the repair doubles where the defect lives, and the
+ * app's own two numbers on the output move with it: tilt step 5.82 → 0.00 dB,
+ * hissAmount 1.00 → 0.39. The fraction itself is from a 4-fixture × 4-dose sweep
+ * (probe hiss19): the pause floor keeps falling until 0.75 and stops moving after
+ * it, while the *tilt* of the pauses — the number the diagnosis acts on — crosses
+ * the music's own tilt at 0.75 on both hard fixtures (+0.34 dB off on the
+ * synthetic bed+hiss, +0.71 on the worn record) and over-corrects beyond it
+ * (−2.2 / −1.2 dB, i.e. pauses duller than the music). Music frames are untouched
+ * by every value: the shelf only opens where the gate has already proven there is
+ * nothing but floor (see the two witnesses in tick()), and a forced dose on loud
+ * continuous music comes out bit-identical to the same render with this term
+ * removed (tests/dsp.test.js).
+ */
+const HISS_FLOOR_RATIO = 0.75;
 /** Width of each mains notch, in hertz (see HumNotch.prepare). */
 const HUM_BW_HZ = 3;
+/** Relative floor under a de-clip run — see the run tracker in DeClipper.tick. */
+const DECLIP_RUN_FLOOR = 0.985;
 /** dB of notch at 100 % dose — the unit a measured mains excess is expressed in. */
 const HUM_DB_PER_DOSE = 42;
 
@@ -634,12 +846,20 @@ class DeHiss {
     this.k1 = new Biquad(); this.k1.setHighpass(sr, HISS_KEY_HZ, 0.707);
     this.k2 = new Biquad(); this.k2.setHighpass(sr, HISS_KEY_HZ, 0.707);
     // The gate is keyed on the *tilt* of the top end, not on its level: the
-    // 700 Hz–3 kHz band rides with the programme, the 4–16 kHz band rides with it
+    // 1.45 kHz band rides with the programme, the 4–16 kHz band rides with it
     // too as long as it holds music — and stops riding when what is up there is
     // noise. Measuring the same two bands here as the analyser does is what makes
     // the measured number (dB of top end that is not programme) something this
-    // stage can actually subtract.
-    this.mid = new Biquad(); this.mid.setBandpass(sr, HISS_MID_HZ, HISS_MID_Q);
+    // stage can actually subtract — and *same* means the same filters, which is
+    // why the mid band is two cascaded bandpasses like the analyser's `ma`/`mb`
+    // and not one. A single bandpass at this Q has visibly wider skirts and its
+    // upper one reaches into the 4 kHz+ band the *hiss* lives in: measured on the
+    // acceptance fixture, one filter reads the quiet frames' tilt 4.38 dB lower
+    // than the cascade (−1.85 dB over the whole file), i.e. the key under-asked
+    // by the very noise it was looking for, and the mid band was 16 dB inflated
+    // by the noise in the frames the noise owns.
+    this.mid1 = new Biquad(); this.mid1.setBandpass(sr, HISS_MID_HZ, HISS_MID_Q);
+    this.mid2 = new Biquad(); this.mid2.setBandpass(sr, HISS_MID_HZ, HISS_MID_Q);
     this.rmsHf = new SlidingRms(2048);       // same window as the analyser's frames
     this.rmsMid = new SlidingRms(2048);
     this.tickCount = 0;
@@ -648,12 +868,23 @@ class DeHiss {
     this.inv = 1;
     this.tiltRef = 0;          // the programme's own HF − MID tilt (measured)
     this.maxCut = 0;           // how much of the top end may be taken (measured)
-    this.cutDb = 0;            // the cut the key currently asks for
+    this.cutDb = 0;            // the cut the gate has actually taken (smoothed, see tick)
+    // the floor regime's shelf: how much of the repair is "this is only floor",
+    // its gain in dB, and the last gain the coefficients were built for (the
+    // filter's identity is exactly 0 dB, so a gain that has not moved by an
+    // audible step needs no new coefficients)
+    this.floorW = 0;
+    this.shDb = 0;
+    this.shApplied = 1e9;
+    this.sh = new Biquad();
   }
   reset() {
     this.lp1.reset(); this.lp2.reset(); this.hp1.reset(); this.hp2.reset();
     this.k1.reset(); this.k2.reset();
-    this.mid.reset();
+    this.mid1.reset(); this.mid2.reset();
+    this.sh.reset();
+    this.shApplied = 1e9;
+    this.floorW = 0; this.shDb = 0;
     this.rmsHf.reset(); this.rmsMid.reset();
     this.gate.reset(1);
   }
@@ -675,6 +906,11 @@ class DeHiss {
     this.xover = x;
     this.lp1.setLowpass(this.sr, x, 0.7071); this.lp2.setLowpass(this.sr, x, 0.7071);
     this.hp1.setHighpass(this.sr, x, 0.7071); this.hp2.setHighpass(this.sr, x, 0.7071);
+    // The floor regime's shelf sits on the *same* corner: the deficit it makes
+    // up is the split's own (−6 dB at the corner, closing by about a dB per
+    // octave above it), so a shelf anywhere else would fill a hole that is not
+    // there. The gain is not touched here — the next tick rebuilds it.
+    this.shApplied = 1e9;
   }
   setNoise(hfNoiseLin) {
     // The absolute reference: where the HF band sits, as an RMS of the same band
@@ -682,7 +918,23 @@ class DeHiss {
     // hide behind. It bounds the repair from below — the level term can never
     // silence music that is well above the measured noise floor, whatever the
     // tilt says.
-    this.t1 = clamp(hfNoiseLin * 2.8, 1e-7, 0.01);
+    // The reference is a band RMS measured exactly like the key below — same
+    // band, same 2048-sample window (see the analyser's hfQuietRmsDb) — so it
+    // needs no *absolute* ceiling. A ceiling at 0.01 (−40 dBFS) is a policy,
+    // not a sanity bound, and it changed the stage's behaviour on everything
+    // louder than −49 dBFS: the reference came out up to 9× too low, the level
+    // term `lvl` then read "this is music" wherever the top end sat above
+    // −40 dBFS, `max(cutLevel − 6, 0)` collapsed to 0 and the gate stopped
+    // cutting *at all* — in every passage, not just the loud ones. Measured on
+    // one recording rendered at 0 dBFS and at −20 dBFS: with the ceiling the
+    // finished files differ by −12.6 dB (rms of the difference, level-
+    // normalised), without it by −33.5 dB, i.e. this one constant decided the
+    // whole chain's level invariance. The stage then also did less the louder
+    // the file was, which is the opposite of what a de-hisser has to do.
+    // The bound that remains is a sanity bound: an HF band RMS above −6 dBFS
+    // means the file is nothing but noise, and then there is no music to
+    // protect and nothing to subtract.
+    this.t1 = clamp(hfNoiseLin * 2.8, 1e-7, 0.5);
     this.inv = 1 / Math.max(this.t1 * 4.0, 1e-9);
   }
   /**
@@ -699,7 +951,7 @@ class DeHiss {
     const low = this.lp2.process(this.lp1.process(x));
     const high = this.hp2.process(this.hp1.process(x));
     const e = this.rmsHf.tick(this.k2.process(this.k1.process(x)));
-    const em2 = this.rmsMid.tick(this.mid.process(x));
+    const em2 = this.rmsMid.tick(this.mid2.process(this.mid1.process(x)));
     this.tickCount++;
     if (this.tickCount % HISS_DECIM === 0) {
       // How much top end is left that the programme cannot explain?
@@ -715,11 +967,120 @@ class DeHiss {
       // always been (and which is all that can be said about a file whose top end
       // nobody has measured).
       const tiltNow = (e > 1e-9 && em2 > 1e-9) ? 20 * Math.log10(e / em2) : this.tiltRef;
+      // Without a measured tilt step there is nothing to subtract *by tilt*,
+      // and the level key alone decides — the plain expander this stage has
+      // always been for a caller who knows there is hiss and says so. That
+      // fallback is a policy the *law* must not rely on: for a file whose top
+      // end is stationary (a dull pad, a synthesizer bed) the quiet-frame floor
+      // and the programme are the same number, so the level key cannot tell
+      // hiss from music and would cut either way. The automatic doses therefore
+      // only ask for the de-hisser when the measurement found a tilt step
+      // (see presets.js) — the module keeps the expander for the manual path.
+      // ── what this term cannot see (round 15, measured) ──────────────────
+      // The automatic dose's depth *is* the tilt step the measurement found, and
+      // this term is what decides. A *broadband* floor — a 128 kbit/s arrival's
+      // own top end in a quiet passage — lifts the 4 kHz+ band and the 1.45 kHz
+      // reference together, so tiltNow − tiltRef stays at 0.0 dB while the level
+      // key below allows 19–20 dB of cut. The stage is therefore transparent
+      // there: on the acceptance fixture's quiet-passage pop the arrival's floor
+      // sits 22.2 dB above the clean copy's own top end and this stage takes
+      // 1.3 dB of it at p10 and nothing at the median block. Where a frame's
+      // tilt *does* sit above the reference — 0.26 s later on the same fixture —
+      // the same burst comes out 15.2 dB down (window −48.1 → −63.3 dB with the
+      // stage toggled). Reading it would mean a local instead of a file-wide
+      // reference, i.e. a *depth* policy, not a bug fix: the automatic dose is
+      // deliberately the measured step (see the dsp suite's "the floor regime
+      // delivers what was measured", and the matrix rows "the arrival's own top
+      // end at the pops the row above still counts"; probes wr9, wr10, wr12).
+      //
+      // Round 16 priced the obvious answer — let the *level* term decide on the
+      // frames where this one reads nothing, capped at the measured step — and
+      // it does not pay. It buys ~9 dB on the worn record's arrival floor (and
+      // 0.2–0.9 dB more pause floor on the dsp hiss fixture), but the app then
+      // names a *new* defect on its own exports: `dullTop` on the hiss, cassette,
+      // vinyl and worn rows, which used to read `hiss`/`healthy` there. The
+      // reason is structural: the level key cannot tell a top end that is quiet
+      // from a top end that is *floor*, and this term is blind to a floor that
+      // lifts both key bands together. Doing it properly needs a *content*
+      // witness — whether the top end is shaped like programme or like noise —
+      // i.e. an analyser metric, not a retune of this stage. Numbers: CHANGELOG,
+      // round 16 (probes wr14/wr15; wr13 is void — an instrument slip).
+      //
+      // Round 17 built that content witness — the *shape* inside the key band
+      // (11 kHz against 5.5 kHz, per 2048-frame) — and measured all three
+      // candidates for it to the end:
+      //   · it *does* separate analog hiss from programme with room to spare
+      //     (+1.8 … +2.1 dB on the acceptance hiss fixture's noise-owned frames
+      //     against −3.2 … −4.9 on its music-owned ones) — but it is redundant
+      //     with this term: in every one of the 88 frames it opened on that
+      //     fixture (87 of 87 on the worn record) `cutTilt` was already at the
+      //     measured step, i.e. a flat top end *is* the tilt anomaly this term
+      //     looks for;
+      //   · at the worn record's residue it reads *programme* (−4.5 dB against
+      //     the clean copy's own −4.6) — correctly: a lossy codec's error is
+      //     shaped like the music it encoded, so the floor there is not flat;
+      //   · and the third candidate, "the tilt is stationary when it is floor",
+      //     is dead outright: the tilt's p90−p10 across that quiet passage is
+      //     17.2 dB, wider than elsewhere in the file (14.6), because the
+      //     encoder's error follows the content's dynamics.
+      // Net of the witness and the arbitration: +0.19 dB on the hiss fixture's
+      // quiet floor, 0.00 at the worn record's pop, ≤0.3 dB wiggles elsewhere.
+      // That is noise, so neither is in the tree — the residual 2/72 is the
+      // arrival's own floor, shaped like its music, and it stays documented.
+      //
+      // Round 20 measured the statistic a *band-level* repair would have to key
+      // on — the HF excess over the local programme (64-sample blocks, the
+      // reference being its own median over ±0.5 s, probe wr35.js) — and it is
+      // what closes the question rather than opening it. The pops' own
+      // neighbourhoods read p50 11.9 / p90 15.6 dB on arrival and 2.3 / 4.0
+      // through the chain, i.e. at the clicks-free copy's own control level
+      // (2.0 / 2.7): the floor is already repaired as far as the programme
+      // allows. And the *music* reads the same statistic higher than the defect
+      // does — hi-hats 3/s p50 **20.4** dB, a kick+snare+hat groove 6.0 (p90
+      // 16.4), twelve "s" bursts 9.8 — so a gate on it would cut cymbals and
+      // sibilants harder than it cuts the codec's smear. A cymbal and a codec
+      // burst are the same signal to every band statistic this file computes;
+      // the residue is the arrival's, and the row that says so is the honest
+      // answer (acceptance §1, the worn record's boundary row).
       const cutTilt = this.maxCut > 0.01 ? clamp(tiltNow - this.tiltRef, 0, this.maxCut) : 60;
       const lvl = smoothstep(this.t1, this.t1 + 1 / this.inv, e);
       const cutLevel = lvl > 1e-6 ? -20 * Math.log10(lvl) : 60;
-      this.cutDb = Math.min(cutTilt, Math.max(cutLevel - 6, 0));
+      // The correction the key asks for…
+      const cutTarget = Math.min(cutTilt, Math.max(cutLevel - 6, 0));
+      // …and the correction the gate is *allowed* to have taken so far: closing
+      // over HISS_CLOSE_MS (60 ms — the pops this used to protect against are
+      // repaired by the de-clicker in front of this stage, and the lag is what
+      // costs the repair its depth), opening quickly (a transient must not be
+      // dulled). The steady state is the same number the key asked for, so a
+      // measured tilt still means what it says.
+      const rate = cutTarget > this.cutDb
+        ? 1 - Math.exp(-HISS_DECIM / (this.sr * HISS_CLOSE_MS * 0.001))
+        : 1 - Math.exp(-HISS_DECIM / (this.sr * HISS_OPEN_MS * 0.001));
+      this.cutDb += (cutTarget - this.cutDb) * rate;
       this.gate.set(Math.pow(10, -this.cutDb / 20));
+      // ── is this frame *only* floor?
+      // Two witnesses, both already computed here, and both have to agree:
+      //   · `1 - lvl` — the key band (4 kHz+) sits at or below the measured HF
+      //     floor, i.e. the level key sees no music at all (lvl is that key's
+      //     own smoothstep against t1, whose top end is +9 dB above the floor);
+      //   · `cutTilt / maxCut` — the tilt anomaly is at the value the
+      //     measurement found, i.e. the whole of what was measured as noise is
+      //     present.
+      // The product is what gives the shelf its permission: a quiet *musical*
+      // passage fails the first term (its own top end lifts `e`), a half-hissy
+      // one fails the second (mid-band programme lowers tiltNow, and the term is
+      // proportional, not a switch), and a loud one fails both.
+      const floorT = this.maxCut > 0.01 ? clamp(cutTilt / this.maxCut, 0, 1) * (1 - lvl) : 0;
+      this.floorW += (floorT - this.floorW) * rate;
+      // The shelf's gain, in dB (negative = cut), smoothed with the gate's own
+      // attack/release so the two move together: a hard step here would be a
+      // step in the waveform, the same reason the `s` window below exists.
+      const shT = -this.cutDb * HISS_FLOOR_RATIO * this.floorW;
+      this.shDb += (shT - this.shDb) * rate;
+      if (Math.abs(this.shDb - this.shApplied) > 0.02) {
+        this.shApplied = this.shDb;
+        this.sh.setHighShelf(this.sr, this.xover, 0.7071, this.shDb);
+      }
     }
     // The amount is applied in *decibels*, not as a linear crossfade: "half the
     // repair" has to mean −6 dB of the noise, and a linear blend of the gate
@@ -729,14 +1090,365 @@ class DeHiss {
     const g = this.gate.tick();
     const cutNow = g > 1e-6 ? -20 * Math.log10(g) : 60;
     const gEff = Math.pow(10, -(cutNow * strength) / 20);
-    // Nothing to attenuate: hand the sample through untouched. This is what
-    // keeps the stage *transparent* rather than "almost transparent" — without
-    // it, every sample ran through the LR4 reconstruction, whose phase rotation
-    // lifted the internal peak of a dense loud master by +4.7 dB and made the
-    // soft-clip guard (and the level matcher behind it) pull the file down. The
-    // de-hisser is a repair: it may only touch samples that need repairing.
-    if (gEff >= 0.9999) return x;
-    return low + high * gEff;
+    // Nothing to attenuate: mix *none* of the reconstruction in. This is what
+    // keeps the stage *transparent* rather than "almost transparent" — run
+    // through the LR4 reconstruction at every sample, the sum of the two
+    // branches rotated the phase of the top end, which lifted the internal peak
+    // of a dense loud master by +4.7 dB and made the soft-clip guard (and the
+    // level matcher behind it) pull the whole file down. The de-hisser is a
+    // repair: it may only touch samples that need repairing.
+    //
+    // …but the crossfade has to be *continuous*. The gate crosses the
+    // transparent end of its range every time it moves — the level term opens
+    // it on a broadband burst, the tilt term closes it again as the burst
+    // leaves the key's window — and a hard `if (g >= 0.9999) return x` is a
+    // step in the waveform at every one of those crossings, i.e. the stage
+    // generates exactly the kind of edge the de-clicker downstream exists to
+    // repair. Measured on the worn record with 108 injected pops, in the full
+    // chain: 12 HF frames above 15 dB of crest with the branch, 7 with the
+    // crossfade (the de-clicker on its own leaves 6). The window is the last
+    // 0.1 % of the gate's range, so the amount the measurement asked for is
+    // unchanged to within 0.01 dB.
+    const s = gEff >= 1 ? 0 : gEff <= 0.999 ? 1 : (1 - gEff) / 0.001;
+    if (s === 0) return x;
+    const split = low + high * gEff;
+    // …and where the two witnesses above have proven the frame is floor only,
+    // the shelf closes the gap between what the split delivers and what was
+    // measured. Cascaded after the split rather than in place of it: the modes
+    // are then "top end only, leak-limited" (music present) and "top end plus
+    // the floor regime" (nothing but floor), and the crossfade between them is
+    // the ramp on floorW/shDb, not a switch.
+    const shaped = (this.floorW > 0.001 && this.shDb < -0.01) ? this.sh.process(split) : split;
+    return x + (shaped - x) * s;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* de-clipper (flat-topped peaks: overdriven masters, clipped transfers)       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * De-clipper — the one repair a "loud master" needs and cannot get anywhere
+ * else in this chain.
+ *
+ * Hard clipping is not noise: the waveform was cut off at a level and the
+ * samples above it are simply gone. What is left is a *flat top*, and that is
+ * both the signature and the problem — a flat top is a step in the second
+ * derivative of a signal that had a peak there, which is why a clipped master
+ * sounds hard and "crackly" on transients even after every other stage has
+ * been through it. No amount of EQ or dynamics puts the peak back.
+ *
+ * Detection is the whole difficulty, because a *loud* waveform looks the same
+ * as a clipped one: measure a 997 Hz sine at 1.25 that was never clipped and its
+ * samples near the peak sit within a few 1e-4 of each other for a couple of
+ * samples, exactly like a plateau. Two facts separate them, and this stage uses
+ * both:
+ *
+ *   · the plateau of a clipped recording sits at the *peak level of the file* —
+ *     the clipping is what the peak is — while a merely loud signal has more
+ *     room above its own flat-looking samples (the analysis measures that level
+ *     and hands it over as `declipLevel`, which is why this stage needs a
+ *     parameter and not a constant);
+ *   · the plateau *length* carries how much was cut off. A sine of amplitude A
+ *     clipped at T stays at or above T for as long as cos(ω·t) ≥ T/A, so the run
+ *     of n samples implies A = T / cos(ω·n/2) — 1.25 for the 997 Hz example
+ *     above (2.0 dB of missing peak), 1.6 for a 60 Hz bass (4.2 dB), and 0.07 dB
+ *     for the sine that was never clipped. Below half a decibel of implied loss
+ *     there is nothing to repair, which is exactly what the false-positive test
+ *     checks.
+ *
+ * Where the local period is not trustworthy (broadband material: music, noise,
+ * cymbals) the period is taken from the length of the plateau alone and capped
+ * at +3 dB — a bound, not a claim. The repair itself is an arc from the plateau
+ * up to the implied peak and back down, which is what the missing waveform
+ * looks like in both cases: for a sinusoid it *is* the right shape
+ * (−32 dB of residual error against −16 dB for the flat top, measured against
+ * the ground truth), and for a transient it is the least opinionated smooth
+ * curve through the same endpoints.
+ *
+ * Because a run is only reconstructed once it has ended, the stage delays its
+ * output by the longest run it will handle (`look`, 5.4 ms) — while it is
+ * engaged. Order matters as much as detection: this is the *first* repair in the
+ * chain, before the de-hisser and the de-clicker, because those two work on the
+ * waveform as it is and reconstructing a peak afterwards would have to undo
+ * them. Every restoration handbook says the same thing for the same reason.
+ */
+class DeClipper {
+  constructor(sr) {
+    this.sr = sr;
+    // The longest flat top we will reconstruct. At 48 kHz this is 5.6 ms: long
+    // enough for the clipped bass note of a loud master (a 60 Hz peak at +4 dB
+    // spends ~5 ms above full scale), short enough that the delay stays small.
+    this.maxRun = Math.max(8, Math.round(sr * 0.0056));
+    this.look = this.maxRun + 2;
+    const L = this.look + 8;
+    this.ring = new Float32Array(L);          // incoming samples, waiting
+    // Which of the waiting samples this stage has reconstructed. The de-clicker
+    // downstream reads it: a *reconstructed* peak is broadband and spiky, and a
+    // de-clicker looking for clicks would happily eat it again — measured on a
+    // clipped master, the de-clicker alone pulled the flat tops down to a third
+    // of their level, which is worse than leaving them. The flag travels with
+    // the sample (the marking is retroactive, so even the samples in front of a
+    // run are covered by the time they are emitted).
+    this.mark = new Uint8Array(L);
+    this.arc = new Float64Array(this.maxRun + 8);   // the Hermite arc, reused
+    this.w = 0;
+    this.marked = false;                      // was the sample just emitted ours?
+    this.after = 0;                           // the sample that ended the current run
+    this.th = 0.9;                            // set by prepare(): the clip level
+    // How far above the plateau this stage has reconstructed, as a linear
+    // factor. It is the *floor* under the guard's lift: a caller that does not
+    // know the measured headroom still gets a reconstruction that survives the
+    // guard, and a passage with no clipping lets the figure decay again.
+    this.head = 1;
+    this.tol = 0.0025;                        // "flat": how equal neighbours must be
+    /* How far below its own starting magnitude a run may drift and still be one
+     * run: 1.5 %, which is fifteen times the tilt a DC blocker puts on a plateau
+     * and a tenth of the step a real crest takes when it leaves the rail. */
+    this.runFloor = 0;
+    this.lastSign = 0;
+    // run tracking
+    this.armed = false;                       // inside a candidate plateau
+    this.runStart = 0;
+    this.runLen = 0;
+    this.prev = 0;
+    this.pos = 0;                             // absolute sample counter
+    // the last few zero crossings, for the local period (half a period apart)
+    this.cross = new Int32Array(9);
+    this.crossN = 0;
+    this.crossW = 0;
+  }
+  reset() {
+    this.ring.fill(0); this.mark.fill(0);
+    this.w = 0; this.marked = false; this.armed = false; this.runStart = 0; this.runLen = 0;
+    this.head = 1;
+    this.prev = 0; this.pos = 0; this.crossN = 0; this.crossW = 0;
+  }
+  /** Local period from the last crossing intervals, or 0 when they are irregular. */
+  period() {
+    const n = this.crossN;
+    if (n < 5) return 0;
+    const k = (this.crossW - 1 + 9) % 9;      // newest
+    let sum = 0, sum2 = 0, cnt = 0;
+    for (let i = 1; i < n; i++) {
+      const a = this.cross[(k - i + 1 + 9) % 9];
+      const b = this.cross[(k - i + 9) % 9];
+      const d = a - b;
+      sum += d; sum2 += d * d; cnt++;
+    }
+    if (!cnt) return 0;
+    const mean = sum / cnt;
+    const sd = Math.sqrt(Math.max(0, sum2 / cnt - mean * mean));
+    if (mean < 2 || sd / mean > 0.35) return 0;         // not periodic enough to model
+    return 2 * mean;
+  }
+  /** Reconstruct the plateau [start, start+len-1] in the ring. */
+  repair(start, len, amount) {
+    const L = this.ring.length;
+    const i0 = (start + L) % L;
+    const flat = Math.abs(this.ring[i0]);
+    if (!(flat > 0.02)) return false;
+    /* Two kinds of evidence, and the depth follows whichever one applies.
+     *
+     * Where the local period is trustworthy, the plateau length *solves* for the
+     * missing peak: a sine of amplitude A clipped at T stays at or above T for
+     * T/A ≤ cos(ω·len/2), so the length gives A exactly. The stage caps that at
+     * 6 dB, which is a sanity bound on a case that can be measured, not a
+     * conservatism about it.
+     *
+     * Where it is not (broadband material: music, noise, cymbals) the length is
+     * weak evidence and the reconstruction is a bound — 0.9 + 0.25 dB per sample
+     * of run, capped at 3 dB.
+     *
+     * What the depth may *not* be is a fraction of either. It used to be
+     * `min(cap, implied) × (0.5 + 0.5 × amount)`, which contradicts the line
+     * above it ("the amount moves this threshold, not the depth of a repair that
+     * has already been decided on") and caps the whole stage at 2.6 dB of
+     * reconstruction however strong the evidence is. On the documented case — a
+     * 997 Hz tone at 1.245 clipped at 0.75, i.e. 4.4 dB of missing peak — the
+     * period says 4.27 dB, the stage restored 2.58 dB, and the ground-truth
+     * error did not move at all (−17.2 dB repaired against −17.2 dB unrepaired,
+     * measured with the chain otherwise neutral). The amount belongs in the
+     * threshold; the shape belongs to the evidence. */
+    /* Two models, and the louder one wins.
+     *
+     * Where the material is periodic enough to have a period, the plateau length
+     * solves for the missing peak: a sine of amplitude A clipped at T stays at or
+     * above T for T/A ≤ cos(ω·len/2), so the length gives A directly. That is
+     * exact — on a 997 Hz tone at 1.25 clipped at 0.99, the ground-truth error
+     * over the plateaus goes from −22.0 dB unrepaired to −29.0 dB repaired.
+     *
+     * Where it is not (music, noise, cymbals) the run length alone is weak
+     * evidence, and the stage used to answer it with a pure function of the
+     * length — `0.9 + 0.25` per sample. That came apart on a hard-clipped pink
+     * fixture, where the peak actually hidden above the rail was measured over
+     * 28 000 runs: 0.47 dB at one sample, 1.12 at two, 1.56 at three, 1.75 at
+     * five, 1.91 at eight, 2.05 at thirty. The old curve read 1.15 / 1.40 / 1.65
+     * / 2.15 / 3.00 — an overshoot on every short run, and short runs are 60 % of
+     * them. Measured, the reconstruction left the file *further* from the
+     * original than the flat top it replaced (−11.7 → −10.6 dB).
+     *
+     * The waveform already answers the question. The samples on either side of a
+     * run, and the slopes between them, define exactly one cubic that passes
+     * through both ends with both tangents (Hermite). Its height over the run is
+     * what the missing peak has to be, and it is shape-aware in the way that
+     * matters: a deep crest bulges, while a *shallow crossing* — where the
+     * waveform merely clips its way through the rail on the way up — barely
+     * rises, so the reconstruction follows its neighbours instead of inventing an
+     * apex that was never there. On the same fixture the one- and two-sample runs
+     * come out at +1.0 and +1.2 dB against measured truths of +0.47 and +1.12 dB.
+     * The same cubic is also the *shape* of the arc, which makes it meet the
+     * neighbouring samples with a matching slope — the raised cosine it replaced
+     * arrived with a kink at both ends, which is a broadband discontinuity of its
+     * own and exactly what this stage is supposed to be removing.
+     *
+     * The Hermite needs no period, no table and no calibration constant. The
+     * period model stays because for a *tonal* peak the sampled neighbours
+     * under-read the slope (the crossing falls between samples) and there the
+     * period is the better witness. Whichever model predicts more is the one
+     * taken, each with its own ceiling: 6 dB where a period vouches for the
+     * answer, 3 dB where the waveform alone does. */
+    const iA = (start - 1 + L) % L;
+    const sgn = this.ring[i0] < 0 ? -1 : 1;
+    const m0 = flat - this.ring[iA] * sgn;
+    const m1 = this.after * sgn - flat;                   // per sample, in the run's frame
+    let peak = 0;
+    for (let k = 0; k < len; k++) {
+      const u = (k + 0.5) / len;
+      const v = len * (m0 * (u * u * u - 2 * u * u + u) + m1 * (u * u * u - u * u));
+      this.arc[k] = v;
+      if (v > peak) peak = v;
+    }
+    const hermiteDb = peak > 1e-7 ? 20 * Math.log10(1 + peak / flat) : 0;
+    let implied, cap, useHermite;
+    const p = this.period();
+    if (p > 0) {
+      cap = 6.0;
+      const w = (2 * Math.PI / p) * len * 0.5;
+      implied = 20 * Math.log10(1 / Math.cos(w < 1.4 ? w : 1.4));
+      /* Height *and shape* come from one model, never one from each. A test
+       * that measures the reconstruction against a known original is dominated
+       * by the *consistency* of the shape, not by the accuracy of any single
+       * arc: a best-fit scale absorbs a systematic under-reach across the whole
+       * file and leaves only the shape error, so arcs that are sometimes early
+       * and sometimes late fail where arcs that are always slightly short pass.
+       * Measured on the 997 Hz fixture: the Hermite's own shape with the period
+       * model's height reads −26.3 dB, the same model supplying both reads
+       * −32 dB. The period model's shape is symmetric because the crest of a
+       * clipped tone is; the Hermite's is not, because the two slopes it is
+       * handed are sampled at different points of the wave. */
+      if (hermiteDb > implied) { implied = hermiteDb; useHermite = true; } else useHermite = false;
+    } else {
+      cap = 3.0;
+      implied = hermiteDb;
+      useHermite = true;
+    }
+    if (implied > cap) implied = cap;
+    // how sure the detector has to be — the amount moves this threshold alone
+    if (!(implied > 1.2 - 0.7 * amount)) return false;
+    const applied = implied;
+    const target = flat * Math.pow(10, applied / 20);
+    /* What the guard has to let through for this repair to survive it. The
+     * reconstruction is *above* the plateau by construction, and the plateau is
+     * at the file's peak level — so without this the guard's knee (which starts
+     * 0.55 dB below full scale) would flatten the arc straight back into the
+     * flat top it came from. Measured on a 997 Hz tone clipped at 0.99 that
+     * implies +2 dB: unrepaired −15.4 dB of error in the plateau, repaired
+     * with the knee in its way −15.4 dB (i.e. *nothing*), repaired with the
+     * knee lifted −33.9 dB.
+     */
+    const ratio = target / flat;
+    if (ratio > this.head) this.head = ratio;
+    const rise = target - flat;
+    const norm = useHermite && peak > 1e-7 ? rise / peak : 0;
+    for (let k = 0; k < len; k++) {
+      const v = flat + (norm > 0
+        ? norm * this.arc[k]
+        : rise * Math.cos(Math.PI * (k + 0.5 - len * 0.5) / len));
+      this.ring[(start + k + L) % L] = sgn * v;
+    }
+    // …and mark the repair with two samples of margin on either side, so the
+    // de-clicker leaves the whole reconstructed peak alone (the joins of an arc
+    // are broadband too)
+    for (let k = -2; k < len + 2; k++) this.mark[(start + k + L) % L] = 1;
+    return true;
+  }
+  tick(x, amount, level) {
+    if (amount <= 0.0001 || level <= 0.02) {
+      this.th = 1;                                       // dormant: a run can never match
+      this.armed = false;
+      return x;
+    }
+    // ── 1 · track the local period from the zero crossings ─────────────────
+    if ((x > 0 && this.prev <= 0) || (x < 0 && this.prev >= 0)) {
+      if (this.crossN) {
+        const k = (this.crossW - 1 + 9) % 9;
+        const d = this.pos - this.cross[k];
+        if (d > this.sr / 24) {                          // > 2 kHz: forget the history
+          this.crossN = 0;
+        }
+      }
+      this.cross[this.crossW] = this.pos;
+      this.crossW = (this.crossW + 1) % 9;
+      if (this.crossN < 9) this.crossN++;
+    }
+    this.prev = x;
+
+    /* ── 2 · runs of flat samples at (or just under) the clip level ─────────
+     *
+     * A run *starts* at the detection level and then lives on its own, slightly
+     * lower floor (0.15 dB below its own first magnitude). The distinction is not
+     * cosmetic: the chain high-passes the signal before this stage (the input DC
+     * blocker), and on a signal that already sat at the rail that filter tilts the
+     * plateau by a fraction of a percent — measured on a 997 Hz tone clipped at
+     * 0.75, the flat samples arrive as 0.7515, 0.7513, … 0.7499, crossing the
+     * absolute threshold part way through and *ending the run there*. Every
+     * plateau in the file was then reconstructed from its first half: `len` came
+     * out at 8 where the plateau was 15, the Hermite took its trailing tangent
+     * from a sample still inside the plateau (m1 = −0.0016 instead of −0.119) and
+     * the arc was lopsided — the reconstructed peak landed two samples after the
+     * run began and decayed back to the rail across the rest of it. The ground
+     * truth error on the documented fixture was −26.9 dB where the model's own
+     * numbers say −32 dB, and the truncated-run artefacts were louder than the
+     * clipping they replaced.
+     *
+     * A real crest does not behave like that: its samples leave the rail at once
+     * (the first one after a clipped peak is 10–20 % down, not 0.2 %), so a 1.5 %
+     * floor cannot swallow one. */
+    const ax = x < 0 ? -x : x;
+    if (this.armed && x * this.lastSign > 0 && ax >= this.runFloor
+        && Math.abs(ax - this.lastMag) <= this.tol) {
+      this.runLen++;
+      this.lastMag = ax;
+      if (this.runLen > this.maxRun) this.armed = false;     // too long to be a peak
+    } else if (ax >= level) {
+      this.armed = true;
+      this.runStart = this.pos;
+      this.runLen = 1;
+      this.lastMag = ax;
+      this.lastSign = x < 0 ? -1 : 1;
+      this.runFloor = ax * DECLIP_RUN_FLOOR;
+    } else if (this.armed) {
+      this.armed = false;
+      /* The sample that *ended* the run is the current one, and it is not in the
+       * ring yet — the ring is written after this branch. Handing it to the
+       * repair directly is the difference between a Hermite through the run's two
+       * real neighbours and one through the sample's slot from 274 samples ago:
+       * measured, the latter put a tangent of −0.99 into the cubic on a 997 Hz
+       * tone and turned a correct +2 dB arc into a 3 dB one, dropping the
+       * ground-truth error from −29.0 to −15.7 dB. */
+      this.after = x;
+      this.repair(this.runStart, this.runLen, amount);
+    }
+    this.ring[this.w] = x;
+    const L = this.ring.length;
+    const r = (this.w - this.look + L) % L;
+    const out = this.ring[r];
+    this.marked = this.mark[r] === 1;
+    this.mark[r] = 0;
+    this.w = (this.w + 1) % L;
+    this.pos++;
+    return out;
   }
 }
 
@@ -744,41 +1456,625 @@ class DeHiss {
 /* de-clicker (vinyl crackle / digital impulse repair)                         */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * De-clicker (vinyl crackle, impulse repair — and the class it does *not* see,
+ * the dropout, measured at the end of this header).
+ *
+ * A pop old enough to be on a record is short — one to three samples of
+ * broadband energy — and that is what every de-clicker looks for. What arrives
+ * here has usually been through a consumer encoder as well, and that changes
+ * the job: encoding smears the three samples across the window the codec works
+ * in. Measured on a vinyl rip at 128 kbit/s (216 pops injected before the
+ * encoder, decoded again after it), the pop's energy sits within −40…+40
+ * samples of the spike it came from — 96 % of it, with the centroid four
+ * samples *after* the spike — and the spike survives at full height.
+ *
+ * That shape is what a causal repair cannot handle. Replacing the waveform with
+ * the *ground truth* (the same music without the click) from the detected peak
+ * onwards leaves the measured crackle index at 0.63–0.68 however long the
+ * window is, and letting the repair fade *in* over the spike is worse still: a
+ * partial depth on a step-like residual *is* a step, so a faded causal window
+ * measured 1.00 — the repair becomes the click it was removing. Repairing the
+ * whole extent at full depth from the peak leaves the smear that precedes it,
+ * and that smear is two thirds of the energy.
+ *
+ * So this stage looks ahead. It detects on the sample that arrives, plans the
+ * repair around it — `pre` samples in front, `post` behind — and lets the
+ * sample wait in a delay line until the plan reaches it. On the same fixture at
+ * the automatic dose that took the crackle index from 0.665 (the best a
+ * single-sample repair can do: 297 spike frames) to 0.232 (22 frames; the same
+ * music encoded without the pops reads 0.062), and the residual around each pop
+ * dropped by 8–10 dB. The price is `look` samples of delay — 0.35 ms — while
+ * the stage is engaged; the master dry/wet crossfade delays its dry side by the
+ * same amount so the A/B switch stays phase-coherent, and the processor reports
+ * the figure as `this.latency`. It is *not* prediction: nothing comes out
+ * before it goes in.
+ *
+ * The repair itself is the classic one: the flagged samples are mixed towards a
+ * 24 dB/octave 4 kHz prediction *of the repaired signal*, so what replaces a
+ * pop is the low-frequency continuation of the music around it. Musical
+ * transients are the risk — a snare hit also raises the detector's crest
+ * statistic — but a drum kit is long next to a pop: measured on a 96 BPM kit
+ * with 16 snares, the stage at the automatic dose changes the 2 ms around a
+ * snare by −84 dB, against −31 dB for the single-sample repair it replaces.
+ *
+ * ── the class this stage does not see, measured (round 11) ───────────────────────
+ * A click is an impulse *added* to the music; a *dropout* is a hole, and this
+ * header used to claim digital dropouts without ever measuring one. Measured
+ * now, with a mute planted every 1/9 s on a bright bed (LP 9000 + hiss; probes
+ * dc5–dc9, and the acceptance tool's two `dropouts` rows):
+ *
+ *   mute length        1     2     5    12    25    60    120 samples
+ *   0.3–4 kHz vs clean +1.4  +1.0  +0.4 −0.2  −6.8  −9.8 −12.8 dB
+ *   the plan mask      0.00  0.00  0.00 0.00  0.00  0.00  0.00
+ *
+ * A short gap is *not* a defect at all — the band-limited signal heals it, which
+ * is why the class only starts at about 25 samples — and this stage fires on
+ * none of it: the witness watches the high band, and there the 4 kHz prediction
+ * smears both edges of a gap, so the ratio reads 1.24–1.94 at 2–25 samples
+ * against a knee that wants ≈ 2.2. Two replacement witnesses were measured
+ * against music's own floor and both fail: a body-band envelope dip reads 0.70
+ * at the holes and **0.032** on a plain clean bed (a phrase boundary is deeper
+ * than any hole), and the ratio *falling* — which a mute does produce (0.48 at
+ * 25 samples, 0.04 at 120) — has music's own p0.01 at **0.03**, i.e. music
+ * reaches as deep as the deepest gap. The fill would also need a longer delay
+ * line than the 0.35 ms of look-ahead above, or the un-filled head would be
+ * left as a step — the click this stage exists to remove. So the class is a
+ * measured bound rather than a claim, pinned by the audit's `dropouts` section
+ * and by the acceptance matrix's `dropouts` rows.
+ */
 class DeClicker {
   constructor(sr) {
-    // prediction = 24 dB/oct low pass, fed with the *repaired* signal so that a
-    // replaced sample can never leak back into the filter state
+    this.sr = sr;
+    // The window, in samples. `pre` is what the look-ahead has to be able to
+    // reach back to; `rise`/`fall` are the crossfades that keep the window from
+    // ending in a step of its own.
+    this.pre = Math.max(2, Math.round(sr * 0.00033));
+    this.post = Math.max(4, Math.round(sr * 0.00100));
+    /* ── the window the *ring-out* needs (round 19) ─────────────────────────
+     * A stylus click does not stop at the click: it excites the cartridge's own
+     * resonance, and what is left after the spike is 0.5 … 3 ms of damped
+     * *tone* at 8–12 kHz. The repair window above covers the spike and the first
+     * millisecond of that ring; past it the tone runs on, and a second-
+     * difference witness cannot see it — the third witness is a *roughness*
+     * measure, and a smooth 9 kHz tone is music to it however loud it is. What
+     * can be seen is the tone itself: over `tail` samples behind the detection
+     * the signal is fitted against a damped sinusoid, exp(-k/τ)·(a·cos ωk +
+     * b·sin ωk), over a grid of τ (0.4 … 4 ms) and of ω (6 … 13 kHz at 250 Hz,
+     * refined by a parabola), and the fit that explains the most of the window's
+     * energy is subtracted from the output for up to 3τ (8 ms at most).
+     *
+     * The fit window is the whole trade. Measured on the ring family (τ 0.6 /
+     * 1.5 / 2.5 ms, 9/s at 9 kHz, 72 clicks each, probes tools/work/wr29-31.js):
+     * with a 0.35 ms window — what the old look-ahead allowed — the frequency
+     * lands 88–151 Hz off and the ring-out only comes down from +11.9 to +10.4 dB
+     * over the clean copy; with 1.0 ms it lands 12–28 Hz off and the same reading
+     * is +4.1 dB, the onset falls from +17.7 to +1.6 dB and the app's own crackle
+     * index over the file from 0.512 to 0.000. What licenses the removal is the
+     * fit's own *explained share* R² — a damped tone explains 0.26 … 0.48 of the
+     * window on the ring family (p10 … p90) and 0.008 … 0.097 on everything that
+     * is a performance (hi-hats, a kick/snare/hat pattern, twelve "s" bursts, a
+     * clean bed) — so R² ≥ 0.2 is the gate, and it is measured on both
+     * populations rather than assumed. */
+    this.tail = Math.max(8, Math.round(sr * 0.00100));
+    this.look = this.pre + 1 + this.tail;
+    this.rise = Math.max(2, Math.round(sr * 0.00017));
+    this.fall = Math.max(2, Math.round(sr * 0.00033));
+    const L = this.look + this.post + 4;
+    this.ring = new Float32Array(L);          // the incoming samples, waiting
+    this.plan = new Float32Array(L);          // …and how far each of them is repaired
+    this.mark = new Uint8Array(L);            // …and which came from the de-clipper
+    this.prevIn = 0;                          // for the flat-top test below
+    /* ── the *third* witness: the roughness of the sample itself ───────────
+     * The two witnesses above are first-order — the size of the residual, and
+     * its one-sidedness — and that is where the stage's floor lives: a pop that
+     * is only twice the music's own 4 kHz activity reads ratio 1.9 and asym
+     * 0.31, exactly like the tallest peak of a band-limited bed, so the map
+     * cannot fire on it however carefully the knee is placed (measured on the
+     * acceptance fixture: three of 72 pops stay, and the audit's floor row shows
+     * that reaching them by moving the map costs the drum kit 24 dB of its
+     * 55 dB guard). What those two statistics do not ask is what the *waveform*
+     * is allowed to do between two samples. Content below 9 kHz has a hard
+     * ceiling on its second difference — |D2| ≤ (2·sin(π·f/fs))²·A, i.e. 0.35·A
+     * there — while a one-sample delta produces |D2| = 2a at its own sample
+     * whatever the bed is doing. Measured (probes tools/work/sp1.js, sp2.js,
+     * sp3.js), in σ of the *local* D2 over the 96 samples before the sample in
+     * hand:
+     *
+     *   the three survivors, four beds 5–12 kHz  8.3 … 11.4 σ
+     *   the pops the ratio already catches       12 … 30 σ
+     *   a drum machine + bed                     0.008 % of samples ≥ 5 σ
+     *   the audit's wide clean master            0.000 % ≥ 4 σ
+     *   the clipped hot master (§18)             0.001 % ≥ 4 σ, 0.000 % ≥ 5
+     *   a loud tape-hiss bed                     0.001 % ≥ 5 σ
+     *   the acceptance tool's performance        14 samples in 8 s ≥ 5 σ, 0 ≥ 8
+     *   a 200-sample square wave                 2 % (a square *is* a click train)
+     *
+     * The last line is the honest boundary, and it is the same one the burst
+     * fixture in the acceptance tool has always had: a signal made of sample-level
+     * steps is a train of clicks in every statistic here, and the stage repairs
+     * it. Everything else — noise at any bandwidth, a tone, a bass line, a
+     * clipped rail, a snare with a body and a tail — sits at 2–3 σ, because the
+     * statistic is a ratio to the *local* roughness of the same band, so it is
+     * scale-free and bandwidth-free by construction. */
+    this.prevIn2 = 0;                         // …and the one before that
+    this.plateauPrev = false;                 // …and whether those two were clip plateaus
+    this.reconPrev = false;
+    this.r2W = 96;                            // the σ window, 2 ms
+    this.r2ring = new Float64Array(this.r2W);
+    this.r2sum = 0;
+    this.r2i = 0;
+    this.r2count = 0;
+    this.ev = [];                             // detections waiting for their fit window
+    this.rings = [];                          // …and the ring models being subtracted
+    this.n = 0;                               // the absolute index of the sample in hand
+    this.w = 0;
+    this.inp = 0;
+    this.dryOut = 0;                          // the input this stage is working from
+    // The detector's prediction is fed with the *raw* input: it has to see the
+    // click before the repair window opens, so it cannot wait for the repaired
+    // signal to come back to it the way the repairer's own prediction does.
+    this.dp1 = new Biquad(); this.dp1.setLowpass(sr, 4000, 0.707);
+    this.dp2 = new Biquad(); this.dp2.setLowpass(sr, 4000, 0.707);
+    // The repairer's prediction: 24 dB/oct low pass, fed with the *repaired*
+    // signal so that a replaced sample can never leak back into the filter state
     this.pred = new Biquad(); this.pred.setLowpass(sr, 4000, 0.707);
     this.pred2 = new Biquad(); this.pred2.setLowpass(sr, 4000, 0.707);
     this.fast = new EnvFollower(sr, 1 / sr, 0.0006, 1);   // instant attack: 1-sample spikes
     this.slow = new EnvFollower(sr, 0.004, 0.025, 1);
-    this.hang = 0;                    // keeps the repair alive for the neighbours
-    this.inp = 0;
+    /* ── the *shape* of the deviation: the second witness ──────────────────
+     * The fast/slow ratio above answers "how far above its own recent average
+     * is this sample", and it under-reads exactly the pops that arrive where
+     * the music carries energy in the same band: a one-sample spike is diluted
+     * by the slow envelope's average, so the same pop reads ratio 7 in a quiet
+     * bar and 2.3 in a bright one. What it *looks like* there is the second
+     * witness, and it is the classic one: an impulse is a **unipolar**
+     * deviation of the sample from its own low-frequency continuation, while
+     * the music's own HF residual is zero-mean noise. Over the last couple of
+     * milliseconds the two polarities of the signed residual are occupied to
+     * the same depth for noise — `asym` near 0 — and to very different depths
+     * for a spike, so `asym` near 1 is a click and 0.2 is music. Measured on
+     * the audit fixture (pink low-passed at 9 kHz, pops at 9 per second): the
+     * settled pop reads 0.85 median, 0.66 at the tenth percentile; the same
+     * material without pops crosses 0.4 in 0.8 % of its samples; a snare
+     * attack, which raises the *signal's* envelope as well — its HF is part of
+     * the hit, not a spike on top of it — reads 0.18 median. Two milliseconds
+     * is the window that separates those three: at 1 ms the music's own noise
+     * crosses 0.4 four times as often (3.8 %), at 4 ms a second excursion
+     * inside the window cancels the first and the pops' own reading falls back
+     * into the noise's (measured). */
+    this.dHi = 0;
+    this.dLo = 0;
+    this.shapeRate = Math.exp(-1 / (sr * 0.002));
+    // How much of this signal lives above 4 kHz *on average* — the reference the
+    // level gate below measures a spike against (a one-second average of the slow
+    // envelope, seeded from the first sample so the first second is right).
+    this.ref = 0;
+    this.refRate = 1 - Math.exp(-1 / (sr * 1.0));
+    // The detector's own warm-up, in samples (see tick). Both envelopes start
+    // at zero, so their *ratio* starts at infinity and the detector would call
+    // the first samples of every file a click; and even seeded, the fast
+    // envelope's 0.6 ms attack against the slow one's 4 ms attack holds the
+    // ratio above the threshold for the first ten milliseconds. So the stage
+    // *listens* for its first samples and repairs nothing in them.
+    this.warm = Math.max(32, Math.round(sr * 0.00133));
+    this.warmLeft = this.warm;
+    this.seedMax = 0;
   }
   reset() {
-    this.pred.reset(); this.pred2.reset(); this.fast.v = 0; this.slow.v = 0;
-    this.hang = 0; this.inp = 0;
+    this.dp1.reset(); this.dp2.reset(); this.pred.reset(); this.pred2.reset();
+    this.fast.v = 0; this.slow.v = 0;
+    this.dHi = 0; this.dLo = 0;
+    this.ring.fill(0); this.plan.fill(0); this.mark.fill(0);
+    this.w = 0; this.inp = 0; this.dryOut = 0; this.prevIn = 0;
+    this.prevIn2 = 0; this.plateauPrev = false; this.reconPrev = false;
+    this.r2ring.fill(0); this.r2sum = 0; this.r2i = 0; this.r2count = 0;
+    this.ev.length = 0; this.rings.length = 0; this.n = 0;
+    this.ref = 0;
+    this.warmLeft = this.warm;
+    this.seedMax = 0;
   }
-  tick(x, amount) {
-    if (amount <= 0.0001) { this.inp = x; return x; }
-    const p = this.pred2.process(this.pred.process(this.inp));
-    const d = x - p;
+  /** How much of the sample `o` samples away from a click is repaired. */
+  shape(o) {
+    const up = (o + this.pre) / this.rise;
+    const down = (this.post - o) / this.fall;
+    const g = up < down ? up : down;
+    return g < 0 ? 0 : g > 1 ? 1 : g;
+  }
+  /** A sample already in the delay line, by its absolute index. */
+  at(abs) {
+    const L = this.ring.length;
+    return this.ring[(this.w - (this.n - abs) + 2 * L) % L];
+  }
+  /* ── what the window behind a detection is, in one number ────────────────
+   * The fitted model: r(k) = exp(-k/τ)·(a·cos ωk + b·sin ωk), k measured from
+   * the detection. The amplitude is the *matched* one — A = Σ w·y·e^{-jωk} /
+   * Σ w² with w(k) = exp(-k/τ), a complex division that never inverts a matrix,
+   * so a short window stays well conditioned — and the candidate whose
+   * explained energy |A|²·Σw² is largest wins. The share of the window that
+   * model accounts for, R², is what licenses the removal: a click's ring is one
+   * damped tone, a hi-hat or a snare is noise, and noise explains a tenth of
+   * itself with one tone at best. Measured (probes wr29/wr30/wr31): rings
+   * 0.26 … 0.48 over the family's windows, music 0.008 … 0.097 — the gate below
+   * sits in that gap. */
+  fitTail(pos, strength) {
+    const sr = this.sr, tail = this.tail;
+    let yy = 0;
+    for (let k = 2; k <= tail; k++) { const y = this.at(pos + k); yy += y * y; }
+    if (!(yy > 1e-12)) return null;
+    const dec = new Float64Array(tail + 1);
+    let best = null;
+    for (const tauMs of [0.4, 0.6, 1.0, 1.5, 2.5, 4]) {
+      const tauS = sr * tauMs * 1e-3, d = Math.exp(-1 / tauS);
+      let w2 = 0, e = 1;
+      for (let k = 0; k <= tail; k++) { dec[k] = e; if (k >= 2) w2 += e * e; e *= d; }
+      for (let f = 6000; f <= 13000; f += 250) {
+        const w = 2 * Math.PI * f / sr, c = Math.cos(w), sn = Math.sin(w);
+        let sc = 0, ss = 0, cw = 1, sw = 0;
+        for (let k = 0; k <= tail; k++) {
+          if (k >= 2) { const g = dec[k], y = this.at(pos + k); sc += g * cw * y; ss += g * sw * y; }
+          const nc = cw * c - sw * sn, ns = cw * sn + sw * c; cw = nc; sw = ns;
+        }
+        const a = 2 * sc / (w2 + 1e-30), b = 2 * ss / (w2 + 1e-30);
+        const expl = (a * a + b * b) * w2 / 4;
+        if (!best || expl > best.expl) best = { expl: expl, a: a, b: b, f: f, d: d, tauS: tauS };
+      }
+    }
+    const r2 = best.expl / yy;
+    const amp = Math.sqrt(best.a * best.a + best.b * best.b);
+    if (r2 < 0.2 || !(amp > 1e-6)) return null;
+    const len = Math.min(Math.round(sr * 0.008), Math.round(3 * best.tauS));
+    return { pos: pos, a: best.a * strength, b: best.b * strength,
+      w: 2 * Math.PI * best.f / sr, tauS: best.tauS, len: len, fade: Math.max(4, Math.round(sr * 0.001)), r2: r2 };
+  }
+  tick(x, amount, reconstructed, clipLevel) {
+    if (amount <= 0.0001) {
+      this.inp = x; this.dryOut = x;
+      this.prevIn2 = this.prevIn; this.prevIn = x;
+      this.plateauPrev = false; this.reconPrev = false;
+      /* The delay line stays current while the stage is bypassed — engaging it
+       * mid-file must not fit a window of stale samples — and whatever the tail
+       * stage was holding is dropped. */
+      this.ring[this.w] = x; this.plan[this.w] = 0; this.mark[this.w] = 0;
+      this.w = (this.w + 1) % this.ring.length; this.n++;
+      this.ev.length = 0; this.rings.length = 0;
+      return x;
+    }
+    // ── 1 · the detector, on the sample that just arrived ──────────────────
+    const pd = this.dp2.process(this.dp1.process(x));
+    const d = x - pd;
     const ad = d < 0 ? -d : d;
     const f = this.fast.tick(ad);
     const s = this.slow.tick(ad);
+    // …and its *shape*: the recent extremes of the signed residual, each on its
+    // own short release. For the music's own HF they are equal and opposite;
+    // for an impulse one of them is the spike and the other is only the noise
+    // around it (see the constructor for the measurements).
+    this.dHi = d > this.dHi ? d : this.dHi * this.shapeRate;
+    this.dLo = d < this.dLo ? d : this.dLo * this.shapeRate;
+    const asym = Math.abs(this.dHi + this.dLo) / (this.dHi - this.dLo + 1e-12);
     // a click is a *short* broadband burst: the fast envelope spikes far above
     // the slow one, while musical transients raise both together
     const ratio = f / (s + 1e-9);
     let k = clamp((ratio - 1.25) / 1.5, 0, 1);
-    k *= clamp((f - 0.008) / 0.05, 0, 1);
-    k *= k * (3 - 2 * k);                              // smoothstep
-    k *= amount;
-    // a real pop spans 2–3 samples: hold the repair briefly, decaying, so the
-    // trailing half of the spike is repaired as well
-    if (k > this.hang) this.hang = k; else this.hang *= 0.72;
-    const m = k > this.hang ? k : this.hang;
-    const out = x + (p - x) * m;
+    /* ── the detector's own warm-up ─────────────────────────────────────────
+     * A ratio of two envelopes that are both on their way up from zero is not
+     * the ratio of this statistic, and this is where it showed: at the first
+     * sample `f / (s + 1e-9)` is 1e9, the detector called it a click, and the
+     * repair replaced the head of the file with the low-pass prediction of a
+     * signal that had not arrived yet — which is silence. The two feed each
+     * other (`this.inp` is fed from the *repaired* output) and the file lost
+     * its first ~256 samples: measured on a plain pink bed, the chain's output
+     * was exactly 0.000 for the first 256 samples, and only the dry/wet
+     * crossfade of the master power kept that from being heard — which is
+     * itself the head-of-render bug this warm-up was found beside. Seeding the
+     * envelopes from the first residual is not enough: the fast envelope's
+     * 0.6 ms attack against the slow one's 4 ms holds the ratio at 3–8 for the
+     * next ten milliseconds (measured), i.e. a pop-sized confidence on quiet
+     * music. So the first 1.3 ms is spent *listening*: the largest residual in
+     * that window – by then the 4 kHz filters have long settled – becomes the
+     * starting point of both envelopes, and the ratio starts at 1 where the
+     * file's own HF activity sits. A pop after that window is still a spike
+     * against that seed, and the cost is stated: an event inside the first
+     * 1.3 ms is not repaired. */
+    if (this.warmLeft > 0) {
+      this.warmLeft--;
+      if (ad > this.seedMax) this.seedMax = ad;
+      if (this.warmLeft === 0) { this.fast.v = this.seedMax; this.slow.v = this.seedMax; this.ref = this.seedMax; }
+      k = 0;
+    }
+    // How sure the detector is that there was anything *there* to repair. This
+    // gate has to be relative to the file, not to a fixed number: a transfer
+    // digitised at −24 dBFS is the same record as one at −3, and an absolute
+    // floor (f between 0.008 and 0.05) made the stage mute on the quiet one —
+    // measured on the worn record, the dose that leaves 6 of 108 pops above a
+    // clean copy at full scale left **63** of them above it at −24 dBFS, with
+    // the detector's ratio statistic literally unchanged (it is scale-free:
+    // p50 1.08, p99 2.3, max 6.7 at both levels). The thresholds therefore
+    // scale with the file's own HF activity, which is the very same 0.111 that
+    // the old constants were measured against — so a full-scale file behaves
+    // exactly as it did, and a quiet one behaves like the record it is.
+    this.ref += (s - this.ref) * (this.ref > 0 ? this.refRate : 1);
+    const act = this.ref > 1e-3 ? this.ref : 1e-3;      // never below −60 dBFS
+    k *= clamp((f - 0.072 * act) / (0.45 * act), 0, 1);
+    // ── what the amount means here ────────────────────────────────────────
+    // It is *how sure the detector has to be*, not how much of the click is
+    // allowed to stay. Scaling the repair depth by the amount (the law before
+    // this one) meant that at the automatic dose — 0.71 on a crackly record —
+    // every detected pop kept 29 % of its amplitude in the file: the worst
+    // tenth of the pops came out 9.5 dB above the music at the automatic
+    // strength against 2.6 dB at full strength, with the same pops detected in
+    // both runs. A pop that survives at −9 dB is still a pop, so the knob moves
+    // the *threshold* instead: a detected click is repaired, and a lower
+    // setting asks the detector for more confidence before it touches anything.
+    /* A shape that is an impulse asks for less of that confidence: the ratio
+     * under-reads a spike, so where `asym` says the deviation is one-sided the
+     * detector does not have to be as sure by the ratio alone — by a quarter of
+     * the scale at full strength, half that at the automatic dose, and nothing
+     * on the music's own symmetric HF (measured: the audit fixture's quietest
+     * pop reads ratio 2.3, i.e. 0.08 of the repair, and lands at −1.5…−4.4 dB
+     * over the bed once its shape is heard; the same law moves the drum kit's
+     * touched fraction from 3.2 % to 4.4 % and its worst snare window from
+     * −66 to −62 dB against the −55 dB guard). */
+    /* ── where this detector stops, measured ───────────────────────────────
+     * At the automatic dose (0.71) the map above plus the knee below only let a
+     * spike through once the ratio reads ≈ 2.2, and everything quieter than that
+     * is the file's own music as far as this stage is concerned. A fixture with
+     * the pops' amplitude spread over the same 0.34…1.70 the acceptance tool
+     * uses leaves its *three quietest* pops in place: they read ratio 1.86–2.02
+     * with asym 0.30–0.33 — below the 0.32…0.52 band that would discount the
+     * threshold for this shape, so the shape term is worth 0.007 here, not the
+     * 0.18 it could be. Measured in four beds, from one low-passed at 5 kHz to
+     * one open at 12 kHz: 51–52 of 54 pops repaired, and *the same two or three*
+     * left in every bed, so the floor belongs to the statistic and not to a
+     * fixture. The trade, measured on the two fixtures that guard the stage:
+     *
+     *   map as shipped (1.25 / 1.5)   kit snare −62.1 dB ·  4.4 % of the kit ·  2.7 % of a clean master
+     *   lowered to ≈ 2.0 (1.10/1.20)  kit snare −37.7 dB · 30.5 %           · 30.3 %
+     *   lowered to ≈ 1.9 (1.05/0.90)  kit snare −13.6 dB · 61.6 %           · 81.7 %
+     *
+     * (dsp.test.js holds the snare at −55 dB and the clean master is the audit's
+     * wide-band fixture.) The *shape* half of the same condition is priced too,
+     * because it is the one lever that table does not cover: the survivors read
+     * asym 0.30–0.33, under the 0.32…0.52 band, so their discount is worth
+     * 0.007 rather than the 0.18 it could be — and moving the band down to where
+     * they would collect it is not a lever either. Measured on the audit row's
+     * own bed (54 pops; the row re-measures all of this):
+     *
+     *   shape band 0.32…0.52 · weight 0.25 (shipped)   4.37 % of the kit ·  2.74 % of a clean master · 3 left
+     *   shape band 0.28…0.36 · weight 0.50            21.81 %           · 20.20 %               · 3 left
+     *
+     * — five times the kit price and seven times the master price for the same
+     * three pops. What they would have to *read* is arithmetic on this stage's
+     * own constants: firing needs `k ≥ 1 − 0.5·amount`, so the knee wants ratio
+     * ≈ 2.22 at the automatic dose and ≈ 2.04 at the largest amount a profile can
+     * hand the stage (0.95, the cap), while the leftovers read 2.03, 1.86 and
+     * 1.80 — the strongest sits exactly on the edge of a full-strength dose, the
+     * other two below any dose a profile can ask for. Reaching the quietest pops
+     * of that fixture therefore costs the snare 24 dB of the 55 it has and
+     * rewrites a third of a clean master, which is why the floor is written down
+     * here rather than moved: those pops are, in this statistic,
+     * indistinguishable from music.
+     *
+     * What the floor leaves is on the same row — measured with the acceptance
+     * tool's own window (4–12 kHz, the popped 65 samples, the clean copy as the
+     * reference), and, since the third witness closed it, measured there on the
+     * *control* render with the witness switched off, so the numbers stay the
+     * price of the map rather than a description of the shipped stage: the pops
+     * the gate cannot reach stand 6.1 dB worst / 3.4 dB
+     * median *over* the clean copy — they are spikes on a bed that is quiet
+     * there, which is exactly why the ratio under-reads them — while the pops the
+     * stage does repair land 9.0 dB *under* it, because a 4 kHz prediction cannot
+     * put back the top end it replaced over the 0.33 ms it reaches in front of a
+     * spike and the 1 ms behind it. The floor is where those two numbers trade: a
+     * handful of clicks the statistic cannot separate from music, against a fifth
+     * of every clean master dulled by 9 dB per pop, and the row re-measures all of
+     * it. — The *map* below still stands exactly as priced here; what closed the
+     * floor is not the map but the third witness above it, which by construction
+     * is not a band statistic and so does not have this ceiling. */
+    /* ── the third witness, on the same decision ────────────────────────────
+     * The second difference of the sample *one behind* the one in hand — which
+     * is what a causal statistic can know: x[p−2] − 2x[p−1] + x[p] is D2 at
+     * p−1, and p−1 is still 17 samples away from being emitted. The bar moves
+     * with the dose the same way the ratio's does (the dose asks how sure the
+     * detector has to be, not how much of a pop may stay): at the automatic
+     * 0.71 it sits at 4.9…6.9 σ, at a healthy card's 0.08 at 6.8…8.8 σ, and at
+     * full strength at 4.9…6.9 σ once the knee below has done its work. The
+     * width of that band is the whole trade, and it was swept against the
+     * stage's guards (probe tools/work/sp11.js; per 8 s of material, and the
+     * pops are the audit's four beds): The window needs its whole 96 samples before the
+     * statistic means anything, so the branch is off for the first 2 ms of a
+     * file — the same listening period the detector's own warm-up spends, for
+     * the same reason. It is deliberately *not* multiplied by the level gate
+     * above: that gate exists to make the ratio relative to the file's own
+     * activity, and this branch is already a ratio to the local activity of its
+     * own band. It *is* folded in **before the knee below**, and that placement
+     * is measured: a hi-hat's onset is a step in this statistic too (a 0.2 ms
+     * attack of a 7–17 kHz burst, against the σ of the quiet bed before it),
+     * and the knee is what keeps the stage off it — at a healthy card's dose the
+     * ratio's own confidence there buys 0.038 of a repair. Bypassing the knee
+     * moved the loudest of the performance fixture's 16 hits by 1.63 dB, which
+     * is the one thing this stage may not do (dsp.test.js holds it to 1.0 dB);
+     * through the knee it moves by less than 0.1 dB.
+     *
+     *   band             pops left   performance   kit snare   kit touched   clean master
+     *   5+3 … 8+4              3     0.52 dB       −62.1 dB      4.40 %        2.74 %
+     *   4.5+3 … 6.5+3          1     0.52 dB       −62.1 dB      4.85 %        2.74 %
+     *   4+3 … 6+3              0     0.52 dB       −62.1 dB      4.94 %        2.74 %
+     *   4.5+3 … 6+2            0     0.52 dB       −62.1 dB      4.94 %        2.74 %
+     *
+     * i.e. closing the floor completely costs half a percentage point of the kit
+     * being touched and moves nothing else — the snare, the performance's hits
+     * and the clean master read the same number to the digit at every band. */
+    const d2 = this.prevIn2 - 2 * this.prevIn + x;
+    if (this.r2count >= this.r2W && !this.plateauPrev && !this.reconPrev) {
+      const sigma = Math.sqrt(this.r2sum / this.r2W);
+      /* A sample that straddles the clip rail is the clip's own signature, not a
+       * click: clipping *creates* a sample-level corner (that is what the repair
+       * stage exists for), and the plateau test further down only ever sees the
+       * sample in its own hand. This witness looks three samples wide — the two
+       * before the one in hand and the one in hand — so the rail guard has to be
+       * three samples wide too. Measured: without it the branch wrote 4.3 dB more
+       * than it may into the *unclipped* part of the clipped fixtures (matrix,
+       * `…and where it must write nothing`); with it those rows are back to their
+       * pre-round values. */
+      let railed = false;
+      if (clipLevel > 0.02) {
+        railed = (x < 0 ? -x : x) >= clipLevel
+          || (this.prevIn < 0 ? -this.prevIn : this.prevIn) >= clipLevel
+          || (this.prevIn2 < 0 ? -this.prevIn2 : this.prevIn2) >= clipLevel;
+      }
+      if (!railed && sigma > 0) {
+        const kR = smoothstep(4 + 3 * (1 - amount), 6 + 3 * (1 - amount),
+          (d2 < 0 ? -d2 : d2) / sigma);
+        if (kR > k) k = kR;
+      }
+    }
+    /* ── …and digital silence does not fill the window ──────────────────────
+     * A look-ahead stage in front of this one emits `look` samples of *exact*
+     * zeros before the first real sample (measured: with the de-clipper engaged
+     * the de-clicker's input is 0.000000 for its first 272 samples and then
+     * jumps to full level — a step out of digital silence, which is a genuine
+     * click in this statistic and would be repaired as one). Audio at any level
+     * carries a floor — dither, tape, room — so exact zeros are not signal: they
+     * neither fill the window nor count towards it, and the branch simply waits
+     * for its 96 real samples. The same listening rule the detector's own
+     * warm-up follows, for the same reason. A pop written *into* digital silence
+     * is therefore not repaired; it is also 90 dB below anything audible. */
+    const silent = x === 0 && this.prevIn === 0 && this.prevIn2 === 0;
+    if (!silent) {
+      const sq = d2 * d2;
+      this.r2sum += sq - this.r2ring[this.r2i];
+      this.r2ring[this.r2i] = sq;
+      this.r2i = (this.r2i + 1) % this.r2W;
+      if (this.r2count < this.r2W) this.r2count++;
+    }
+    const th = 1 - 0.5 * amount
+      - 0.25 * amount * smoothstep(0.32, 0.52, asym);
+    k = smoothstep(th, th + 0.30, k);
+    // ── 2 · nothing is emitted unheard: the sample waits in the delay line ──
+    const L = this.ring.length;
+    this.ring[this.w] = x;
+    // A sample the de-clipper reconstructed is not a click, whatever it looks
+    // like in the detector (see DeClipper): it is a *peak*, and replacing it
+    // with a low-frequency prediction would take the peak off again.
+    if (reconstructed) k = 0;
+    // …and neither is the flat top this detector would otherwise happily call a
+    // click. A clipped peak *is* a broadband discontinuity — it has to be, that
+    // is what clipping does to a waveform — so a de-clicker left to itself
+    // pulls the flat tops of a loud master down to a third of their level
+    // (measured: 0.99 → 0.15 in the middle of a plateau). Whoever is doing the
+    // repairing, the *signature* of clipping must not be repaired as a click:
+    // if this sample sits at the file's measured clipping level and does not
+    // differ from its predecessor, it is a plateau. The test is local on
+    // purpose, so it holds whether or not the de-clipper itself is engaged.
+    let prevIn = this.prevIn;
+    this.prevIn = x;
+    this.prevIn2 = prevIn;
+    let plateau = false;
+    if (clipLevel > 0.02) {
+      const ax0 = x < 0 ? -x : x;
+      const ap = prevIn < 0 ? -prevIn : prevIn;
+      const diff = ax0 - ap;
+      if (ax0 >= clipLevel && ap >= clipLevel && (x > 0) === (prevIn > 0)
+          && diff < 0.0025 && diff > -0.0025) { k = 0; plateau = true; }
+    }
+    // The flag travels *with* the sample, not with the detection: a detection
+    // at the edge of a clipped plateau plans a window that reaches back into
+    // the plateau (that is how the look-ahead works), and the plateau has to
+    // survive it. Two sources set it — the de-clipper, whose reconstructed
+    // peaks are broadband by construction, and the local test just above,
+    // which holds whether or not the de-clipper is engaged at all.
+    this.mark[this.w] = (plateau || reconstructed) ? 1 : 0;
+    this.plateauPrev = plateau;
+    this.reconPrev = reconstructed;
+    if (k > 0.02) {
+      /* …and it asks the tail stage for the ring behind it, one event at a time:
+       * a ring is over in at most 8 ms, so a second detection inside that window
+       * is either the same ring or a click the first model already covers. */
+      if (this.ev.length === 0 && this.rings.length === 0) this.ev.push({ pos: this.n, k: k < 1 ? k : 1 });
+      // a detection plans the whole window around itself, in front of the click
+      // as much as behind it (that is what the look-ahead is for)
+      for (let o = -this.pre; o <= this.post; o++) {
+        const g = k * this.shape(o);
+        if (g <= 0.005) continue;
+        const idx = (this.w + o + L) % L;
+        if (g > this.plan[idx]) this.plan[idx] = g;
+      }
+    }
+    // ── 3 · emit the sample that is `look` samples old ─────────────────────
+    const r = (this.w - this.look + L) % L;
+    const xd = this.ring[r];
+    let m = this.plan[r];
+    if (this.mark[r]) m = 0;                   // a window planned over a plateau is cancelled
+    this.mark[r] = 0;
+    this.plan[r] = 0;
+    this.dryOut = xd;                          // what the A/B compares against
+    // the prediction always runs, so its state is continuous whether or not the
+    // sample in hand is being repaired (a filter switched on for one window at
+    // a time would ring at both of its ends)
+    /* ── what stands in the window, measured ───────────────────────────────
+     * Inside a full-replacement window this filter is fed its own output, so it
+     * has no input left and runs to a fixed point: measured sample by sample on
+     * the acceptance fixture (#374596), `pred` freezes at −0.1785 for 60+ samples
+     * and the window becomes a ≈1.35 ms DC plate. That is audible as a hole
+     * (the residual is as loud as the music the window removed: median 0.8 dB of
+     * the music's own 4–12 kHz, worst 8.1), and it is still the best of the four
+     * fills that were measured on the same fixture — band 4–12 kHz over the clean
+     * copy · leftover against the music's peaks · the drum kit:
+     *
+     *   as shipped (self-fed low pass)  median −10.2 · worst +4.0 · 3/72 over · fill cost med 0.7 dB · kit: snare −62.1, 4.4 %
+     *   the same filter fed the dry x  median  −0.8 · worst +39.8 · 30/72      · med 4.1 · worst 46.8 · kit: snare −70.8, 2.9 %
+     *   3-tap polynomial extrapolation  median  −6.5 · worst +16.0 · 13/72     · med 20.1 · worst 40.9 · kit: snare −50.4, 69.7 %
+     *   4-tap polynomial extrapolation  median  +2.9 · worst +14.6 · 38/72     · med 6.3 · worst 27.9 · kit: snare −0.3, 98.8 %
+     *
+     * The extrapolators carry gain (3×, 4×) and therefore fire on snares (the
+     * kit is 70–99 % touched and the −55 dB snare guard is gone), and letting the
+     * *dry* pop into the prediction is worse on every witness. So the trade the
+     * shipped fill makes — a low-frequency hole in exchange for the pop — is the
+     * best measured one; the window *width* was swept too (pre/post 4/8 … 16/48)
+     * and moves the leftover by under 1 dB, so the width is not the lever either. */
+    const p = this.pred2.process(this.pred.process(this.inp));
+    let out = m > 0.001 ? xd + (p - xd) * m : xd;
+    /* ── 4 · …and the ring the click left behind, on the same detection ─────
+     * Applied to the sample being emitted, never to the dry A/B reference: the
+     * model is parameterised from the detection, so the removal is an
+     * *extrapolation* of a tone that is already measured — the fit window itself
+     * is behind the emitted sample by `pre + 1` samples of the look-ahead.
+     *
+     * …and it is scaled by what the de-clicker's own window has *not* already
+     * taken: that window replaces the flagged samples with a 4 kHz prediction of
+     * the repaired signal, so a ring inside it is gone with weight `m` — the mix
+     * applied to this very sample. Subtracting the model there as well removes
+     * the same tone twice and, since a prediction of a 9 kHz tone is near zero,
+     * puts it back inverted: measured on a synthetic 9 kHz ring that is exactly
+     * what happened — the fit was right to the hundredth (f0 9000.0 Hz, a 0.4626,
+     * b 0.1791 against 0.458 / 0.19 predicted) and the output was *worse* than
+     * the input, with the whole file's crackle index up from 0.512 to 0.938
+     * instead of down. With the model weighted by `1 − m`, the two stages share
+     * the ring exactly: the window's share follows the repair's own shape, the
+     * tail's share takes over as that shape falls to zero, and nothing is
+     * subtracted twice. The last millisecond of the model fades out, so the
+     * removal cannot end in a step of its own. */
+    const ne = this.n - this.look;
+    for (let i = this.rings.length - 1; i >= 0; i--) {
+      const md = this.rings[i];
+      const kk = ne - md.pos;
+      if (kk > md.len) { this.rings.splice(i, 1); continue; }
+      if (kk < 0) continue;
+      const env = (1 - m) * Math.exp(-kk / md.tauS) * Math.min(1, (md.len - kk) / md.fade);
+      out -= env * (md.a * Math.cos(md.w * kk) + md.b * Math.sin(md.w * kk));
+    }
+    for (let i = this.ev.length - 1; i >= 0; i--) {
+      const e = this.ev[i];
+      if (this.n - e.pos < this.tail) continue;
+      this.ev.splice(i, 1);
+      const md = this.fitTail(e.pos, e.k);
+      if (md) this.rings.push(md);
+    }
     this.inp = out;                                    // filter sees the repair
+    this.n++;
+    this.w = (this.w + 1) % L;
     return out;
   }
 }
@@ -796,9 +2092,22 @@ class GlueComp {
     this.rel = 0.180;
     this.env = new EnvFollower(sr, this.atk, this.rel, GLUE_DECIM);
     this.gain = new Ramp(GLUE_DECIM, 1);
-    this.thr = 0.079;          // ≈ −22 dBFS
+    this.thr = 0.079;          // ≈ −22 dBFS *at the file's own peak* (see setRef)
+    this.ref = 1;              // the file's peak as a scale factor, 1 = full scale
   }
   reset() { this.env.v = 0; this.gain.reset(1); }
+  /**
+   * Where "−22 dBFS" sits, for this file. The compressor is a piece of taste,
+   * not an absolute target: what it should do is grab the peaks that stand
+   * above the *programme's* own level, and how loud the upload happens to be
+   * says nothing about the programme. Measured on one fixture 20 dB down, the
+   * fixed threshold let the compressor do nothing at all (effect −45.8 dB at
+   * 0 dBFS, none at −20 dBFS) — the same slider, the same measurement, no
+   * compression. Scaling the threshold by the file's peak keeps the nominal
+   * behaviour (a file at full scale: the threshold is exactly the old 0.079)
+   * and makes the glue a function of the waveform.
+   */
+  setRef(refLin) { this.ref = clamp(refLin, 0.002, 4); }
   /**
    * Per-song timing. A drum-driven recording needs the compressor to let the
    * hit through (a slower attack) and to be back at unity before the next one
@@ -819,7 +2128,8 @@ class GlueComp {
     if (amount <= 0.0001) return x;
     const ax = x < 0 ? -x : x;
     const e = this.env.tick(ax);
-    const gr = e > this.thr ? Math.sqrt(this.thr / e) : 1;
+    const thr = this.thr * this.ref;
+    const gr = e > thr ? Math.sqrt(thr / e) : 1;
     this.gain.set(1 - amount * (1 - gr));
     const g = this.gain.tick();
     const makeup = 1 + amount * (1 - gr) * 0.75;
@@ -884,6 +2194,230 @@ class HumNotch {
 /* per-channel processing chain                                                */
 /* -------------------------------------------------------------------------- */
 
+/* -------------------------------------------------------------------------- */
+/* true-peak limiter — the file's last stage                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * True-peak limiter (the export ceiling).
+ *
+ * The chain's soft clip keeps *samples* under full scale, and that is not the
+ * same thing as keeping the *waveform* under it: a signal that turns around
+ * between two samples — which is what every limit and every bright master does
+ * — reaches higher between them than at them. Measured over the four fixtures
+ * that ship with the app, a file whose sample peak sits at −0.02 dBFS arrives
+ * at the encoder at up to +1.0 dBTP, and a codec that has to encode an
+ * overdriven waveform distorts it. Every streaming target is a *true-peak*
+ * target for exactly this reason (−1 dBTP, −2 dBTP when a master is louder than
+ * −14 LUFS), and the app's own measurement reports the same figure as `ispDb` —
+ * so this stage closes the loop between what the app measures and what it does.
+ *
+ * It is a look-ahead limiter, not a clipper: the peak is *estimated* between
+ * the samples (a Catmull-Rom curve through the neighbouring samples, evaluated
+ * at four points per interval), the gain needed to keep that estimate under the
+ * ceiling is computed `look` samples ahead of the sample it applies to, and the
+ * applied gain is the minimum over that window — so the reduction is already
+ * ramping down when the peak arrives, which is why it does not click and does
+ * not overshoot. Release is slow (80 ms) and symmetric across the channels: the
+ * detector takes the maximum over all channels, so a loud left channel cannot
+ * pull the right one with it and the image stays put.
+ *
+ * With a ceiling of 0 dB (the default) the stage is *off*: no delay, no gain,
+ * the output is the input — a file that does not need a limiter must not get
+ * one. `latency` reports the look-ahead only while it is engaged.
+ */
+/* --------------------------------------------------------------------------
+ * Inter-sample peak ("true peak"): 4× oversampled, 32-tap Hann-windowed sinc.
+ *
+ * The limiter and the *measurement* (`ispStep` in dsp-utils.js, which reports
+ * `ispDb` and drives the diagnosis) build this table from the same numbers and
+ * judge the same intervals — a limiter that estimates the peak differently from
+ * the meter that reports it cannot be trusted about its own ceiling. The short
+ * seven-tap sinc that used to sit in both places read 0.5 dB *low* on bright
+ * transient material: measured against ffmpeg's ebur128 and against an
+ * independent 32-tap meter, the app reported −2.10 dBTP for an export both
+ * other meters put at −1.60 — 0.4 dB above the ceiling it had just been given.
+ * ----------------------------------------------------------------------- */
+const ISP_TAPS = 32;
+const ISP_PHASES = 4;
+const ISP_TABLE = (() => {
+  const N = ISP_TAPS;
+  const t = [];
+  for (let p = 1; p < ISP_PHASES; p++) {
+    const taps = new Float64Array(N);
+    for (let n = 0; n < N; n++) {
+      const x = (n - (N / 2 - 1)) - p / ISP_PHASES;
+      const sinc = x === 0 ? 1 : Math.sin(Math.PI * x) / (Math.PI * x);
+      const w = 0.5 - 0.5 * Math.cos(2 * Math.PI * (n + 0.5) / N);
+      taps[n] = sinc * w;
+    }
+    let sum = 0;
+    for (let n = 0; n < N; n++) sum += taps[n];
+    for (let n = 0; n < N; n++) taps[n] /= sum;
+    t.push(taps);
+  }
+  return t;
+})();
+
+class TruePeakLimiter {
+  constructor(sr) {
+    this.sr = sr;
+    this.on = false;
+    this.delay = 0;                 // samples of look-ahead (the reported part)
+    this.len = 1;
+    this.lim = 1;
+    this.rel = 1;
+    this.w = 0;
+    this.pos = 0;
+    this.ring = [];
+    this.dqG = new Float64Array(2);
+    this.dqI = new Float64Array(2);
+    this.head = 0;
+    this.tail = 0;
+    this.g = 1;
+  }
+
+  reset() {
+    for (const r of this.ring) r.fill(0);
+    this.w = 0; this.pos = 0; this.g = 1;
+    this.head = 0; this.tail = 0;
+  }
+
+  /**
+   * Configure for this render: `ceilDb` is the target in dBTP (0 = the stage is
+   * off, and then nothing is delayed either).
+   */
+  set(sr, nCh, ceilDb) {
+    const on = ceilDb < -0.01;
+    // 1.5 ms of look-ahead — the window the gain is minimised over — plus the
+    // sixteen samples the interpolator needs to see *past* the interval it
+    // judges (ISP_TAPS/2; the kernel is symmetric, so half of it is future)
+    const look = Math.max(8, Math.round(sr * 0.0015));
+    const delay = on ? look + ISP_TAPS / 2 : 0;
+    const len = delay + ISP_TAPS + 8;
+    if (delay !== this.delay || this.ring.length !== nCh) {
+      this.ring = [];
+      for (let c = 0; c < nCh; c++) this.ring.push(new Float32Array(len));
+      this.dqG = new Float64Array(look + 3);
+      this.dqI = new Float64Array(look + 3);
+      this.head = 0; this.tail = 0; this.w = 0;
+    }
+    if (on !== this.on) this.g = 1;
+    this.on = on;
+    this.delay = delay;
+    this.len = len;
+    this.look = look;
+    // A tenth of a decibel of margin below the target: the estimate below is the
+    // same one the app's own `ispDb` is built from, and the limiter's gain only
+    // ever smooths the waveform — so the margin is insurance, not slack. That
+    // pair of statements is only worth anything while the *estimate* is honest,
+    // which is what the 32-tap kernel is for (see ISP_TABLE).
+    this.lim = Math.pow(10, (Math.min(0, ceilDb) - 0.1) / 20);
+    this.gate = this.lim * 0.5;      // an interval this far down cannot overshoot
+    this.rel = 1 - Math.exp(-1 / (Math.max(1, sr) * 0.08));   // ~80 ms release
+    /* ── what this stage costs a master that has no dynamics left ──────────
+     * Measured on the acceptance "squashed master" fixture (itself built at
+     * three crush levels), spread = the 20 ms envelope's p98 − p05:
+     *
+     *   DR 8.1 dB  in 11.38 → out 10.38   (−1.00 dB)
+     *   DR 6.8 dB  in  9.92 → out  8.37   (−1.55 dB)
+     *   DR 5.3 dB  in  7.91 → out  5.81   (−2.09 dB)
+     *
+     * and the cause is this stage and not the compressor: with `tpCeil: 0` the
+     * same renders lose 0.44 dB, with the ceiling at −2 they lose 1.55. The
+     * mechanism is honest — a master peaking at −1.11 dBFS needs 1.1 dB of
+     * reduction to hold a −2 dBTP ceiling, and the gain is applied *inside* the
+     * loud passages (80 ms release) while the quiet ones come back up, so the
+     * loud/quiet ratio shrinks by more than the level does. A whole-file static
+     * trim instead of limiting would keep the ratio: measured on the same
+     * fixture, a trim of 0.5 / 1.0 / 1.5 / 2.0 dB (with `refDb` lowered to
+     * match, so the loudness matcher does not undo it) leaves the spread at
+     * −1.20 / −0.89 / −0.59 / −0.52 dB while the peak still lands on −2.10.
+     * What a trim costs is loudness: 1–2 dB on a class of file that the card
+     * already calls "squashed". The suite therefore *measures* the loss (the
+     * acceptance row prints it, and the row's note reads "squashed" at DR < 9)
+     * and does not yet assert against it: choosing between a 1.5 dB dynamic
+     * loss at the input's level and a 0.5 dB loss 1–2 dB quieter is a product
+     * decision about the promise "the output keeps the upload's level", and it
+     * is the next thing to decide here. */
+  }
+
+  /**
+   * Limit one block in place, across all channels — the detector takes the
+   * maximum over the channels, so a loud left channel cannot pull the right one
+   * down with it and the stereo image stays put.
+   */
+  processBlock(dst, nCh, frames) {
+    if (!this.on) return;
+    const len = this.len, D = this.delay, lim = this.lim, cap = this.dqG.length;
+    const n = Math.min(nCh, this.ring.length);
+    for (let i = 0; i < frames; i++) {
+      const w = this.w;
+      // ── 1 · the peak *between* the samples ────────────────────────────────
+      // The very estimator the measurement uses (dsp-utils `ispStep`): 32 taps
+      // of a Hann-windowed sinc at four phases, judging the interval sixteen
+      // samples behind the newest one — so all 32 taps are history, and every
+      // interval gets looked at exactly once. Using a cheaper local curve
+      // instead (a Catmull-Rom through the neighbours) was measured against
+      // this: it reported 0.23 dB *less* than the measurement found, i.e. the
+      // limiter left the file over the ceiling while claiming otherwise.
+      // The phases are only evaluated near the ceiling (the local 32-sample
+      // maximum is the cheap gate): an interval whose loudest sample is 6 dB
+      // below the ceiling cannot interpolate its way above it.
+      let pk = 0;
+      const table = ISP_TABLE;
+      for (let c = 0; c < n; c++) {
+        const ring = this.ring[c];
+        ring[w] = dst[c][i];
+        const base = (w - (ISP_TAPS - 1) + len) % len;
+        let m = 0;
+        for (let nn = 0; nn < ISP_TAPS; nn++) {
+          const av = ring[(base + nn) % len];
+          const a = av < 0 ? -av : av;
+          if (a > m) m = a;
+        }
+        if (m > pk) pk = m;
+        if (m < this.gate) continue;
+        for (let d = 1; d < ISP_PHASES; d++) {
+          const t = table[d - 1];
+          let v = 0;
+          for (let nn = 0; nn < ISP_TAPS; nn++) v += ring[(base + nn) % len] * t[nn];
+          const av = v < 0 ? -v : v;
+          if (av > pk) pk = av;
+        }
+      }
+      // ── 2 · the gain this interval needs … ────────────────────────────────
+      const req = pk > lim ? lim / pk : 1;
+      // …tracked in a monotone deque, so the minimum over the look-ahead window
+      // is O(1) — and that minimum is what makes the attack exact: the gain has
+      // already come down by the time the peak it belongs to is emitted
+      while (this.tail !== this.head) {
+        const back = (this.tail - 1 + cap) % cap;
+        if (this.dqG[back] >= req) this.tail = back; else break;
+      }
+      this.dqG[this.tail] = req;
+      this.dqI[this.tail] = this.pos + i;
+      this.tail = (this.tail + 1) % cap;
+      const oldest = this.pos + i - this.look;
+      while (this.head !== this.tail && this.dqI[this.head] < oldest) this.head = (this.head + 1) % cap;
+      const gReq = this.dqG[this.head];
+      // ── 3 · instant attack (the window looked ahead), slow release ────────
+      // The *upward* law is the one that is easy to get wrong: a gain that only
+      // ever multiplied by a factor below one decayed towards silence on every
+      // file, whether or not it needed limiting (measured: material 6 dB under
+      // the ceiling came out 22 dB down). Down is instant; up is exponential.
+      if (gReq < this.g) this.g = gReq;
+      else this.g += (gReq - this.g) * this.rel;
+      // ── 4 · emit the sample from `D` samples ago, through that gain ───────
+      const g = this.g;
+      const r = (w - D + len) % len;
+      for (let c = 0; c < n; c++) dst[c][i] = this.ring[c][r] * g;
+      this.w = w + 1 === len ? 0 : w + 1;
+    }
+    this.pos += frames;
+  }
+}
+
 class ChannelChain {
   constructor(sr) {
     this.sr = sr;
@@ -897,9 +2431,33 @@ class ChannelChain {
 
     // Sub-sonic guard: a turntable rumble, a desk, a building — measured per
     // song (18–35 Hz above the bass band in the quiet passages) and filtered
-    // only when it was measured. 12 dB/octave at the corner the measurement
-    // asked for, bypassed completely at 0.
+    // only when it was measured. A 4-section (48 dB/octave) high-pass at the
+    // corner the measurement asked for, bypassed completely at 0.
+    /* Four sections, not one. A single 2nd-order high-pass at the corner the law
+     * picks (18–24 Hz for the excesses it sees) is −3.3 dB at 25 Hz: measured on
+     * the acceptance fixture — a bed high-passed at 60 Hz with 4th-order noise
+     * below 35 Hz mixed in at 9 dB of excess — one section moved the 25 Hz band
+     * by 0.28 dB while the analyser reported the excess falling from 14.3 to
+     * 8.2 dB. The stage was doing a tenth of what its own measurement said.
+     *
+     * Four sections is also, in this probe's numbers, the cheapest way to spend
+     * the removal: at the top of the law's range, N=4 @ 24 Hz takes 10.4 dB out
+     * of 14–30 Hz where two sections @ 30 Hz take 10.1, and it pays 0.82 dB at
+     * 35–45 Hz instead of 0.90 — a steeper knee *below* the bass, which is what
+     * the bass guitar's low E (41 Hz) wants. Steeper still (N=6 @ 20 Hz) is
+     * worse on both counts.
+     *
+     * The law has a second rung now — 42 Hz for a *saturated* floor (see presets
+     * 9a) — and there the depth matters more, not less. Measured by parking
+     * sections 2–4 at 1 Hz so that only one runs: a 42 Hz corner leaves the
+     * acceptance §4 fixture at 10.8 dB of excess, as bad as the shipped 24 Hz
+     * rung, where the four sections take it to 3.7. The stack is what lets the
+     * corner go to the top of the measured band without the removal spilling
+     * into the bass above it. */
     this.infra = new Biquad();
+    this.infra2 = new Biquad();
+    this.infra3 = new Biquad();
+    this.infra4 = new Biquad();
     this.infraHz = 0;
     this.infraTouched = false;
 
@@ -948,7 +2506,29 @@ class ChannelChain {
     this.sub = new SubSynth(sr);
     this.hiss = new DeHiss(sr, 3200);
     this.deess = new DeEsser(sr);
+    this.declip = new DeClipper(sr);
     this.click = new DeClicker(sr);
+    // Two stages have a look-ahead (the de-clipper's run memory and the
+    // de-clicker's half millisecond), and both delay everything that follows
+    // them — so the *dry* side of the master A/B crossfade is delayed by their
+    // sum. Mixing the undelayed input with a delayed output would sum a signal
+    // with a copy of itself a few milliseconds late — a comb — and the crossfade
+    // is the one place that delay would be audible. This ring is only the
+    // reference: the output is the chain's own, at the chain's own latency.
+    // …and it has to be as long as the *whole* delay the chain can report —
+    // every stage that holds its output back adds to it, and the true-peak
+    // limiter does too (it lives on the processor, so its look-ahead is sized
+    // here from the sample rate). Getting this wrong is not a subtle bug: a
+    // ring shorter than the delay makes `tick` read *before* the buffer, which
+    // is `undefined`, which is NaN by the time it reaches the output — measured
+    // on a loud master with de-clipper and limiter engaged, that was NaN audio
+    // for the first 2.7 s of the file, until the master crossfade reached
+    // exactly 1 and the dry reference stopped being mixed in.
+    const maxLook = Math.round(sr * 0.0015) + 4;
+    this.dryRing = new Float32Array(this.declip.look + this.click.look + maxLook + 16);
+    this.dryW = 0;
+    this.dry = 0;
+    this.delay = 0;
     this.glue = new GlueComp(sr);
 
     this.lowShelf = new Biquad();
@@ -999,7 +2579,7 @@ class ChannelChain {
 
   reset() {
     this.dc.reset();
-    this.infra.reset();
+    this.infra.reset(); this.infra2.reset(); this.infra3.reset(); this.infra4.reset();
     this.humNotch.reset();
     this.box[0].reset(); this.box[1].reset();
     for (const e of this.eq) { e.bq.reset(); e.last = 1e9; }
@@ -1008,7 +2588,10 @@ class ChannelChain {
     for (const r of this.reso) r.reset();
     for (const e of this.exc) e.reset();
     this.air.reset(); this.sub.reset(); this.hiss.reset();
-    this.click.reset(); this.glue.reset();
+    this.declip.reset();
+    this.click.reset();
+    this.dryRing.fill(0); this.dryW = 0; this.dry = 0; this.delay = 0;
+    this.glue.reset();
     this.dcOut.reset();
     this.lowShelf.reset(); this.highShelf.reset();
     for (const b of this.midDry) b.reset();
@@ -1050,6 +2633,9 @@ class ChannelChain {
         this.infraHz = ih;
         this.infraTouched = true;
         this.infra.setHighpass(this.sr, ih, 0.707);
+        this.infra2.setHighpass(this.sr, ih, 0.707);
+        this.infra3.setHighpass(this.sr, ih, 0.707);
+        this.infra4.setHighpass(this.sr, ih, 0.707);
       }
     } else {
       this.infraTouched = false;
@@ -1078,10 +2664,22 @@ class ChannelChain {
       }
     }
 
+    // the de-clipper's detection level: the measured plateau level of this
+    // file, 0.35 dB down (see the DeClipper comment for why the level and not a
+    // constant is what separates clipping from a merely loud waveform)
+    this.declip.th = Math.pow(10, p.declipLevel / 20);
+    // The headroom a repair *needs* is a property of the passage it is in, so
+    // the figure decays slowly (≈0.5 s) instead of being reset: consecutive
+    // clipped peaks in sparse material are hundreds of milliseconds apart, and
+    // the guard must stay lifted between them. Nothing else in the chain sees
+    // this number — the level match measures the true peak of the wet signal.
+    this.declip.head = 1 + (this.declip.head - 1) * 0.9996;
+
     for (let i = 0; i < this.reso.length; i++) this.reso[i].depth = p.reso;
     this.excEven = 0.55 + p.warmth * 0.25;
-    for (let i = 0; i < this.exc.length; i++) this.exc[i].setNoise(p.noiseLin);
-    this.air.setNoise(p.noiseLin);
+    for (let i = 0; i < this.exc.length; i++) this.exc[i].setNoise(p.noiseLin, p.refLin);
+    this.sub.setSource(p.subSrc);
+    this.air.setNoise(p.noiseLin, p.refLin);
     this.air.setSource(p.airF);
     this.airRoom = p.airRoom;
     this.sub.setNoise(p.noiseLin);
@@ -1090,16 +2688,37 @@ class ChannelChain {
     // the de-hisser splits where *this* file's noise starts
     this.hiss.setXover(p.hissF);
     this.glue.setTime(p.glueTime);
+    this.glue.setRef(p.refLin);
     this.lowShelf.setLowShelf(this.sr, 700, 0.60, -p.tilt * 5.0);
     this.highShelf.setHighShelf(this.sr, 3200, 0.60, p.tilt * 5.0);
     this.warm = p.warmth;
+    this.refLin = p.refLin;
   }
 
   /** process one sample (dry level accumulation happens in the caller) */
   tick(x) {
     const p = this.p;
+    // the dry reference: the input as it was `delay` samples ago, which is what
+    // the engaged look-ahead stages have held it back by
+    const dr = this.dryRing;
+    const dw = this.dryW;
+    dr[dw] = x;
+    const N = dr.length;
+    const di = dw - this.delay;
+    // …and the read is clamped as well: a delay longer than the ring must give
+    // a *stale* dry reference (one block of it, on the first frames of a
+    // render), never a non-finite one
+    let di2 = di < 0 ? di + N : di;
+    if (di2 < 0) di2 = 0;
+    const dly = dr[di2];
+    this.dryW = dw + 1 === N ? 0 : dw + 1;
+    this.dry = this.delay ? dly : x;
     let y = this.dc.process(x);
-    if (this.infraTouched) y = this.infra.process(y);
+    // ── the de-clipper runs first: a flat top is waveform damage, and every
+    // later stage (de-hiss, de-click, synthesis) would rather work on a
+    // waveform that has its peaks back than have to undo one
+    y = this.declip.tick(y, p.declip, this.declip.th);
+    if (this.infraTouched) y = this.infra4.process(this.infra3.process(this.infra2.process(this.infra.process(y))));
 
     // 0 ── presence follower (drives every synthesis stage)
     const ax = x < 0 ? -x : x;
@@ -1138,15 +2757,23 @@ class ChannelChain {
       }
     }
 
-    // 3 ── noise repair comes FIRST: never synthesize harmonics out of hiss
+    // 3 ── noise repair, most impulsive first. The de-clicker *has* to see the
+    // pop's own shape: a pop is broadband, so any stage in front of it that
+    // works on the top end eats part of it and leaves a remainder too small for
+    // the detector to be sure about. Measured on the worn-record fixture, the
+    // de-hisser alone pulled each pop's sample down to 18 % of its height — and
+    // the 15 dB that were left over were then invisible to the de-clicker
+    // (f/s ≈ 1.2, under its 1.25 threshold), which is why the same fixture came
+    // out with 6 pops above the clean copy when the de-hisser was in front and
+    // 2 when it was not. Hiss, unlike a pop, is stationary: the de-clicker's
+    // detector is a *ratio* and its level gate is relative to the file's own HF
+    // activity, so it does not care whether the crackle it is looking for sits
+    // in silence or in hiss. The other order was the old compromise ("never
+    // synthesise harmonics out of hiss") — but that argument is about the
+    // *synthesisers* further down, and those are still behind both stages.
+    y = this.click.tick(y, p.declick, this.declip.marked, this.declip.th);
     y = this.hiss.tick(y, p.dehiss);
-    y = this.click.tick(y, p.declick);
 
-    // 3b ── sibilance control. It sits after the noise repair and before the
-    // synthesisers for the same reason the de-hisser does: the exciter and the
-    // air synthesiser build their output *out of* this band, so a band that is
-    // about to be regenerated must not be re-synthesised from sibilant noise.
-    y = this.deess.tick(y, p.deess);
 
     // 4 ── harmonic exciter (level-proportional, noise- and presence-gated)
     // The saturation drive is deliberately independent of the amount: the
@@ -1174,13 +2801,38 @@ class ChannelChain {
     // 6 ── sub-harmonic synthesis (30–60 Hz)
     if (p.sub > 0.0001 && drive > 0.001) y += this.sub.tick(y, p.subRatio) * p.sub * drive;
 
+    // 7 ── sibilance control, and it has to be *here*: after every stage that
+    // can put energy into 5–10 kHz. It used to sit before the exciter and the
+    // air synthesiser, on the theory that a band about to be regenerated should
+    // not be regenerated from sibilant noise. The theory is sound and the
+    // placement was still wrong, because the synthesisers do not only replace
+    // what is there — they add. Measured on a fixture with 120 ms "s" bursts
+    // (acceptance matrix, sibilance row): the de-esser alone moved the band by
+    // −1.6 dB, and the exciter and air synthesiser behind it handed back +2.1 dB
+    // (air alone) and +0.5 dB (exciter alone), so the chain as a whole ended up
+    // 0.8 dB *brighter* in the sibilance band than the untreated file. A repair
+    // that a later stage can undo is not a repair; the de-esser is now the last
+    // word on the band, and its detector sees everything that got there —
+    // including the synthesisers' own output.
+    y = this.deess.tick(y, p.deess);
+
     // 8 ── glue compression
     y = this.glue.tick(y, p.glue);
 
     // 9 ── tone tilt + analog warmth + DC guard
     y = this.highShelf.process(this.lowShelf.process(y));
     const w = this.warm;
-    if (w > 0.0001) y = y * (1 - w * 0.55) + ftanh(y * (1 + w * 1.8)) * w * 0.62;
+    if (w > 0.0001) {
+      // The drive is scaled to the file's own peak (see `refLin` and the refDb
+      // parameter): the same saturation curve, evaluated at the same *relative*
+      // level. A quadratic-ish nonlinearity adds its harmonics in proportion to
+      // the level it is fed, so without this a −20 dBFS copy of a master got
+      // 30 dB less analogue warmth than the master did (measured: effect
+      // −39.5 dB at 0 dBFS, −67.8 dB at −20 dBFS, same dose). A file that
+      // reaches full scale gets exactly what it got before.
+      const r = this.refLin;
+      y = y * (1 - w * 0.55) + ftanh((y / r) * (1 + w * 1.8)) * r * w * 0.62;
+    }
     y = this.dcOut.process(y);
 
     // 9b ── mains hum, and it belongs *here*: every stage above can create or
@@ -1211,10 +2863,16 @@ class RemasterProcessor extends AudioWorkletProcessor {
       k('power', 0),          // master intensity 0..1
       k('bypass', 0),         // 1 = pure dry (A/B switch)
       k('sub', 0),
+      // where the sub-harmonic synthesiser looks for the fundamental: 95 Hz for
+      // a recording whose bottom octave is there, up to 240 Hz for one whose
+      // bottom is empty (see SubSynth.setSource)
+      k('subSrc', 95, 60, 260),
       k('subRatio', 0.5, 0.34, 0.66),
       k('exciter', 0),
       k('air', 0),
       k('dehiss', 0),
+      k('declip', 0),
+      k('declipLevel', -0.1, -60, 0),   // the measured plateau level, dBFS
       k('declick', 0),
       k('reso', 0),
       k('glue', 0),
@@ -1255,6 +2913,12 @@ class RemasterProcessor extends AudioWorkletProcessor {
       k('bassMono', 0),                 // mono-maker below 120 Hz (out-of-phase bass)
       k('glueTime', 0.5, 0, 1),         // 0 = fast/percussive-safe · 1 = slow/smooth
       k('hissF', 3200, 2000, 8000),     // de-hisser crossover, measured per file
+      k('tpCeil', 0, -6, 0),            // true-peak ceiling in dBTP (0 = the stage is off)
+      // The file's own peak, in dBFS. Stages that are neither a repair nor an
+      // absolute target (the limiter) read it to place their thresholds
+      // relative to this recording instead of relative to full scale; the
+      // default 0 dBFS is exactly the old behaviour.
+      k('refDb', 0, -60, 12),
       k('eq0', 0, -9, 9),               // per-song corrective EQ · 50 Hz
       k('eq1', 0, -9, 9),               // · 80 Hz
       k('eq2', 0, -9, 9),               // · 125 Hz
@@ -1275,11 +2939,15 @@ class RemasterProcessor extends AudioWorkletProcessor {
     const opts = (options && options.processorOptions) || {};
     this.sr = sampleRate;
     this.chains = [];
+    // one limiter for the whole file, not one per channel: the detector takes
+    // the maximum over the channels, so a loud left channel cannot pull the
+    // right one down with it and the stereo image stays where it was
+    this.tp = new TruePeakLimiter(sampleRate);
     this.prm = {
       power: 0, bypass: 1, sub: 0, subRatio: 0.5, exciter: 0, air: 0, dehiss: 0,
-      declick: 0, reso: 0, glue: 0, warmth: 0, tilt: 0,
+      declip: 0, declipLevel: -0.1, declick: 0, reso: 0, glue: 0, warmth: 0, tilt: 0,
       hum: 0, hum2: 0, hum3: 0, humHz: 50, boxF1: 200, boxQ1: 3, boxG1: 0, boxF2: 400, boxQ2: 3, boxG2: 0,
-      width: 0, airRoom: 0.5, airF: 6000, hissTilt: 0, hissMax: 0,
+      width: 0, airRoom: 0.5, airF: 6000, hissTilt: 0, hissMax: 0, refDb: 0, refLin: 1,
       bands: [0, 0, 0, 0, 0, 0], noiseLin: 1e-4, hfNoiseLin: 1e-5, autoLevel: 1,
       infraHP: 0, deess: 0, bassMono: 0, glueTime: 0.5, hissF: 3200,
       ceq: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -1288,12 +2956,25 @@ class RemasterProcessor extends AudioWorkletProcessor {
     // where it was (and a mono file has nothing to widen in the first place)
     this.sideHP = new Biquad();
     this.sideHP.setHighpass(this.sr, 200, 0.707);
-    // the mono-maker's low-pass: the side signal below 120 Hz is what an
-    // out-of-phase bottom lives in, and folding it into the centre is the
-    // repair (a mono bass cannot cancel itself in a mono playback)
-    this.sideLP = new Biquad();
-    this.sideLP.setLowpass(this.sr, 120, 0.707);
+    // The mono-maker's low-pass: the side signal's bottom is what an out-of-phase
+    // bass lives in, and folding it into the centre is the repair (a mono bass
+    // cannot cancel itself in a mono playback). It is the *same* one-pole the
+    // analysis measures the low band with — `stereoBands`, coefficient
+    // 1 - exp(-2π·200/sr) — and that is the point of it. The analysis reports
+    // corr(LP(L), LP(R)); with LP linear, subtracting LP(side) from the side makes
+    // LP(L) and LP(R) equal, so that correlation goes to exactly 1: the stage
+    // delivers on its own licence by construction.
+    //
+    // A 2-pole corner at 120 Hz could not. The measured band reaches well past
+    // it — a one-pole at 200 Hz is still only −3.5 dB at 300 Hz — so the chain's
+    // own output kept a negative low correlation (−0.10 measured on the
+    // acceptance §16 fixture) and the app named `outOfPhase` again on it *and* on
+    // the export, i.e. the tool reporting its own repair as unfixed. Measured
+    // after: the low correlation 0.16 → 0.99 and the issue gone from the export.
+    this.sideLPa = 1 - Math.exp(-2 * Math.PI * 200 / this.sr);
+    this.sideLPz = 0;
     this.powerSm = 0;
+    this.powerInit = false;      // the first block adopts the target (see process)
     this.forceBypass = !!opts.bypass;
     this._ensureChannels(opts.channels || 2);
     this.port.onmessage = (ev) => {
@@ -1303,6 +2984,7 @@ class RemasterProcessor extends AudioWorkletProcessor {
         this.sideHP.reset();
         this.sideLP.reset();
         this.powerSm = 0;
+        this.powerInit = false;
       }
     };
   }
@@ -1319,9 +3001,24 @@ class RemasterProcessor extends AudioWorkletProcessor {
     pr.bypass = g('bypass', 0);
     pr.sub = g('sub', 0);
     pr.subRatio = g('subRatio', 0.5);
+    /* …and the corner the synthesizer tracks at. Declared in the descriptor
+     * list and read at the call site, but never *assigned* here until this
+     * line: `p.subSrc` was undefined, `setSource(undefined || 95)` fell back to
+     * the design corner, and the whole "a recording whose bottom octave is
+     * empty tracks at its octave instead" repair never ran in the worklet. The
+     * audit's parameter check found the *descriptor* and the harness found no
+     * fault, because a parameter that is declared, plumbed and then read as
+     * undefined is indistinguishable from one that works — until the row that
+     * measures what it does moves (the acceptance "weak bass" row read −9.30 →
+     * −8.77 dB on a fixture high-passed at 200 Hz, i.e. nothing happened).
+     * tests/audit.test.js now checks the reverse direction as well: every
+     * declared parameter must be read. */
+    pr.subSrc = g('subSrc', 95);
     pr.exciter = g('exciter', 0);
     pr.air = g('air', 0);
     pr.dehiss = g('dehiss', 0);
+    pr.declip = g('declip', 0);
+    pr.declipLevel = g('declipLevel', -0.1);
     pr.declick = g('declick', 0);
     pr.reso = g('reso', 0);
     pr.glue = g('glue', 0);
@@ -1350,6 +3047,9 @@ class RemasterProcessor extends AudioWorkletProcessor {
     pr.bassMono = g('bassMono', 0);
     pr.glueTime = g('glueTime', 0.5);
     pr.hissF = g('hissF', 3200);
+    pr.tpCeil = g('tpCeil', 0);
+    pr.refDb = g('refDb', 0);
+    pr.refLin = clamp(Math.pow(10, pr.refDb / 20), 0.002, 4);
     for (let b = 0; b < 12; b++) pr.ceq[b] = g('eq' + b, 0);
     pr.noiseLin = Math.pow(10, g('noiseFloor', -70) / 20);
     pr.hfNoiseLin = Math.pow(10, g('hissFloor', -80) / 20);
@@ -1366,18 +3066,59 @@ class RemasterProcessor extends AudioWorkletProcessor {
     this._ensureChannels(nCh);
     for (let c = 0; c < nCh; c++) this.chains[c].prepare(pr);
 
+    // Three stages hold their output back — the de-clipper while it is armed,
+    // the de-clicker for its half millisecond and the true-peak limiter for its
+    // look-ahead — so the chain delays whatever follows by that much. This is the number any caller comparing output with
+    // input has to line the two up by, or it measures the delay instead of the
+    // processing; `H.renderEx` in the test harness hands it to the suites.
+    const bypassedNow = this.forceBypass || pr.bypass > 0.5 || pr.power < 1e-4;
+    this.tp.set(this.sr, nCh, pr.tpCeil);
+    const delay = bypassedNow ? 0
+      : (pr.declip > 0.0001 && pr.declipLevel > -60 ? this.chains[0].declip.look : 0)
+        + (pr.declick > 0.0001 ? this.chains[0].click.look : 0)
+        + this.tp.delay;
+    for (let c = 0; c < nCh; c++) this.chains[c].delay = delay;
+    this.latency = delay;
+
     const inCh = input && input.length ? input.length : 0;
     const frames = output[0].length;
     const targetPower = (this.forceBypass || pr.bypass > 0.5) ? 0 : clamp(pr.power, 0, 1);
 
     // block-rate smoothing of the master power (≈18 ms) → click-free A/B and
-    // click-free slider moves; computed once per block so stereo stays coherent
+    // click-free slider moves; computed once per block so stereo stays coherent.
+    //
+    // The *first* block adopts the target instead of ramping to it. Starting the
+    // smoother at zero meant every fresh render — playback and, worse, the
+    // export — began as a dry/wet crossfade and was only fully processed after
+    // ~50 ms, so the head of the file kept a quarter to a third of whatever the
+    // chain had just repaired. Measured on the toolkit's worn fixture, the pop at
+    // sample 193 (4 ms in) came out of the de-clicker at exactly 0.000 — the
+    // detector had it at k = 1.000 — and the rendered file still carried 25 % of
+    // its 1.30 spike, with 35 % left of the pop at sample 852. Both are inside
+    // the ramp. The smoothing exists for a *change* of the knob, and a render
+    // that starts at the requested setting has not changed anything.
     const pc = Math.exp(-frames / (this.sr * 0.018));
-    this.powerSm = targetPower + pc * (this.powerSm - targetPower);
+    this.powerSm = this.powerInit ? targetPower + pc * (this.powerSm - targetPower) : targetPower;
+    this.powerInit = true;
     const pw = this.powerSm;
 
     const autoLevel = pr.autoLevel > 0.5 && pw > 0.001;
     const bypassed = pw < 1e-4;
+
+    // The soft-clip guard's knee for this block, headroom included: a
+    // reconstructed peak sits *above* the plateau it was rebuilt from, and the
+    // guard's knee starts below that plateau — so the guard has to act that much
+    // higher up or it flattens the arc straight back into the flat top it came
+    // from. `declip.head` is a per-file maximum measured by the de-clipper
+    // itself, so a file that is not being de-clipped has `head === 1` and this
+    // is the guard exactly as it was. Nothing has to be passed in: the stage
+    // that does the reconstruction is the stage that knows its size, and its
+    // figure is registered a whole look-ahead (271 samples, two blocks) before
+    // the samples it applies to reach this point.
+    let head = 1;
+    for (let c = 0; c < nCh; c++) if (this.chains[c].declip.head > head) head = this.chains[c].declip.head;
+    const knee = head > 1.0001 ? KNEE * head : KNEE;
+    const krng = head > 1.0001 ? RANGE * head : RANGE;
 
     for (let c = 0; c < nCh; c++) {
       const chain = this.chains[c];
@@ -1407,7 +3148,8 @@ class RemasterProcessor extends AudioWorkletProcessor {
           const wet0 = chain.tick(x);
           // peaks are tracked *before* the level match, so the matcher can be
           // told to give back any headroom it would otherwise eat (see below)
-          const ax = x < 0 ? -x : x;
+          const xr = chain.dry;                 // the aligned dry reference
+          const ax = xr < 0 ? -xr : xr;
           if (ax > dryPk) dryPk = ax;
           const aw0 = wet0 < 0 ? -wet0 : wet0;
           if (aw0 > wetPk) wetPk = aw0;
@@ -1415,9 +3157,23 @@ class RemasterProcessor extends AudioWorkletProcessor {
           // Soft-clip guard, last stage in the chain: a tanh knee above −0.55 dBFS
           // that saturates *below* full scale, so a 16-bit export can never pin a
           // sample at the ceiling. Transparent below the knee.
-          if (wet > KNEE) wet = KNEE + RANGE * ftanh((wet - KNEE) / RANGE);
+          //
+          // The knee moves up by the headroom the de-clipper's reconstruction
+          // needs — `chain.declip.head` is what it has actually used on this
+          // file, `pr.declipHead` what the measurement promised it would need.
+          // A guard at the old knee would flatten every reconstructed arc back
+          // into a flat top; lifted, the arc arrives intact and the *level
+          // matcher* below is what pays for it, by the only currency it has:
+          // it ducks the finished file until the restored peak fits where the
+          // un-repaired one used to sit. The guard's own ceiling scales with
+          // the knee, so its shape (and its promise about a 16-bit export) is
+          // unchanged — only the level it acts at moves.
+          if (knee > KNEE) {
+            if (wet > knee) wet = knee + krng * ftanh((wet - knee) / krng);
+            else if (wet < -knee) wet = -knee + krng * ftanh((wet + knee) / krng);
+          } else if (wet > KNEE) wet = KNEE + RANGE * ftanh((wet - KNEE) / RANGE);
           else if (wet < -KNEE) wet = -KNEE + RANGE * ftanh((wet + KNEE) / RANGE);
-          drySq += x * x;
+          drySq += xr * xr;
           // Every level the matcher compares is measured on the *input* to its
           // own gain: `wet0`, not `wet`. Measured after the gain, the wet band
           // energy carries g² while the correction the matcher derives from it
@@ -1427,15 +3183,23 @@ class RemasterProcessor extends AudioWorkletProcessor {
           // makes the fixed point exact: chain level × g = dry level.
           wetSq += wet0 * wet0;
           // mid-band energy for the loudness match
-          let md = x, mw = wet0;
+          let md = xr, mw = wet0;
           for (let b = 0; b < 4; b++) {
             md = chain.midDry[b].process(md);
             mw = chain.midWet[b].process(mw);
           }
           midDrySq += md * md;
           midWetSq += mw * mw;
-          const mixed = x + pw * (wet - x);
-          dst[i] = mixed > 1 ? 1 : mixed < -1 ? -1 : mixed;
+          const mixed = xr + pw * (wet - xr);
+          // The last hard limit of the chain. It is a *rail*, not a second
+          // soft-clipper: it exists so that no arithmetic surprise can write an
+          // out-of-range sample into the export buffer. It therefore has to sit
+          // where the guard above it saturates (`knee + krng`), because a hard
+          // clamp at 1.0 would do exactly what the guard was lifted to stop
+          // doing — cut the top off every reconstructed peak. On a file that is
+          // not being de-clipped both are 1.0 and this line is unchanged.
+          const rail = knee + krng;
+          dst[i] = mixed > rail ? rail : mixed < -rail ? -rail : mixed;
         }
       }
 
@@ -1527,16 +3291,24 @@ class RemasterProcessor extends AudioWorkletProcessor {
         // low band separately. Folding the low side signal into the centre is
         // the repair; nothing above 120 Hz is touched, and a recording whose
         // bass is already centred pays nothing.
-        if (monoBass) sd -= this.sideLP.process(sd) * clamp(pr.bassMono, 0, 1);
+        // the one-pole tracks the side whether or not the fold is engaged, so
+        // switching the stage on mid-file (a new parameter set) never reads a
+        // stale state
+        const sdz = (this.sideLPz += (sd - this.sideLPz) * this.sideLPa);
+        if (monoBass) sd -= sdz * clamp(pr.bassMono, 0, 1);
         const add = widen ? this.sideHP.process(sd) * pr.width : 0;
         let lo = m + sd + add, ro = m - sd - add;
         // the widening happens after the per-channel soft-clip guard, so the
         // same knee is applied here — a 16-bit export still cannot pin a sample
-        if (lo > KNEE) lo = KNEE + RANGE * ftanh((lo - KNEE) / RANGE);
-        if (ro > KNEE) ro = KNEE + RANGE * ftanh((ro - KNEE) / RANGE);
+        if (lo > knee) lo = knee + krng * ftanh((lo - knee) / krng);
+        if (ro > knee) ro = knee + krng * ftanh((ro - knee) / krng);
         L[i] = lo; R[i] = ro;
       }
     }
+    // The true-peak limiter is the last thing that happens to the audio — after
+    // the width stage, which adds side energy and would otherwise be the one
+    // part of the chain no ceiling covered.
+    if (!bypassed) this.tp.processBlock(output, nCh, frames);
     return true;
   }
 }

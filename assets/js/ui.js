@@ -139,6 +139,7 @@
       case 'ms': return num(value.n, 0) + ' ms';
       case 's': return num(value.n, value.n < 10 ? 1 : 0) + ' s';
       case 'ratio': return num(value.n, 2);
+      case 'dbtp': return (value.n > 0 ? '+' : '−') + num(Math.abs(value.n), 1) + ' dBTP';
       default: return num(value.n, 2);
     }
   }
