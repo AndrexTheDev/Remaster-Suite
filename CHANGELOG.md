@@ -6,6 +6,37 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Measured and closed — the arrival's own top end at the last two pops, and the statistic that cannot gate it
+
+**The last crackle lever is closed by a measurement, not by an argument.** The matrix's worn record counts **2 of 72**
+pops above the clicks-free copy after the whole chain, and the pair has two authors: one pop the WAV clamped at the
+rail, whose neighbourhood carries the 128 kbit/s encoder's own smear, and one marginal remainder at **1.4 dB** over
+the clean copy in a loud, HF-rich passage. Round 15 measured the first as a *broadband* floor (the HF band and the
+1.45 kHz reference rise together, so the de-hisser's tilt term reads 0.0 dB while its level key allows 19–20 dB of
+cut), round 16 priced the level-key arbitration and rejected it, and round 17 built the content witness that would
+gate it and found it redundant. What was still missing was the number that decides whether *any* band-level repair
+can be licensed here — so this round measured the statistic such a repair would have to key on, on the defect and on
+music, with the same meter.
+
+| what | measured |
+|---|---|
+| the statistic | the HF excess over the local programme: the 4–12 kHz band in 64-sample blocks over ±600 samples around each event, against the same statistic's median over ±0.5 s (probe `tools/work/wr35.js` — the live, shippable form of the matrix row's ±2000-sample window) |
+| on the defect | the fixture's 72 pops read p50 **11.9** / p90 **15.6** dB on arrival, and **2.3 / 4.0** through the chain — against the clicks-free copy's own control at **2.0 / 2.7**. The pops' neighbourhoods end at the programme's own level: what is left is the arrival's waveform, not an unrepaired burst |
+| the stage that takes it | the de-hisser *does* fire where its tilt term sees the step: the second of the two pops comes out **15.2 dB** lower (its ±2000 window −48.1 → −63.3 dB with the stage toggled) — the same stage that is blind to the broadband case, as round 15 measured |
+| on music — the reason no gate exists | the same statistic on the same meter: hi-hats at 3/s p50 **20.4** dB (p10 17.3, max 60.1), a kick+snare+hat groove p50 6.0 / p90 **16.4** (max 45.2), twelve "s" bursts p50 9.8 / p90 11.8, a clean bed p50 2.0 (max 4.0) — every one of them **at or above the codec residue's own 11.9 / 15.6** |
+| the consequence | a repair keyed on the excess statistic would cut cymbals and sibilants *harder* than it cuts the defect. A cymbal and a codec burst are the same signal to every band statistic this file computes — which is round 17's finding one level deeper, and it is the end of the lever rather than the start of one |
+| what would have to exist | a spectral repair with a *content* witness this app does not have: not "how much top end is here" (measured above to be the wrong question) and not "is it shaped like programme" (round 17: the encoder's error *is* shaped like the music it encoded), but something that separates noise from a musical transient at 12 ms — the file has no such statistic today, and inventing one on faith is what this project does not do |
+
+**A correction, recorded rather than quietly fixed.** Round 19's section below claimed the matrix's worn record now
+reads *0 pops of 72*. It does not: that row reads **2/72 → 2/72**, and what moved in round 19 is the crackle section
+(§1, **72/72 → 0/72** under its own chain), the ring family (0.73 / 0.62 / 0.51 / 0.39 → 0.00) and the per-click
+levels. The tail stage repairs the click's ring; the encoder's smear at a clipped transient is a different signal and
+stays the boundary. Both the README and the section below are corrected to say so, and the acceptance row that
+carries this boundary now holds the music population above as well.
+
+**Suites:** dsp 160, audit 335, web 137, e2e 108, tuning 17 — unchanged (this round adds measurements and one row's
+note, no stage); the matrix stays at 126 rows and 32 defect classes, exit 0.
+
 ### The ring-out behind the click — fitted, not notched, and what licences the fit
 
 **A repair window is only as long as the sound it replaces.** The de-clicker writes a low-pass prediction over
@@ -25,7 +56,7 @@ only what that model explains is subtracted.
 | why the window is 1 ms | swept 0.35 / 0.6 / 1.0 ms on the same fixtures (probe `wr31.js`): at 0.35 ms the fitted frequency lands **88 … 151 Hz** off, the ring-out stays at +10.4 dB and the *music's* R² p90 climbs to 0.213; at 0.6 ms it works; at **1.0 ms** the fit lands 12 … 28 Hz off, the file reads **0.000** and the music stays at zero fits. It is the repair's own delay line, so the stage needs no second look-ahead |
 | the removal | up to 3τ, with a 1 ms fade, weighted **1 − m** — m being the de-clicker's own repair mix. The repair window has *already* removed the ring with weight m (its prediction at 9 kHz is ≈ 0), so subtracting the fit at full weight re-injects the tone inverted: the file then read **0.94** where the input read 0.51 (probe `wr33.js` localised it; this was the round's one bug) |
 | the latency it costs | 17 → **65 samples** at 48 kHz (0.35 → **1.35 ms**), and the three looks now sum to 271 + 65 + 88 = **424**: `dsp.test.js` and the audit's own look-ahead pins moved with it, as did the README |
-| the family, before → after | index **0.73 / 0.62 / 0.51 / 0.39 → 0.00** at τ 0.6 / 1.0 / 1.5 / 2.5 ms · per click in 4–12 kHz **13.1 → 0.8** (0.6 ms) and **13.7 → 1.9** (1.5 ms) · onset **+17.7 → −2.1 dB** over the clicks-free copy and ring-out **+11.7 → +3.6** (the matrix's own row, which takes the window's peak, reads 9.9 → 2.7) · the ninth member's card flips `crackle` → `healthy` · the blip train's index 0.47 → 0.00 · the matrix's worn record reads **0 pops of 72** where it read 2 |
+| the family, before → after | index **0.73 / 0.62 / 0.51 / 0.39 → 0.00** at τ 0.6 / 1.0 / 1.5 / 2.5 ms · per click in 4–12 kHz **13.1 → 0.8** (0.6 ms) and **13.7 → 1.9** (1.5 ms) · onset **+17.7 → −2.1 dB** over the clicks-free copy and ring-out **+11.7 → +3.6** (the matrix's own row, which takes the window's peak, reads 9.9 → 2.7) · the ninth member's card flips `crackle` → `healthy` · the blip train's index 0.47 → 0.00 · the matrix's crackle section reads **72/72 → 0/72** under its own chain, while the worn record's own row still counts **2 of 72**: that pair is the 128 kbit/s arrival's own top end at the two pops the WAV clamped at the rail (round 15's floor measurement, ~22 dB above the clicks-free copy and shaped like the music that carried it), i.e. the encoder's smear at a clipped transient — *not* the click, and not what this stage repairs |
 | everything that must not move | **0 fits** for hi-hats, a kick/snare/hat groove, twelve "s" bursts, a clean bed and the cassette sim; every music fixture's index is where it was, and no value column of the matrix moves beyond its documented dither. The gate's margin is measured rather than assumed (probe `tools/work/wr34.js`): at 0.15 the hi-hats start firing (**3** fits) and at 0.12 nine do, while the family's own numbers do not move a digit (ring-out 0.6 / 3.6 / 3.8 dB, index 0.000 at every gate from 0.2 to 0.12) — so 0.2 is the tightest gate that is free |
 | the price, stated | a *damped* 9 kHz burst under 10 ms **is** a damped sinusoid, so a synth blip earns the fit as well as the repair window's: its band peak loses **12.0 dB** where the round-18 chain lost 8.75, and the app's own index for that fixture is 0.47 → 0.00 (it was 0.14). Re-measured with the two-render harness of round 18 (probe `wr25.js`): with the de-hisser bypassed the loss stands, with the de-clicker bypassed the blip is untouched — the whole of it is the de-clicker's, both halves |
 

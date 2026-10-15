@@ -1121,7 +1121,16 @@ mark('section 17');
     + ' across the passage is 17.2 dB, so it is not stationary either). This 2/72 is a floor of the *arrival format*,'
     + ' not a missing witness. At pop ' + fo.p + ' the same window reads ' + N(fo.up[1], 1) + ' → ' + N(fo.out[1], 1) + ' dBFS'
     + ' (clean ' + N(fo.cl[1], 1) + ') — a loud, HF-rich passage where the pop\'s own remainder is 1.4 dB over the clean'
-    + ' copy, i.e. the count has two authors of very different size');
+    + ' copy, i.e. the count has two authors of very different size.'
+    + ' Round 20 measured the statistic a *band-level* repair would have to key on — the HF excess over the local' 
+    + ' programme, 64-sample blocks over ±600 samples around each event, the reference being the same statistic\'s median'
+    + ' over ±0.5 s (probe tools/work/wr35.js). On arrival the 72 pops read p50 11.9 / p90 15.6 dB, and the chain brings'
+    + ' that to 2.3 / 4.0 — the clicks-free copy\'s own control reads 2.0 / 2.7, i.e. the pops\' neighbourhoods end at the'
+    + ' programme\'s own level. What closes the lever is the *music* population of the same statistic: hi-hats at 3/s read'
+    + ' **20.4 dB** (p50) above their own local programme, a kick+snare+hat groove 6.0 (p90 16.4), twelve "s" bursts 9.8 —'
+    + ' all at or above the residue\'s own 11.9 / 15.6, because a cymbal and a codec burst are the same signal to every'
+    + ' band statistic this app computes. A repair keyed on it would cut the hi-hats and the sibilants harder than it cuts'
+    + ' the defect, so the residue stays a documented row rather than a stage');
   const mask = quietMask(clean, 0.5);
   row('worn record (all at once)', 'hiss: ≥4 kHz RMS in the quiet (dBFS)', maskedBandDb(upload, mask, [HP4]), maskedBandDb(r.out[0], mask, [HP4], r.lat),
     'tilt step ' + N(r.m.hissTiltStepDb) + ' → ' + N(r.mo.hissTiltStepDb) + ' dB over ' + mask.filter(Boolean).length + ' quiet frames');

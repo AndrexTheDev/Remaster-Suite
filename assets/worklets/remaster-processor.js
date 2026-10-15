@@ -1027,6 +1027,21 @@ class DeHiss {
       // quiet floor, 0.00 at the worn record's pop, ≤0.3 dB wiggles elsewhere.
       // That is noise, so neither is in the tree — the residual 2/72 is the
       // arrival's own floor, shaped like its music, and it stays documented.
+      //
+      // Round 20 measured the statistic a *band-level* repair would have to key
+      // on — the HF excess over the local programme (64-sample blocks, the
+      // reference being its own median over ±0.5 s, probe wr35.js) — and it is
+      // what closes the question rather than opening it. The pops' own
+      // neighbourhoods read p50 11.9 / p90 15.6 dB on arrival and 2.3 / 4.0
+      // through the chain, i.e. at the clicks-free copy's own control level
+      // (2.0 / 2.7): the floor is already repaired as far as the programme
+      // allows. And the *music* reads the same statistic higher than the defect
+      // does — hi-hats 3/s p50 **20.4** dB, a kick+snare+hat groove 6.0 (p90
+      // 16.4), twelve "s" bursts 9.8 — so a gate on it would cut cymbals and
+      // sibilants harder than it cuts the codec's smear. A cymbal and a codec
+      // burst are the same signal to every band statistic this file computes;
+      // the residue is the arrival's, and the row that says so is the honest
+      // answer (acceptance §1, the worn record's boundary row).
       const cutTilt = this.maxCut > 0.01 ? clamp(tiltNow - this.tiltRef, 0, this.maxCut) : 60;
       const lvl = smoothstep(this.t1, this.t1 + 1 / this.inv, e);
       const cutLevel = lvl > 1e-6 ? -20 * Math.log10(lvl) : 60;
