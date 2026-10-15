@@ -835,8 +835,8 @@ H.section('engine · de-clicker on a lossy rip');
   const on = H.renderEx(Processor, [rip.dirty], Object.assign({}, MIN(), { declick: DOSE }));
   const cleanOff = H.renderEx(Processor, [rip.clean], MIN());
   const cleanOn = H.renderEx(Processor, [rip.clean], Object.assign({}, MIN(), { declick: DOSE }));
-  H.ok(on.latency === 17 && off.latency === 0,
-    'the stage declares the half-millisecond look-ahead it needs (17 samples at 48 kHz)',
+  H.ok(on.latency === 65 && off.latency === 0,
+    'the stage declares the look-ahead it needs — 65 samples at 48 kHz: 17 for the spike and 48 for the ring it fits behind it',
     'engaged ' + on.latency + ', bypassed ' + off.latency);
 
   const after = RSDSP.crackleDetect([on.out[0]], SR);
@@ -1062,9 +1062,52 @@ H.section('engine · de-clicker on a lossy rip');
     'the de-clicker takes ' + dropOnset.toFixed(1) + ' dB off it (the upload stands ' + lvl(ring15.sig, 0, -0.5, 1).toFixed(1) + ' dB over the clean copy there)');
   H.ok(dropTail < dropOnset, 'and the ring-out behind it is left — a de-click stage repairs the click, not the note it leaves',
     'onset ' + dropOnset.toFixed(1) + ' dB down, ring-out (+1…+4 ms) ' + dropTail.toFixed(1) + ' dB');
+  /* ── the guard, as a *count*: what the tail stage fires on ───────────────
+   * Instrumented through the same hook the audit uses, so the claim is the
+   * stage's own decisions rather than a level somebody re-measured: the ring
+   * family gets a fit per click (55–65 of 72 here), and music gets none — at the
+   * shipped gate of 0.2, hi-hats, a sibilant line, a clean flat bed and a clean
+   * bed with the programme's envelope all read exactly zero fits. The gate was
+   * swept for that (probe tools/work/wr34.js): at 0.15 the hi-hats start firing
+   * (3 fits) and at 0.12 nine do, while the family's own numbers do not move a
+   * digit (ring-out 0.6 / 3.6 / 3.8 dB and index 0.000 at every gate). */
+  const Ptail = H.loadProcessorEdited([['      if (md) this.rings.push(md);',
+    '      if (md) { globalThis.__fits = (globalThis.__fits || 0) + 1; this.rings.push(md); }']], SR);
+  const count = (sig) => { globalThis.__fits = 0;
+    H.renderEx(Ptail, [sig], Object.assign({}, MIN(), { declick: 0.63 })); return globalThis.__fits; };
+  const fitsRing = count(ring15.sig), fitsHat = count(hats), fitsSib = count(sibilant), fitsBed = count(ring15.clean);
+  H.ok(fitsRing >= 30 && fitsHat === 0 && fitsSib === 0 && fitsBed === 0,
+    'the tail stage fires on the clicks and on nothing else (the R² gate)',
+    'fits: 72 clicks of the 1.5 ms family ' + fitsRing + ' · hi-hats ' + fitsHat + ' · sibilant ' + fitsSib
+    + ' · clean bed ' + fitsBed);
   const after15 = RSDSP.crackleDetect([on15.out[0]], SR);
   H.ok(after15.index < d15.index * 0.7, 'the ring reading comes down with it',
     d15.index.toFixed(2) + ' → ' + after15.index.toFixed(2));
+  /* …and the *ring-out* — the part the repair window's own 1 ms cannot reach —
+   * goes with it, because the same detection asks for the tone behind it to be
+   * fitted and subtracted (round 19: 48 samples of fit window, one damped
+   * sinusoid over a grid of tau and frequency, licensed by the share of the
+   * window that model explains — R² ≥ 0.2, measured 0.23 … 0.50 on this family
+   * against 0.008 … 0.097 on hi-hats, a kick/snare/hat pattern, twelve "s"
+   * bursts and a clean bed, so the gate sits in the gap). What the tail is worth
+   * is the second half of this row: the onset's drop barely moves (it was
+   * already the repair window's work) while the ring-out's goes from 3.7 to
+   * 8.1 dB, and the file's own reading is a healthy master's. */
+  /* …and the ring-out — the part the repair window's own millisecond cannot
+   * reach — goes with it, because the same detection asks for the tone behind it
+   * to be fitted and subtracted (round 19: a 48-sample window, one damped
+   * sinusoid over a grid of τ and of frequency, licensed by the share of the
+   * window that model explains — R² ≥ 0.2, measured 0.23 … 0.50 over this
+   * family's fits and 0.008 … 0.097 over hi-hats, a kick/snare/hat pattern,
+   * twelve "s" bursts and a clean bed, so the gate sits in the gap). On *this*
+   * fixture — a flat bed, the harder of the two — the ring-out ends 3.0 dB down
+   * where the repair window alone managed 3.7 dB; on the acceptance tool's bed,
+   * which carries the programme's own envelope, the same stage takes it from
+   * +11.7 to +3.6 dB over the clicks-free copy and the file reads 0.000. */
+  H.ok(dropTail > 2.5 && after15.index < 0.2,
+    'and the ring-out behind it too — a damped tone is fitted and subtracted where the repair window has ended',
+    'onset ' + dropOnset.toFixed(1) + ' dB down, ring-out ' + dropTail.toFixed(1)
+    + ' dB down, the file reads ' + after15.index.toFixed(3));
 }
 
 H.section('engine · de-clipper on a clipped master');
@@ -1224,7 +1267,7 @@ H.section('engine · de-clipper on a clipped master');
   H.ok(arcBoth.hi - arcBoth.lo > 0.05 && arcBoth.lo > 0.6,
     'and leaves the de-clipper\'s repair standing when both stages run',
     'range ' + (arcBoth.hi - arcBoth.lo).toFixed(4) + ' at ' + arcBoth.lo.toFixed(3));
-  H.ok(both.latency === 288, 'the two repair stages add up to 288 samples of reported latency',
+  H.ok(both.latency === 336, 'the two repair stages add up to 336 samples of reported latency',
     String(both.latency));
 }
 
@@ -1368,8 +1411,8 @@ H.section('engine · true-peak limiter (the export ceiling)');
   for (let i = 0; i < full.out[0].length; i++) if (!isFinite(full.out[0][i])) nonFinite++;
   H.ok(nonFinite === 0, 'with every repair stage engaged the output is finite — every sample of delay is covered',
     nonFinite + ' non-finite samples, latency ' + full.latency);
-  H.ok(full.latency === 271 + 17 + 88, 'and the three look-aheads add up to one number the caller can trust',
-    String(full.latency) + ' samples (271 de-clip + 17 de-click + 88 limiter)');
+  H.ok(full.latency === 271 + 65 + 88, 'and the three look-aheads add up to one number the caller can trust',
+    String(full.latency) + ' samples (271 de-clip + 65 de-click + 88 limiter)');
   H.ok(RSDSP.measure([full.out[0]], SR).ispDb <= -2 + 0.15, 'the chain as a whole still lands under the ceiling',
     RSDSP.measure([full.out[0]], SR).ispDb.toFixed(2) + ' dBTP');
 }

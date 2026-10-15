@@ -6,6 +6,40 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### The ring-out behind the click — fitted, not notched, and what licences the fit
+
+**A repair window is only as long as the sound it replaces.** The de-clicker writes a low-pass prediction over
+±1 ms around the spike; the cartridge's ring at 9 kHz carries τ 0.6 … 2.5 ms, so the tone *outlives* the window and
+the round-18 report left it on the table as its largest remaining lever — **+8.0 dB** over the clicks-free copy in
+the +1 … +4 ms window, with the sentence "removing the rest would be a spectral repair … it is not in this tree".
+This round puts it in the tree, and the way it is done is what makes it safe. Not by **notching** the click's own
+frequency: that was tried first (probe `tools/work/wr29.js`) and it makes the file *worse* by the app's own count —
+a gate's opening and closing edges are impulses too (τ 1.5 ms: index 0.512 → 0.732). By **fitting** the tone: when
+the detector fires, the same detection asks for the ring behind it to be matched against one damped sinusoid, and
+only what that model explains is subtracted.
+
+| what | measured |
+|---|---|
+| how the fit works | one event per detection; 48 samples (1 ms) later the delay line behind it is matched against `e^(−k/τ)·(a·cos ωk + b·sin ωk)` over τ 0.4 … 4 ms and f 6 … 13 kHz in 250 Hz steps — a closed-form matched filter, one correlation pair per τ, no matrix inverse (probe `tools/work/wr30.js`; the earlier 2×2 least-squares form carried a dead pre-loop and was void) |
+| what licences it | **R²**, the share of the window a single damped tone explains: rings p10 **0.17 … 0.33** (p50 0.37 – 0.46) against hi-hats 0.01 / 0.03 / 0.11, a kick+snare+hat groove 0.01 / 0.02 / 0.11, twelve "s" bursts 0.01 / 0.04 / 0.11 and clean beds 0.01 / 0.02 / 0.07 — the gate is **0.2**, in the measured gap, and through the whole chain the family's own fits read 0.23 … 0.50 with **0 fits** everywhere else |
+| why the window is 1 ms | swept 0.35 / 0.6 / 1.0 ms on the same fixtures (probe `wr31.js`): at 0.35 ms the fitted frequency lands **88 … 151 Hz** off, the ring-out stays at +10.4 dB and the *music's* R² p90 climbs to 0.213; at 0.6 ms it works; at **1.0 ms** the fit lands 12 … 28 Hz off, the file reads **0.000** and the music stays at zero fits. It is the repair's own delay line, so the stage needs no second look-ahead |
+| the removal | up to 3τ, with a 1 ms fade, weighted **1 − m** — m being the de-clicker's own repair mix. The repair window has *already* removed the ring with weight m (its prediction at 9 kHz is ≈ 0), so subtracting the fit at full weight re-injects the tone inverted: the file then read **0.94** where the input read 0.51 (probe `wr33.js` localised it; this was the round's one bug) |
+| the latency it costs | 17 → **65 samples** at 48 kHz (0.35 → **1.35 ms**), and the three looks now sum to 271 + 65 + 88 = **424**: `dsp.test.js` and the audit's own look-ahead pins moved with it, as did the README |
+| the family, before → after | index **0.73 / 0.62 / 0.51 / 0.39 → 0.00** at τ 0.6 / 1.0 / 1.5 / 2.5 ms · per click in 4–12 kHz **13.1 → 0.8** (0.6 ms) and **13.7 → 1.9** (1.5 ms) · onset **+17.7 → −2.1 dB** over the clicks-free copy and ring-out **+11.7 → +3.6** (the matrix's own row, which takes the window's peak, reads 9.9 → 2.7) · the ninth member's card flips `crackle` → `healthy` · the blip train's index 0.47 → 0.00 · the matrix's worn record reads **0 pops of 72** where it read 2 |
+| everything that must not move | **0 fits** for hi-hats, a kick/snare/hat groove, twelve "s" bursts, a clean bed and the cassette sim; every music fixture's index is where it was, and no value column of the matrix moves beyond its documented dither. The gate's margin is measured rather than assumed (probe `tools/work/wr34.js`): at 0.15 the hi-hats start firing (**3** fits) and at 0.12 nine do, while the family's own numbers do not move a digit (ring-out 0.6 / 3.6 / 3.8 dB, index 0.000 at every gate from 0.2 to 0.12) — so 0.2 is the tightest gate that is free |
+| the price, stated | a *damped* 9 kHz burst under 10 ms **is** a damped sinusoid, so a synth blip earns the fit as well as the repair window's: its band peak loses **12.0 dB** where the round-18 chain lost 8.75, and the app's own index for that fixture is 0.47 → 0.00 (it was 0.14). Re-measured with the two-render harness of round 18 (probe `wr25.js`): with the de-hisser bypassed the loss stands, with the de-clicker bypassed the blip is untouched — the whole of it is the de-clicker's, both halves |
+
+**The boundary as it stands now.** Past +4 ms the reading is +1.1 dB over the clicks-free copy on arrival and
++2.4 dB after the chain: that far tail is where the fit's own 3τ window and its 1 ms fade land, and it is the part
+of the click the stage does not claim. The third witness is still a second difference, so a smooth tone stays
+*music* to the detector — the stage only removes what the fit explains, which is why the hi-hats and the kit are
+untouched. A true spectral repair (a tonal estimate of the whole event, the way RX's does it) is still not in this
+tree, and these numbers are the baseline for it.
+
+**Suites:** dsp 158 → **160** (the ring-out row and the fit count are pinned: this family 65 of its 72 clicks,
+hi-hats, a sibilant and clean beds **zero**), audit 335, web 137, e2e 108, tuning 17. The matrix grew
+125 → **126 rows** (32 defect classes), exit 0.
+
 ### The ring a real stylus click makes — the ninth of the family, and the three guards it needed
 
 **A vinyl click is not an impulse in the air.** It excites the cartridge's resonance and rings there: 0.5 … 3 ms of
@@ -26,12 +60,13 @@ dose, every click left in the file. That is the beta report this round answers.
 | the guard that keeps an *empty* window out | the same knee on the admission itself — a window whose HF is almost nothing can read tonal because what is being measured there is the analysis filter. The matrix's own **clean** bed (8 s of pink noise through the chain's 9 kHz low-pass, no defect at all) holds one such window of 400 (duty 0.226, flatness 0.040, crest 4.17, HF energy 0.41× the file's median), and it is the *same* window in every fixture built on that bed; with the bound, that bed and the chain output of the cassette fixture (its one residual window reads 4.49) report **no spike window at all**, and the ring family loses only its own sub-knee windows (τ 2.5 ms: 12 of 71; τ 1.5 ms: 3 of 68) |
 | the family, before → after | τ 0.6 / 1.0 / 1.5 / 2.5 ms **0.73 / 0.55 / 0.00 / 0.00 → 0.73 / 0.62 / 0.51 / 0.39**; τ 1.5 ms at 3/s 0.00 → 0.50, at a quarter amplitude 0.00 → 0.44 |
 | everything that must not move | hi-hats, sibilants, a 9.2 kHz bell, a sustained note, a drum performance, a clean bed, the cassette and low-bitrate sims: **0.00 before and after** — and the index is identical to the last digit on all eighteen fixtures of the battery (probe tools/work/wr22.js) with the knee bound in place; the crackle fixtures unchanged (pops 1.00, worn 128 kbit/s 1.00, vinyl 0.98, garage 0.73, combo 0.62 → 0.64), the matrix moves on **no** index, on one value column that is the documented true-peak jitter (−0.10 → −0.30 dBTP dry) and on four spike counts inside notes (26 → 25, 62 → 61, 68 → 65, 17 → 16 of 400/354), with **no diagnosis change anywhere**. Two runs of *identical* code were diffed for this: the only row that moves between them is the exported true peak's dry column (±0.2 dB — the 16-bit conversion dithers with `Math.random()` and a true peak is a max statistic), and that is now stated on the row itself |
-| the repair, both halves | per click in 4–12 kHz against the same file without clicks: **13.7 → 5.1 dB** (the 0.6 ms ring's own row: 13.1 → 0.8). The split is measured stage by stage: the **onset** (−0.5 … +1 ms) goes **+17.7 → −2.0 dB** over the clean copy, the **ring-out** (+1 … +4 ms) only **+11.7 → +8.0**, and past +4 ms there was nothing |
+| the repair, both halves | per click in 4–12 kHz against the same file without clicks: **13.7 → 5.1 dB** (the 0.6 ms ring's own row: 13.1 → 0.8). The split is measured stage by stage: the **onset** (−0.5 … +1 ms) goes **+17.7 → −2.0 dB** over the clean copy, the **ring-out** (+1 … +4 ms) only **+11.7 → +8.0**, and past +4 ms there was nothing. *Round 19 then took the ring-out as well — the same fixture reads **13.7 → 1.9** dB and **+11.7 → +3.6**; see the section above* |
 | the price, stated | a *damped* 9 kHz burst under 10 ms — a synth blip — is indistinguishable from a ring in every statistic measured here: index **0.47** (was 0.00) and the dose it earns costs the blip **9.7 dB** of its band peak (measured with the stages bypassed one at a time — it is the de-clicker that spends it, and with the de-hisser bypassed the number is the same). That is the trade a time-domain de-clicker makes with such material, RX's included |
 
-**The boundary that is not crossed** is the ring-out: the de-clicker's third witness is a second-difference measure,
-so a smooth 9 kHz tone is *music* to it — the onset is what the stage repairs. Removing the rest would be a spectral
-repair with a notch at the click's own frequency; it is not in this tree, and these numbers are its baseline.
+**The boundary left open here** was the ring-out: the de-clicker's third witness is a second-difference measure,
+so a smooth 9 kHz tone is *music* to it — the onset is what this round repaired. Removing the rest would take a
+repair with a notch at the click's own frequency; *round 19 replaced that idea with a fit and closed the lever — see
+the section above*, where these numbers are the baseline it started from.
 
 **Suites:** dsp 150 → **158** (the family, all three guards — the clean bed's empty window included — and the
 onset/ring-out boundary are pinned), audit 335, web 137, e2e 108, tuning 17. The matrix grew 121 → **125 rows** and 31 → **32 defect classes**.

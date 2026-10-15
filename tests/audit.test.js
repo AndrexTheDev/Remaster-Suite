@@ -1721,9 +1721,9 @@ section('audit · the de-clicker\'s own floor');
 {
   const SR = 48000, SEC = 6;
   const num = (v, d) => (typeof v === 'number' && isFinite(v) ? v.toFixed(d === undefined ? 1 : d) : String(v));
-  const LOOK = 17;                       // the stage's own look-ahead, in samples
+  const LOOK = 65;                       // the stage's own look-ahead, in samples (17 spike + 48 ring)
   const SRC_C = '  tick(x, amount, reconstructed, clipLevel) {';
-  const SRC_B = '    const out = m > 0.001 ? xd + (p - xd) * m : xd;';
+  const SRC_B = '    let out = m > 0.001 ? xd + (p - xd) * m : xd;';
   const PATCH_C = SRC_C + '\n    this.__n = (this.__n || 0) + 1;';
   const PATCH_B = SRC_B + '\n    { const __h = globalThis.__floor; if (__h) __h(this.__n, m); }';
   const bed = (lp) => {
@@ -1954,12 +1954,12 @@ section('audit · the class the de-clicker does not see: dropouts');
   const SR6 = 48000;
   const num6 = (v, d) => (typeof v === 'number' && isFinite(v) ? v.toFixed(d === undefined ? 1 : d) : String(v));
   const SRC_C2 = '  tick(x, amount, reconstructed, clipLevel) {';
-  const SRC_B2 = '    const out = m > 0.001 ? xd + (p - xd) * m : xd;';
+  const SRC_B2 = '    let out = m > 0.001 ? xd + (p - xd) * m : xd;';
   const P_drop = H.loadProcessorEdited([
     [SRC_C2, SRC_C2 + '\n    this.__n = (this.__n || 0) + 1;'],
     [SRC_B2, SRC_B2 + '\n    { const __h = globalThis.__drop; if (__h) __h(this.__n, m); }'],
   ], SR6);
-  const SEC6 = 6, LOOK6 = 17, HL = 25;
+  const SEC6 = 6, LOOK6 = 65, HL = 25;
   const env6 = H.songEnvelope(SR6, SEC6, 0.35);
   const b6 = H.filter(DSP, H.pink(SR6, SEC6, 0.40, 31), SR6, 'lp', 9000, 0.60);
   for (let i = 0; i < b6.length; i++) b6[i] *= env6[i];
@@ -2541,8 +2541,8 @@ section('audit · documentation matches the product');
   ok(/8–16 kHz/.test(readme) && /30–60 Hz/.test(readme), 'the README states the two synthesis ranges');
   // the latency claim has to match the DSP: the de-clicker's look-ahead is the
   // one delay in the chain, and the README has to say so.
-  ok(/look-?ahead/i.test(readme) && /0\.35 ms/.test(readme),
-    'the README documents the de-clicker look-ahead and its 0.35 ms');
+  ok(/look-?ahead/i.test(readme) && /1\.35 ms/.test(readme),
+    'the README documents the de-clicker look-ahead and its 1.35 ms');
   // …and the two stages that were added since: the latency paragraph is the
   // contract every caller reads, so each of its three numbers has to be there
   ok(/5\.6 ms/.test(readme) && /271 samples/.test(readme), 'the README documents the de-clipper\'s look-ahead');

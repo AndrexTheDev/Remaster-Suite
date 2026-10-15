@@ -9,7 +9,8 @@
  *
  * The chain is minimum-phase throughout, so the two are sample-for-sample
  * identical: what you hear is what you save. The one stage that delays is the
- * de-clicker, whose half-millisecond look-ahead shifts the output by 17 samples
+ * de-clicker, whose look-ahead shifts the output by 65 samples (its spike window
+ * plus the millisecond the ring behind it is fitted over)
  * at 48 kHz while it is engaged — the same in both paths, and the A/B crossfade
  * delays its dry side with it, so nothing about the comparison changes.
  * ========================================================================== */

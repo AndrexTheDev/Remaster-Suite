@@ -1489,9 +1489,13 @@ mark('section 20');
     + ' — the tonality of the window is what takes this ring (spectral flatness p50 0.055 over 6–24 kHz, against 0.269 at the'
     + ' sibilant onset and 0.54 at a hi-hat), and only where the window also reaches the 13 dB knee the index is built on' + ' — a window whose HF is almost nothing can read tonal, and what is measured there is the analysis filter, not a click.'
     + ' The chain then takes the ring *down*: its onset (−0.5 … +1 ms) falls from +17.7 dB'
-    + ' over the clean copy to −2.0, the ring-out behind it (+1 … +4 ms) only from +11.7 to +8.0, and past +4 ms there was'
-    + ' nothing (probe tools/work/wr25.js) — a de-click stage repairs the click, and the smooth tone the cartridge leaves'
-    + ' behind is music to a second-difference witness');
+    + ' over the clean copy to −2.1 — and the ring-out behind it (+1 … +4 ms), the part a second-difference witness reads as'
+    + ' music, from 9.9 dB over the clicks-free copy to 2.7 (the row below, which measures that window for its own sake; the'
+    + ' probe behind these numbers, tools/work/wr25.js, reads the same window a little higher, 11.7 → 3.6, because it takes the'
+    + ' window\'s own peak), because the same detection now fits a damped sinusoid over the millisecond behind it and'
+    + ' subtracts what the model explains (probe tools/work/wr25.js for the three windows, the row below for the fit itself)'
+    + ' · past +4 ms the reading is +1.1 dB over the clean copy on arrival and +2.4 after the chain, which is where the fit\'s'
+    + ' own 3τ window and its 1 ms fade land — that far tail is the part of the click the stage does not claim');
   const m15c = bandPeaks(click15.clean, click15.pos, 0);
   const m15d = bandPeaks(click15.sig, click15.pos, 0);
   const m15o = bandPeaks(r15.out[0], click15.pos, r15.lat);
@@ -1499,6 +1503,31 @@ mark('section 20');
     N(20 * Math.log10((m15d + 1e-12) / (m15c + 1e-12)), 1), N(20 * Math.log10((m15o + 1e-12) / (m15c + 1e-12)), 1),
     'median of ' + click15.pos.length + ' clicks · the same independent meter as the 0.6 ms row · the ring is longer than the'
     + ' 0.6 ms family\'s, so the clicks stand lower over the bed and the de-clicker\'s own witness has a smaller step to read');
+  /* ── …and the ring-out, which is the window the repair cannot reach ───────
+   * The repair window covers ±1 ms; a cartridge's ring runs longer than that,
+   * and past the window the third witness — a second difference — reads the
+   * smooth tone as music. Round 19 fits it instead: the 48 samples behind the
+   * detection are matched against a damped sinusoid on a grid of τ and of
+   * frequency, and up to 3τ of the model is subtracted, licensed by R², the
+   * share of the window one damped tone explains (0.23 … 0.50 over this family,
+   * against 0.008 … 0.097 over hi-hats, a kick/snare/hat pattern, twelve "s"
+   * bursts and clean beds — so the gate sits in the gap). This row is that
+   * window, read through the same independent meter as the row above. */
+  const ringPk = (sig, pos, lat) => { const bnd = filt(sig, [bq('HP', 4000, 0.707), bq('LP', 12000, 0.707)]);
+    const v = pos.map((p) => { let pk = 0; const o = Math.max(0, p + (lat || 0) + Math.round(SR * 0.001));
+      for (let i = 0; i < Math.round(SR * 0.003) && o + i < bnd.length; i++) { const x = Math.abs(bnd[o + i]); if (x > pk) pk = x; }
+      return pk; }).sort((x, y) => x - y); return v[v.length >> 1]; };
+  const roC = ringPk(click15.clean, click15.pos, 0), roD = ringPk(click15.sig, click15.pos, 0), roO = ringPk(r15.out[0], click15.pos, r15.lat);
+  row('a click as a file carries it (1.5 ms ring, 9 kHz)', 'the ring-out (+1 … +4 ms) per click in 4–12 kHz vs the clicks-free copy (dB)',
+    N(20 * Math.log10((roD + 1e-12) / (roC + 1e-12)), 1), N(20 * Math.log10((roO + 1e-12) / (roC + 1e-12)), 1),
+    'median of ' + click15.pos.length + ' clicks · the window the repair covers is ±1 ms, so this is the part of the click the'
+    + ' stage had to be *taught* about — a damped sinusoid fitted over 48 samples behind the detection and subtracted for up to 3τ'
+    + ' · the window length is what the probes settled (tools/work/wr29-31.js): at the old 0.35 ms the fitted frequency lands'
+    + ' 88–151 Hz off and this reading stays at +10.4 dB, at 1.0 ms it lands 12–28 Hz off, the reading comes here, and the file'
+    + ' reads 0.000 on its own index · the licence is R², and the fits themselves are pinned as a count in dsp.test.js: 65 of'
+    + ' this family\'s 72 clicks, and zero for hi-hats, a sibilant, a clean flat bed and a clean bed carrying the programme\'s'
+    + ' envelope; a kick/snare/hat groove and the worn record, counted the same way through the probes (tools/work/wr32.js,'
+    + ' wr34.js), are zero too');
   /* ── …and the price of that admission, measured on the same machinery ─────
    * A *damped* high tone burst under 10 ms is what the new statistic cannot tell
    * apart from a stylus ring: a synth blip, a chime sample, a "laser". The app
@@ -1533,8 +1562,13 @@ mark('section 20');
   row('a damped 9 kHz tone burst train (a musical blip, not a click)', 'blip band peak through the chain: de-click off vs on (dB)',
     '0.00', N(20 * Math.log10((bo + 1e-12) / (bf + 1e-12)), 2),
     'median of ' + blips.pos.length + ' blips in 4–12 kHz · what the dose this row earns actually costs a musical blip — the same'
-    + ' two-render comparison the drum-performance row above uses for hits · the stage that spends it is the de-clicker: with'
-    + ' the de-hisser bypassed the loss stands at −9.7 dB, with the de-clicker bypassed the blip is untouched (probe wr25.js)');
+    + ' two-render comparison the drum-performance row above uses for hits · the stage that spends it is the de-clicker, and as'
+    + ' of this round both halves of it: a damped 9 kHz burst under 10 ms *is* a damped sinusoid, so the blip earns the tail'
+    + ' stage\'s fit as well as the spike window\'s repair, and the cost deepens from −8.75 to −12.03 dB (the app\'s own index'
+    + ' 0.47 → 0.00, was 0.14). Re-measured with the round-18 harness (probe tools/work/wr25.js): with the de-hisser bypassed the'
+    + ' loss stands — the full chain and the de-hisser-less chain both leave the blip at −19.9 dBFS — and with the de-clicker'
+    + ' bypassed the blip is untouched (0.00 dB), so the whole of it is the de-clicker\'s work: what the note said before, and what'
+    + ' the deeper number now says louder');
   /* a hi-hat pattern: the family the duty gate already excluded */
   const hats = (() => {
     const out = Float32Array.from(bed(9000, 0.7));
@@ -1673,7 +1707,7 @@ mark('section 21');
  * is deeper than any hole), and the ratio *falling* — which a mute does produce
  * (0.48 at 25 samples, 0.04 at 120) — has music's own p0.01 at **0.03**, i.e.
  * music reaches as deep as the deepest gap. The fill would also need a longer
- * delay line than the stage's 0.35 ms of look-ahead, or the un-filled head
+ * delay line than the stage's 1.35 ms of look-ahead, or the un-filled head
  * would be left as a step — the click this stage exists to remove. So the class
  * is measured, named and *not* claimed: it is the bound next to the stage that
  * repairs impulses. */

@@ -1516,7 +1516,33 @@ class DeClicker {
     // ending in a step of its own.
     this.pre = Math.max(2, Math.round(sr * 0.00033));
     this.post = Math.max(4, Math.round(sr * 0.00100));
-    this.look = this.pre + 1;
+    /* ── the window the *ring-out* needs (round 19) ─────────────────────────
+     * A stylus click does not stop at the click: it excites the cartridge's own
+     * resonance, and what is left after the spike is 0.5 … 3 ms of damped
+     * *tone* at 8–12 kHz. The repair window above covers the spike and the first
+     * millisecond of that ring; past it the tone runs on, and a second-
+     * difference witness cannot see it — the third witness is a *roughness*
+     * measure, and a smooth 9 kHz tone is music to it however loud it is. What
+     * can be seen is the tone itself: over `tail` samples behind the detection
+     * the signal is fitted against a damped sinusoid, exp(-k/τ)·(a·cos ωk +
+     * b·sin ωk), over a grid of τ (0.4 … 4 ms) and of ω (6 … 13 kHz at 250 Hz,
+     * refined by a parabola), and the fit that explains the most of the window's
+     * energy is subtracted from the output for up to 3τ (8 ms at most).
+     *
+     * The fit window is the whole trade. Measured on the ring family (τ 0.6 /
+     * 1.5 / 2.5 ms, 9/s at 9 kHz, 72 clicks each, probes tools/work/wr29-31.js):
+     * with a 0.35 ms window — what the old look-ahead allowed — the frequency
+     * lands 88–151 Hz off and the ring-out only comes down from +11.9 to +10.4 dB
+     * over the clean copy; with 1.0 ms it lands 12–28 Hz off and the same reading
+     * is +4.1 dB, the onset falls from +17.7 to +1.6 dB and the app's own crackle
+     * index over the file from 0.512 to 0.000. What licenses the removal is the
+     * fit's own *explained share* R² — a damped tone explains 0.26 … 0.48 of the
+     * window on the ring family (p10 … p90) and 0.008 … 0.097 on everything that
+     * is a performance (hi-hats, a kick/snare/hat pattern, twelve "s" bursts, a
+     * clean bed) — so R² ≥ 0.2 is the gate, and it is measured on both
+     * populations rather than assumed. */
+    this.tail = Math.max(8, Math.round(sr * 0.00100));
+    this.look = this.pre + 1 + this.tail;
     this.rise = Math.max(2, Math.round(sr * 0.00017));
     this.fall = Math.max(2, Math.round(sr * 0.00033));
     const L = this.look + this.post + 4;
@@ -1564,6 +1590,9 @@ class DeClicker {
     this.r2sum = 0;
     this.r2i = 0;
     this.r2count = 0;
+    this.ev = [];                             // detections waiting for their fit window
+    this.rings = [];                          // …and the ring models being subtracted
+    this.n = 0;                               // the absolute index of the sample in hand
     this.w = 0;
     this.inp = 0;
     this.dryOut = 0;                          // the input this stage is working from
@@ -1625,6 +1654,7 @@ class DeClicker {
     this.w = 0; this.inp = 0; this.dryOut = 0; this.prevIn = 0;
     this.prevIn2 = 0; this.plateauPrev = false; this.reconPrev = false;
     this.r2ring.fill(0); this.r2sum = 0; this.r2i = 0; this.r2count = 0;
+    this.ev.length = 0; this.rings.length = 0; this.n = 0;
     this.ref = 0;
     this.warmLeft = this.warm;
     this.seedMax = 0;
@@ -1636,11 +1666,63 @@ class DeClicker {
     const g = up < down ? up : down;
     return g < 0 ? 0 : g > 1 ? 1 : g;
   }
+  /** A sample already in the delay line, by its absolute index. */
+  at(abs) {
+    const L = this.ring.length;
+    return this.ring[(this.w - (this.n - abs) + 2 * L) % L];
+  }
+  /* ── what the window behind a detection is, in one number ────────────────
+   * The fitted model: r(k) = exp(-k/τ)·(a·cos ωk + b·sin ωk), k measured from
+   * the detection. The amplitude is the *matched* one — A = Σ w·y·e^{-jωk} /
+   * Σ w² with w(k) = exp(-k/τ), a complex division that never inverts a matrix,
+   * so a short window stays well conditioned — and the candidate whose
+   * explained energy |A|²·Σw² is largest wins. The share of the window that
+   * model accounts for, R², is what licenses the removal: a click's ring is one
+   * damped tone, a hi-hat or a snare is noise, and noise explains a tenth of
+   * itself with one tone at best. Measured (probes wr29/wr30/wr31): rings
+   * 0.26 … 0.48 over the family's windows, music 0.008 … 0.097 — the gate below
+   * sits in that gap. */
+  fitTail(pos, strength) {
+    const sr = this.sr, tail = this.tail;
+    let yy = 0;
+    for (let k = 2; k <= tail; k++) { const y = this.at(pos + k); yy += y * y; }
+    if (!(yy > 1e-12)) return null;
+    const dec = new Float64Array(tail + 1);
+    let best = null;
+    for (const tauMs of [0.4, 0.6, 1.0, 1.5, 2.5, 4]) {
+      const tauS = sr * tauMs * 1e-3, d = Math.exp(-1 / tauS);
+      let w2 = 0, e = 1;
+      for (let k = 0; k <= tail; k++) { dec[k] = e; if (k >= 2) w2 += e * e; e *= d; }
+      for (let f = 6000; f <= 13000; f += 250) {
+        const w = 2 * Math.PI * f / sr, c = Math.cos(w), sn = Math.sin(w);
+        let sc = 0, ss = 0, cw = 1, sw = 0;
+        for (let k = 0; k <= tail; k++) {
+          if (k >= 2) { const g = dec[k], y = this.at(pos + k); sc += g * cw * y; ss += g * sw * y; }
+          const nc = cw * c - sw * sn, ns = cw * sn + sw * c; cw = nc; sw = ns;
+        }
+        const a = 2 * sc / (w2 + 1e-30), b = 2 * ss / (w2 + 1e-30);
+        const expl = (a * a + b * b) * w2 / 4;
+        if (!best || expl > best.expl) best = { expl: expl, a: a, b: b, f: f, d: d, tauS: tauS };
+      }
+    }
+    const r2 = best.expl / yy;
+    const amp = Math.sqrt(best.a * best.a + best.b * best.b);
+    if (r2 < 0.2 || !(amp > 1e-6)) return null;
+    const len = Math.min(Math.round(sr * 0.008), Math.round(3 * best.tauS));
+    return { pos: pos, a: best.a * strength, b: best.b * strength,
+      w: 2 * Math.PI * best.f / sr, tauS: best.tauS, len: len, fade: Math.max(4, Math.round(sr * 0.001)), r2: r2 };
+  }
   tick(x, amount, reconstructed, clipLevel) {
     if (amount <= 0.0001) {
       this.inp = x; this.dryOut = x;
       this.prevIn2 = this.prevIn; this.prevIn = x;
       this.plateauPrev = false; this.reconPrev = false;
+      /* The delay line stays current while the stage is bypassed — engaging it
+       * mid-file must not fit a window of stale samples — and whatever the tail
+       * stage was holding is dropped. */
+      this.ring[this.w] = x; this.plan[this.w] = 0; this.mark[this.w] = 0;
+      this.w = (this.w + 1) % this.ring.length; this.n++;
+      this.ev.length = 0; this.rings.length = 0;
       return x;
     }
     // ── 1 · the detector, on the sample that just arrived ──────────────────
@@ -1892,6 +1974,10 @@ class DeClicker {
     this.plateauPrev = plateau;
     this.reconPrev = reconstructed;
     if (k > 0.02) {
+      /* …and it asks the tail stage for the ring behind it, one event at a time:
+       * a ring is over in at most 8 ms, so a second detection inside that window
+       * is either the same ring or a click the first model already covers. */
+      if (this.ev.length === 0 && this.rings.length === 0) this.ev.push({ pos: this.n, k: k < 1 ? k : 1 });
       // a detection plans the whole window around itself, in front of the click
       // as much as behind it (that is what the look-ahead is for)
       for (let o = -this.pre; o <= this.post; o++) {
@@ -1934,8 +2020,45 @@ class DeClicker {
      * best measured one; the window *width* was swept too (pre/post 4/8 … 16/48)
      * and moves the leftover by under 1 dB, so the width is not the lever either. */
     const p = this.pred2.process(this.pred.process(this.inp));
-    const out = m > 0.001 ? xd + (p - xd) * m : xd;
+    let out = m > 0.001 ? xd + (p - xd) * m : xd;
+    /* ── 4 · …and the ring the click left behind, on the same detection ─────
+     * Applied to the sample being emitted, never to the dry A/B reference: the
+     * model is parameterised from the detection, so the removal is an
+     * *extrapolation* of a tone that is already measured — the fit window itself
+     * is behind the emitted sample by `pre + 1` samples of the look-ahead.
+     *
+     * …and it is scaled by what the de-clicker's own window has *not* already
+     * taken: that window replaces the flagged samples with a 4 kHz prediction of
+     * the repaired signal, so a ring inside it is gone with weight `m` — the mix
+     * applied to this very sample. Subtracting the model there as well removes
+     * the same tone twice and, since a prediction of a 9 kHz tone is near zero,
+     * puts it back inverted: measured on a synthetic 9 kHz ring that is exactly
+     * what happened — the fit was right to the hundredth (f0 9000.0 Hz, a 0.4626,
+     * b 0.1791 against 0.458 / 0.19 predicted) and the output was *worse* than
+     * the input, with the whole file's crackle index up from 0.512 to 0.938
+     * instead of down. With the model weighted by `1 − m`, the two stages share
+     * the ring exactly: the window's share follows the repair's own shape, the
+     * tail's share takes over as that shape falls to zero, and nothing is
+     * subtracted twice. The last millisecond of the model fades out, so the
+     * removal cannot end in a step of its own. */
+    const ne = this.n - this.look;
+    for (let i = this.rings.length - 1; i >= 0; i--) {
+      const md = this.rings[i];
+      const kk = ne - md.pos;
+      if (kk > md.len) { this.rings.splice(i, 1); continue; }
+      if (kk < 0) continue;
+      const env = (1 - m) * Math.exp(-kk / md.tauS) * Math.min(1, (md.len - kk) / md.fade);
+      out -= env * (md.a * Math.cos(md.w * kk) + md.b * Math.sin(md.w * kk));
+    }
+    for (let i = this.ev.length - 1; i >= 0; i--) {
+      const e = this.ev[i];
+      if (this.n - e.pos < this.tail) continue;
+      this.ev.splice(i, 1);
+      const md = this.fitTail(e.pos, e.k);
+      if (md) this.rings.push(md);
+    }
     this.inp = out;                                    // filter sees the repair
+    this.n++;
     this.w = (this.w + 1) % L;
     return out;
   }
