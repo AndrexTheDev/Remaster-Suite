@@ -6,6 +6,58 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Round 22 — the beta suite, complete: every control, the whole journey, and two rows that were the suite's own fault
+
+**The beta is now a full pass over the interface, not a tour of it.** It grew from 63 to **94 checks**, and the two
+things the earlier report did not do are now in it: every control on the page is driven once and its consequence
+measured, and one file is carried from the file picker to a saved MP3 that is then fed back into the app.
+
+**Control by control (31 rows).** The global power slider moves the state, its read-out and every card's own slider
+with it, and both ends of it are measured against the untouched file: **0 % sits −111.2 dB from the original, 100 %
+sits −14.4 dB** — transparency is a number here, not a claim. A card can be given its own power (0.9, read-out 90 %)
+without the others moving. All six profiles select, resolve and reach the card (`general→general
+lowbitrate→lowbitrate cassette→cassette vinyl→vinyl garage→garage auto→garage`), and a card can override the profile
+for its own file. Transport: play starts the engine and the clock with it (0.82 s → 1.74 s), the same button stops the
+preview it started, A/B flips by itself, the arrow keys move the playhead, grabbing the bar moves it to where it was
+grabbed (75 % of the bar → 4.50 s), and the loop switch is read back on the engine itself. Export: WAV 16/24/32 write
+three different files at 1.06 / 1.59 / 2.12 MB carrying fmt 1 / 1 / 3, the row shows only the control that belongs to
+the format chosen, and the MP3 frame headers are parsed back — 192 / 256 / 320 really say 192 / 256 / 320 kbps. The
+card's own save button writes a real 24-bit file named after the recording, “Nochmal” returns a finished card, one card
+can be taken off the list, “Liste leeren” puts the page back to its start (0 cards, idle), the help dialog opens on the
+header button and closes on Escape, the library switch changes mode and label and back (`local → cdn → local`), all
+three tip addresses answer with a toast that names the coin, and the drop zone opens the picker on a click *and* on
+Enter.
+
+**The whole journey (7 rows).** Choose `garage-6.wav` through the real file picker → the card answers 43/100 with 6
+chips, 13 findings, 6 s → “Alle verarbeiten” → save WAV (16 bit, 2 ch, 44100 Hz, 6.00 s) → save MP3 (8 frames, 320
+kbps, 236 KB) → feed that MP3 back in: the app decodes it to 6.03 s, classifies it `garage` with issues
+`narrow,dullTop` at **80/100** — and *not* `lowbitrate`, which is the row that says an export is not asked to repair
+its own format twice → play it back → clear. The page ends where it started: 0 cards, idle, console silent.
+
+**Two rows failed, and both were the suite's, not the app's.** They are recorded here because a row that fails for the
+wrong reason is the most expensive kind.
+
+| the row | what it looked like | what it was |
+|---|---|---|
+| “the same button pauses” | `running true → true` after a trusted click on the play button | the preview is six seconds long and the rows above had been playing it for a while, so the row was measuring the end of the file, not the button. Rewritten to start from a standing stop and to assert both directions: **stopped → started → stopped** |
+| “…the card carries the score for before and after” | the card painted **43 / 100** where it should paint **43 → 80 / 100**, and `card.afterScore` read `undefined` while `card.after` was an object | **the suite's own instrumentation.** `beta.js` wraps the app's phases inside the page to time them, and wrapping the *synchronous* `RSAnalyzer.analyzeChannels` in an `async` function hands the app a Promise where it expects a result — `prepareCard` reads `.chips` and `.score` straight off the value returned. Fixed with a wrapper that preserves synchrony (`wrapSync`); the four genuinely asynchronous stages keep the awaiting wrapper. The card now paints **43 → 80 / 100** |
+
+The second one is worth its own sentence: it is the failure mode a timing harness can introduce *silently*, and it
+would have shipped as a report claiming the app had forgotten to write an after-score.
+
+**Measurements, this machine** (2 × Xeon @ 2.60 GHz, Chromium 153.0.8010.0 headless). A 180-second stereo take,
+31.8 MB: measured at **52.4 ms per second of audio** (19× realtime) against a 76.4 ms/s baseline calibrated on the
+same machine seconds earlier; upload → ready **17.1 s** (decode 0.5 · measure 9.4 · preview render 5.4 · preview
+measure 1.6); the page kept answering throughout (**262 polls, p50 3 ms, p95 31 ms, worst 1610 ms**); the full render
+took **22.6 s**; the heap stood at **273 MB** after the long file and after a six-file batch (**6/6 in 7.4 s**).
+
+**No application code changed in this round** — the two failures and both fixes were in `tests/beta/beta.js`, and the
+rest is documentation.
+
+**Suites:** dsp 160, audit 335, web 137, e2e 108, tuning 17 — exit 0. Beta **94/94**. The acceptance matrix stays at
+127 rows / 32 defect classes; `tools/workflow-check.js`, `fixture-check.js`, `top-end-check.js` and `codec-sib.js` are
+unchanged and green. The 19-shot screenshot matrix and `docs/BETA-REPORT.md` are regenerated.
+
 ### Round 21 — a squashed master must stay squashed honestly, not be “restored” by a fake transient stage
 
 **The remaining class was the squashed master.** The correct question is not whether the card can name it — it can — but whether the chain makes a second mistake after naming it: compressing it again, or pretending that a transient shaper has recovered peaks the master no longer contains. The answer is now measured on the exact acceptance §15 fixture, on a clipped modern master, and with a deliberately isolated hit experiment.
