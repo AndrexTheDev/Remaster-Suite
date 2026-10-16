@@ -545,9 +545,6 @@
 
     /**
      * Render through the real processor into plain Float32Array channels.
-     * @param {Float32Array[]} channels source audio
-     * @param {number} sampleRate source/target sample rate
-     * @param {object} params parameter map (see presets.buildParams)
      * @param {(Float32Array[]|AudioBuffer)} source - audio to render;
      *   channels[0] must be the longest of the channels, and every channel the
      *   same length.
@@ -711,15 +708,12 @@
      * itself is completely untouched by this method: it is a new, separate,
      * opt-in code path, not a replacement.
      *
-     * @param {Float32Array[]|AudioBuffer} source
-     * @param {number} sampleRate
-     * @param {object} params
-     * @param {{
-     *   chunkSeconds?: number, crossfadeMs?: number, prerollSeconds?: number,
-     *   minChunkSeconds?: number, memoryGuard?: {suggestChunkSeconds:Function},
-     *   onChunk?: (channels: Float32Array[], info: {startSample:number, endSample:number, totalSamples:number, isLast:boolean}) => (void|Promise<void>),
-     *   onProgress?: (p:number) => void, neural?: object,
-     * }} [opts]
+     * @param {(Float32Array[]|AudioBuffer)} source - audio to render; the
+     *   first channel must be the longest, and every channel the same length.
+     * @param {number} sampleRate - target rate in Hz, clamped to 8000…192000.
+     * @param {EngineParams} params - the parameter map (`RSPresets`).
+     * @param {ChunkedRenderOptions} [opts] - chunk size, crossfade, preroll,
+     *   the memory guard, the streaming sink and the progress callback.
      * @returns {Promise<{channels?: Float32Array[], sampleRate:number, samples:number, chunks:number}>}
      *   `channels` is only populated when the caller did not pass `onChunk`
      *   (kept so the method is still usable as a drop-in, memory-saving

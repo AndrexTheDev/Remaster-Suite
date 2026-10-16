@@ -525,9 +525,12 @@ tests/
     chromium.js                  launcher for the packaged headless Chromium
 scripts/
   validate-docs.js               documentation validator: tests/ ↔ README.md ↔ package.json
-                                 (suite count, per-suite check counts, the npm chain) plus the
-                                 JSDoc coverage audit of assets/js; `--run` re-runs every suite
-                                 and compares its own check count with the README
+                                 (suite count, per-suite check counts, the npm chain, every
+                                 helper named in this layout) plus the static audit of
+                                 assets/js — JSDoc coverage, @param names against the real
+                                 signatures, `{@link}` targets, @typedef structure; `--run`
+                                 re-runs every suite and compares its own check count with
+                                 the README
 tools/                           measurement probes, not part of the app — the evidence the
                                  restoration claims rest on (see util.js)
   util.js                        measurement toolkit: fixtures, renderers, spectrum meters

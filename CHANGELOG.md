@@ -21,16 +21,23 @@ Repository layout lists the five suites it was missing (`neural.test.js`, `memor
 `tools/` directories it never described. `package.json` gained the `test:tuning` script the chain had been
 calling without one, plus `validate:docs` / `validate:docs:run`.
 
-**2 — `node scripts/validate-docs.js` is the gate.** It is dependency-free (it has to run before
+**2 — `node scripts/validate-docs.js` is the gate (19 static checks, 31 with `--run`).** It is dependency-free (it has to run before
 `npm install`) and checks, in one pass: that `tests/*.test.js` and the README table describe the same set
 of suites; that the per-suite counts in the table add up to the number in the summary line; that the
 layout section repeats every count; that `npm test` chains exactly the suites on disk and that each one has
 a `test:<name>` script; that every helper, probe and script under `tests/`, `scripts/` and `tools/` is
 named in the layout; and that every module, function, class, object and class method in `assets/js` carries
 a JSDoc block (307 of 307 declarations, 13 of 13 modules with a `@fileoverview`/`@module` header and
-`@typedef`s for their data structures). `--run` goes one step further and executes every suite, comparing
-each one's own `ALL TESTS PASSED (n)` with the count the README promises — the number in the README is
-now something a machine checks rather than something a human remembers to update.
+`@typedef`s for their data structures). Beyond coverage it checks the *content* of the documentation:
+every `@param` names the parameter its function really takes (307 signatures, compared against the real
+parenthesised lists, multi-line or miscounted tags included — the check was verified against a deliberately
+renamed parameter), every `{@link …}` target exists somewhere in the tree (`{@link Step}` in the analyzer
+became `RSDSP.Step`, the worker's eight `NeuralWorker.*` links its real `RSNeuralWorker` module, and a
+`{@link RSWorklet}` that named nothing at all became prose), and every `@typedef` either documents its
+members with `@property` or is an alias/union/map that does not need to. `--run` goes one step further and
+executes every suite, comparing each one's own `ALL TESTS PASSED (n)` with the count the README promises —
+the number in the README is now something a machine checks rather than something a human remembers to
+update.
 
 **3 — strict JSDoc across `assets/js`.** Every module states what it is and what it guarantees; every
 class, method, exported function and object has typed `@param`/`@returns`; the data structures are
@@ -40,8 +47,13 @@ Stage-7 trust dial, `humHz` 50/60, `boxG1/F1/Q1`, `tpCeil`, `refDb`, `eq0…eq11
 `RSDSP.Measurement` and `RSDSP.Step` for the measurement side, and `RSNeural.NeuralResult`,
 `RSNeural.PendingSlot` and the `NeuralReason` union for the neural controller's states — a missing model
 resolving `{applied: false, reason}` instead of throwing is now a documented contract, not a comment.
-Nothing about the DSP changed: the suites pass unchanged (**1037 checks**), and the documentation audit
-was run with them.
+The pass also closed the gaps the stricter reading exposed: the forty-odd functions whose comments had
+described their inputs in prose now carry typed `@param`/`@returns` — the FFT and window helpers, every
+spectrum reader, the sliceable steps (hum, crackle, dynamic range, inter-sample peaks), the stereo band
+split, the WAV envelope writers and the two Biquad setters — `renderChunked()`'s duplicated inline option object references the `ChunkedRenderOptions`
+typedef that already existed, one stale `@param` trio and one phantom parameter were removed, and
+`i18n.js`'s file overview no longer repeats its own header verbatim. No DSP and no runtime behaviour
+changed: the suites pass unchanged (**1037 checks**), and the documentation audit was run with them.
 
 ### Round 30 — Mobile touch optimisation, the "AI Magic Fix" button, and a live A/B/C compare FAB
 

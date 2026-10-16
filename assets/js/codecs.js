@@ -842,7 +842,11 @@
     let written = 0;
     let bytesWritten = 0;
     return {
-      /** Appends one chunk's channels (1 or 2, any length, in order). */
+      /**
+       * Append one chunk's channels — 1 or 2 of them, any length, in order.
+       * @param {Float32Array[]} channels - the chunk's channels.
+       * @returns {Promise<void>} resolves when the chunk is in the sink.
+       */
       async appendChannels(channels) {
         if (nCh === null) {
           nCh = Math.min(2, channels.length);
@@ -948,6 +952,10 @@
        * Encode one render chunk's channels. `isLast` tells the encoder (and,
        * for the worker path, the lamejs instance it owns) this is the final
        * call — any internal buffering is flushed as part of it.
+       * @param {Float32Array[]} channels - the chunk's channels.
+       * @param {boolean} [isLast] - `true` for the final chunk, which flushes any
+       *   internal buffering.
+       * @returns {Promise<void>} resolves when the chunk is in the sink.
        */
       async appendChannels(channels, isLast) {
         if (finished) return;

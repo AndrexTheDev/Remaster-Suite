@@ -157,9 +157,83 @@ function docAbove(lines, i) {
   return false;
 }
 
+/** The doc block above line `i`, as one string, or `''`. */
+function blockOf(lines, i) {
+  let k = i - 1;
+  while (k >= 0 && !lines[k].trim()) k--;
+  if (k < 0 || !lines[k].trim().endsWith('*/')) return '';
+  const end = k;
+  while (k >= 0) {
+    const t = lines[k].trim();
+    if (t.startsWith('/**')) return lines.slice(k, end + 1).join('\n');
+    if (t.startsWith('/*')) break;
+    k--;
+  }
+  return '';
+}
+
+/** The parenthesised parameter list of a declaration line, or `''`. */
+function signatureOf(line) {
+  const open = line.indexOf('(');
+  if (open === -1) return '';
+  let depth = 0;
+  for (let i = open; i < line.length; i++) {
+    if (line[i] === '(') depth++;
+    else if (line[i] === ')') {
+      depth--;
+      if (depth === 0) return line.slice(open, i + 1);
+    }
+  }
+  return '';
+}
+
+/** Parameter names of a `( … )` list, without defaults, destructuring or rests. */
+function paramsOf(sig) {
+  const inner = sig.replace(/^\(|\)$/g, '');
+  const parts = [];
+  let depth = 0;
+  let cur = '';
+  for (const ch of inner) {
+    if ('([{'.indexOf(ch) !== -1) depth++;
+    if (')]}'.indexOf(ch) !== -1) depth--;
+    if (ch === ',' && depth === 0) { parts.push(cur); cur = ''; } else cur += ch;
+  }
+  if (cur.trim()) parts.push(cur);
+  return parts.map((p) => p.trim()
+    .replace(/^\.\.\./, '')
+    .split('=')[0]
+    .replace(/^[^A-Za-z_$]*/, '')
+    .replace(/[{}\[]/g, '')
+    .trim())
+    .filter(Boolean);
+}
+
+/** The names a doc block's `@param` tags mention, in order. */
+function paramNames(doc) {
+  const names = [];
+  const re = /@param\s*\{/g;
+  let m;
+  while ((m = re.exec(doc))) {
+    let depth = 0;
+    let end = m.index + m[0].length - 1;
+    for (let i = end; i < doc.length; i++) {
+      if (doc[i] === '{') depth++;
+      else if (doc[i] === '}') {
+        depth--;
+        if (depth === 0) { end = i; break; }
+      }
+    }
+    const after = doc.slice(end + 1).replace(/^\s*/, '');
+    const hit = /^(\[?[\w$.]+\]?)/.exec(after);
+    if (hit) names.push(hit[1].replace(/\[/g, '').replace(/\]/g, ''));
+    re.lastIndex = end;
+  }
+  return names;
+}
+
 const undoc = [];
-let documented = 0;
-let declarations = 0;
+const decls = [];          // every documented declaration, with its signature
+
 for (const file of jsFiles) {
   const lines = fs.readFileSync(path.join(ROOT, 'assets', 'js', file), 'utf8').split('\n');
   const source = lines.join('\n');
@@ -175,18 +249,18 @@ for (const file of jsFiles) {
       if (!hit) continue;
       const name = hit[1];
       if (KEYWORDS.has(name)) return;
-      declarations++;
-      if (docAbove(lines, i)) documented++;
-      else undoc.push(file + ':' + (i + 1) + ' ' + kind + ' ' + name);
+      const sig = kind === 'class' ? '' : signatureOf(line);
+      const documented = docAbove(lines, i);
+      if (!documented) undoc.push(file + ':' + (i + 1) + ' ' + kind + ' ' + name);
+      else decls.push({ file, line: i + 1, kind, name, sig, doc: blockOf(lines, i) });
       if (kind === 'class') classStack.push(depth);
       return;
     }
     // a method of the innermost class body
     if (classStack.length && depth === classStack[classStack.length - 1]) {
-      const hit = /^ {4,}(?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{\s*$/.exec(line);
+      const hit = /^ {4,}(?:async\s+)?([A-Za-z_$][\w$]*)\s*(\([^)]*\))\s*\{\s*$/.exec(line);
       if (hit && !KEYWORDS.has(hit[1]) && hit[1] !== 'constructor') {
-        declarations++;
-        if (docAbove(lines, i)) documented++;
+        if (docAbove(lines, i)) decls.push({ file, line: i + 1, kind: 'method', name: hit[1], sig: hit[2], doc: blockOf(lines, i) });
         else undoc.push(file + ':' + (i + 1) + ' method ' + hit[1]);
       }
     }
@@ -194,12 +268,69 @@ for (const file of jsFiles) {
   });
 }
 
+const declarations = decls.length + undoc.length;
+
 ok(jsFiles.length === 13, 'all thirteen modules are present', jsFiles.length + ' files');
 ok(undoc.length === 0, 'every module, function, class, object and class method is documented',
   undoc.length ? undoc.slice(0, 12).join(' | ') + (undoc.length > 12 ? ' …(+' + (undoc.length - 12) + ')' : '') : undefined);
-ok(documented === declarations,
+ok(decls.length + undoc.length === declarations,
   'the JSDoc coverage is complete',
-  documented + '/' + declarations + ' declarations documented');
+  decls.length + '/' + declarations + ' declarations documented');
+
+/* every @param must name the parameter the function really takes */
+
+const nameMismatch = [];
+for (const d of decls) {
+  const real = paramsOf(d.sig);
+  const documented = paramNames(d.doc).filter((p) => p.indexOf('.') === -1);
+  if (real.length === 0 && documented.length === 0) continue;
+  if (real.join(',') !== documented.join(',')) {
+    nameMismatch.push(d.file + ':' + d.line + ' ' + d.name + ' — code (' + real.join(', ') +
+      ') vs doc (' + (documented.join(', ') || 'nothing') + ')');
+  }
+}
+ok(nameMismatch.length === 0,
+  'every @param names the parameter its function actually takes',
+  nameMismatch.length ? nameMismatch.slice(0, 8).join(' | ') : decls.length + ' documented signatures agree');
+
+/* every { @link } target must exist somewhere in the tree */
+
+const SOURCES = jsFiles.map((f) => 'assets/js/' + f).concat(['assets/worklets/remaster-processor.js']);
+const treeText = SOURCES.map(read).join('\n');
+function resolves(name) {
+  return new RegExp('\\b' + name.replace(/[$]/g, '\\$') + '\\b').test(treeText);
+}
+const strayLinks = [];
+for (const file of SOURCES) {
+  for (const m of read(file).matchAll(/\{@link\s+([^}\s]+)/g)) {
+    const target = m[1];
+    const segments = target.split(/[#.(]/).filter(Boolean);
+    const base = segments[0];
+    const wrong = !base || !resolves(base) || segments.some((seg) => !resolves(seg));
+    if (wrong) strayLinks.push(file + ' → {@link ' + target + '}');
+  }
+}
+ok(strayLinks.length === 0, 'every {@link} points at something that exists',
+  strayLinks.slice(0, 8).join(' | '));
+
+/* every @typedef must carry its structure, not just a name */
+
+const thinTypedefs = [];
+for (const file of jsFiles) {
+  const source = read(path.join('assets', 'js', file));
+  for (const m of source.matchAll(/@typedef\s+\{([^}]*)\}\s+([\w$.]+)/g)) {
+    const type = m[1];
+    const name = m[2];
+    const tail = source.slice(m.index, m.index + 4000).split('*/')[0];
+    const hasProps = /@property/.test(tail);
+    // a union, a primitive alias or a generic map/collection is a complete
+    // definition on its own; a plain `Object` typedef has to list its fields
+    const isAlias = /['"|]/.test(type) || /</.test(type);
+    if (!hasProps && !isAlias) thinTypedefs.push(file + ' → ' + name + ' (' + type + ')');
+  }
+}
+ok(thinTypedefs.length === 0, 'every @typedef documents its members or is an alias',
+  thinTypedefs.slice(0, 8).join(' | '));
 
 const typed = jsFiles.filter((f) => /@typedef/.test(read(path.join('assets', 'js', f))));
 ok(typed.length >= 10, 'the structured data is described with @typedefs',

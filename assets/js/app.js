@@ -2455,10 +2455,10 @@
    */
   let previewTimer = 0;
   /**
-   * Refresh every card's preview, at most once per debounce window. Dragging
-   * the global slider fires a change per frame; without this, each one would
-   * start a render of its own.
-   * @param {number} [ms] - debounce window in milliseconds.
+   * Refresh every card's preview, at most once per debounce window (the wait
+   * is {@link RSApp.CONFIG}'s `previewDebounceMs`). Dragging the global slider
+   * fires a change per frame; without this, each one would start a render of
+   * its own.
    * @returns {void}
    */
   function debouncePreviewAll() {

@@ -12,26 +12,21 @@
  *   RSi18n.setLang('en')                     → re-applies every [data-i18n*]
  * ========================================================================== */
 /**
- * @fileoverview Bilingual UI text (DE / EN) — exposed as the global `RSi18n`
- * (`globalThis.RSi18n`).
+ * @fileoverview The dictionaries and the accessors around them (see the header
+ * above for what this module is and how it is called) — exposed as the global
+ * `RSi18n`.
  *
- * Every visible word of the application comes from here: labels, hints,
- * tooltips, the plain-language diagnosis, status pills, error messages and the
- * legal overlays. `RSi18n.t()` is the only way text enters the page, and the
- * tests hold the two dictionaries to the same key set — a missing translation
- * is a failing check, not a German word in the English UI.
+ * The tests hold the two tables to the same key set, so a missing translation
+ * is a failing check rather than a German word in the English interface, and
+ * they check that every `data-i18n*` key in the markup and every literal
+ * `t('…')` call in the JavaScript exists in both.
  *
  * Keys are namespaced by area (`ctl.*`, `drop.*`, `chip.*`, `find.*`,
- * `diag.*`, `err.*`, `legal.*`, …, plus the dynamic `find.act.*` family that is
- * completed at runtime). Values may contain `{placeholder}` slots filled by
- * {@link RSi18n.t}, and the small number of values that carry markup are
- * marked with an `html: true` sibling in {@link RSi18n.DICT}, which
+ * `diag.*`, `err.*`, `legal.*`, …) plus the dynamic `find.act.*` family that is
+ * completed at runtime from the diagnosis. Values may contain `{placeholder}`
+ * slots filled by {@link RSi18n.t}; the values that carry markup are flagged
+ * with an `html: true` sibling in {@link RSi18n.DICT}, which
  * {@link RSi18n.isHtml} reports.
- *
- * Usage
- *   RSi18n.t('ctl.power')                    → "Restaurationskraft"
- *   RSi18n.t('meta.line', {d:'3:12', ...})   → "3:12 · Stereo · 44,1 kHz · 7,2 MB"
- *   RSi18n.setLang('en')                     → re-applies every [data-i18n*]
  *
  * @module RSi18n
  */

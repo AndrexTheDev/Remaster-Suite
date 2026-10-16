@@ -79,7 +79,7 @@
  *     (`reason: 'init-failed: …'`), cached as unavailable so a broken file is
  *     not re-read on every call.
  *   - **ready** — a session exists with a named execution provider
- *     (`webnn` → `webgpu` → `wasm`, in the order {@link NeuralWorker.createSession}
+ *     (`webnn` → `webgpu` → `wasm`, in the order {@link RSNeuralWorker.createSession}
  *     decides from the device profile).
  *   - **hardware gave out** — an inference threw an OOM, a lost device or hit
  *     the per-run watchdog. Those three (`'oom'`, `'device-lost'`, `'timeout'`)
@@ -94,7 +94,7 @@
  *      provider instead of failing the pipeline.
  *   2. A missing model is not an error — see the first state above.
  *   3. Tensor time axes are rounded up to a multiple of 4 before they reach
- *      `onnxruntime-web` ({@link NeuralWorker.alignT}): several WebGPU kernels
+ *      `onnxruntime-web` ({@link RSNeuralWorker.alignT}): several WebGPU kernels
  *      these models rely on require it, and "works on WASM, silently wrong on
  *      WebGPU" is the worst of the available outcomes.
  *   4. Mobile is a first-class target: WebNN/NPU is tried ahead of WebGPU on a
@@ -126,7 +126,7 @@
    */
 
   /**
-   * What {@link NeuralWorker.probeWebNN} answers: whether a WebNN context could
+   * What {@link RSNeuralWorker.probeWebNN} answers: whether a WebNN context could
    * really be created, and on which device type.
    * @typedef {Object} WebNnCapability
    * @property {boolean} available - `createContext()` succeeded for some type.
@@ -408,7 +408,7 @@
   /**
    * Pad a row-major [T, cols] matrix with trailing zero rows up to `Talign`.
    * The padding rows are zeros, and the model's output is trimmed back to `T`
-   * again by {@link NeuralWorker.trimRowsTo} — a zero row contributes nothing
+   * again by {@link RSNeuralWorker.trimRowsTo} — a zero row contributes nothing
    * to a strided convolution's kept region.
    * @param {Float32Array} flat - the matrix, row-major, `T * cols` long.
    * @param {number} T - rows actually present.
@@ -426,7 +426,7 @@
 
   /**
    * Trim a row-major [Talign, cols] matrix back down to its first `T` rows,
-   * undoing {@link NeuralWorker.padRowsTo}.
+   * undoing {@link RSNeuralWorker.padRowsTo}.
    * @param {Float32Array} flat - the padded matrix.
    * @param {number} Talign - its current row count.
    * @param {number} cols - row width.
@@ -627,7 +627,7 @@
 
   /** Inverse STFT by overlap-add, the exact inverse of `stft` above. */
   /**
-   * Inverse of {@link NeuralWorker.stft}: overlap-add with the same window and
+   * Inverse of {@link RSNeuralWorker.stft}: overlap-add with the same window and
    * the complementary window sum, so a signal that passes through an STFT and
    * straight back out comes out at the same level it went in. The inverse FFT
    * itself is a conjugated forward FFT scaled by `1/nfft`, which reuses the
@@ -748,7 +748,7 @@
 
   /**
    * The error a watchdog expiry throws, kept as its own class so
-   * {@link NeuralWorker.classifyInferenceError} can recognise it by type
+   * {@link RSNeuralWorker.classifyInferenceError} can recognise it by type
    * instead of by message text.
    */
   class InferenceTimeoutError extends Error {
@@ -1050,7 +1050,7 @@
    *   the model's own rate when needed.
    * @returns {Promise<{applied: boolean, output?: Float32Array, reason?: string}>}
    *   `{applied:true, output}` on success, otherwise `applied:false` with a
-   *   reason from {@link NeuralWorker.resolveInferenceFailure}.
+   *   reason from {@link RSNeuralWorker.resolveInferenceFailure}.
    */
   async function denoiseDFN3(signal) {
     const sess = await getSession('deepfilternet3');

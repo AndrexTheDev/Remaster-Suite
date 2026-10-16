@@ -105,7 +105,7 @@
 
   /**
    * Peak + RMS envelope of a channel set, for drawing.
-   * Sliced form: the returned {@link Step} can be suspended between buckets,
+   * Sliced form: the returned {@link RSDSP.Step} can be suspended between buckets,
    * which is what lets `analyzeAsync()` keep the page painting. One bucket is
    * one unit of work.
    * @param {Float32Array[]} channels - channel list; every channel must be the

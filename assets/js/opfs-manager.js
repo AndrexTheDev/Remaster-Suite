@@ -86,6 +86,15 @@
    */
 
   /**
+   * The `pack` command the worker executes: which entries to write, where the
+   * finished archive goes, and the request id the reply carries.
+   * @typedef {Object} PackMessage
+   * @property {number} reqId - request id, echoed back in the reply.
+   * @property {string} outKey - scratch file the archive is written to.
+   * @property {ZipEntry[]} entries - the entries, in archive order.
+   */
+
+  /**
    * A streaming sink. Write any number of chunks in order, then `close()` once
    * — or `abort()` to drop the partial file instead of publishing it.
    * @typedef {Object} ScratchWriter
@@ -511,9 +520,7 @@
      * Build one complete ZIP: local header, streamed payload, data descriptor
      * and central-directory record per entry, then the central directory and
      * the EOCD. Nothing but one chunk per entry ever sits in memory.
-     * @param {{reqId: number, outKey: string, entries: Array<{name: string,
-     *   key: (string|undefined), bytes: (Uint8Array|undefined)}>}} msg - the
-     *   `pack` command.
+     * @param {RSOPFS.PackMessage} msg - the `pack` command.
      * @returns {Promise<{size: number}>} the archive size in bytes.
      */
     async function doPack(msg) {
