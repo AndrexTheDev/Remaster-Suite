@@ -30,7 +30,7 @@ function ok(cond, label, detail) {
 function section(name) { console.log('\n▸ ' + name); }
 
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
-const APP_JS = ['dsp-utils', 'presets', 'i18n', 'library-loader', 'opfs-manager', 'codecs', 'analyzer', 'neural-controller', 'engine', 'ui', 'app']
+const APP_JS = ['dsp-utils', 'presets', 'i18n', 'library-loader', 'opfs-manager', 'codecs', 'analyzer', 'neural-controller', 'memory-guard', 'engine', 'ui', 'app']
   .map((f) => 'assets/js/' + f + '.js');
 
 const html = read('index.html');
@@ -157,7 +157,7 @@ section('audit · markup');
 
   // script order must match the dependency order of the modules
   const order = [...html.matchAll(/<script src="assets\/js\/([a-z0-9-]+)\.js">/g)].map((m) => m[1]);
-  const want = ['dsp-utils', 'presets', 'i18n', 'library-loader', 'opfs-manager', 'codecs', 'analyzer', 'neural-controller', 'engine', 'ui', 'app'];
+  const want = ['dsp-utils', 'presets', 'i18n', 'library-loader', 'opfs-manager', 'codecs', 'analyzer', 'neural-controller', 'memory-guard', 'engine', 'ui', 'app'];
   ok(JSON.stringify(order) === JSON.stringify(want), 'scripts load in dependency order', order.join(' → '));
 
   // wiring audit: every id / data hook the JavaScript looks for must exist

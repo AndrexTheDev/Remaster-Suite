@@ -228,6 +228,38 @@ that entirely instead of just warning about it:
 a Node `vm` context against a small OPFS simulator, including a multi-megabyte streamed ZIP that
 is cross-checked with both the bundled JSZip and the system `unzip`.
 
+#### Chunked rendering for long files and mobile memory limits
+
+Streaming the *output* only helps once the file has already been decoded and rendered — a 96 kHz
+FLAC or a multi-hour DJ mix still has to exist as one whole-length `AudioBuffer`, one whole-length
+rendered signal and one whole-length encoded file in between, and on a phone that middle step is
+the one that actually runs out of room. Three pieces close that gap:
+
+* **Upload streaming.** A large freshly-picked file is copied into OPFS scratch storage the moment
+  it is added (`RSOPFS.streamFileIntoScratch()` in `assets/js/opfs-manager.js`), read in bounded
+  `file.slice().arrayBuffer()` chunks rather than one `file.arrayBuffer()` call — `app.js` then
+  rebinds the card to that disk-backed copy. Small files skip the round-trip entirely.
+* **Chunked offline rendering.** `assets/js/engine.js` adds `Engine.renderChunked()` alongside the
+  existing whole-file `Engine.render()` (which is unchanged and still used for the live preview,
+  the A/B window and every file below the chunking threshold). It renders independent, short
+  `OfflineAudioContext` spans — 10 seconds by default, with up to a second of preroll so stateful
+  filters (the mains-hum PLL, the de-click/de-clip detectors) can resettle, and a 50 ms lookahead
+  tail — and blends consecutive chunks with a linear, level-preserving crossfade (not an equal-power
+  one, which would add up to +3 dB at the midpoint of two near-identical, correlated renders of the
+  same underlying audio) instead of a hard seam. Each
+  finished chunk is hashed straight into an incremental encoder
+  (`Codecs.createWavStreamEncoder()` / `createMp3StreamEncoder()` in `assets/js/codecs.js`) and
+  written to the OPFS output file, then dropped — the full restored or encoded signal never exists
+  as one array. `app.js`'s `renderCard()` only takes this path once a file is both long enough and
+  OPFS is available; every shorter file still renders in a single pass exactly as before.
+* **Mobile memory budget guard.** `assets/js/memory-guard.js` (`RSMemoryGuard`) reads Chromium's
+  `performance.memory` heap snapshot where it exists (desktop and Android Chrome/WebView) and
+  shrinks the next chunk size as the heap fills past 70%, down to a 2-second floor past 90%.
+  `Engine.renderChunked()` consults it automatically between chunks. The signal is honestly
+  Chromium-only — iOS Safari exposes nothing like it — so the real, cross-platform guarantee is the
+  chunked architecture itself always working in small, bounded pieces; the watchdog is a
+  best-effort second layer where the browser actually lets it look.
+
 ### Honest A/B
 
 The **Original / Restored / A/B** switch cross-fades between dry and wet *inside* the processor
@@ -422,7 +454,12 @@ assets/
                                  mobile-first EP ordering, quantised-weight selection, and an
                                  OOM/timeout throttle fallback (worker-only, loaded with
                                  `new Worker(...)`, not a <script> tag)
-    engine.js                    AudioContext + AudioWorklet, live monitor and offline render (RSEngine)
+    memory-guard.js               best-effort mobile heap watchdog: reads performance.memory where
+                                 Chromium exposes it and shrinks the next render chunk under
+                                 pressure, null-safe everywhere else (RSMemoryGuard)
+    engine.js                    AudioContext + AudioWorklet, live monitor, whole-file offline
+                                 render, and the chunked/streamed offline render for long files
+                                 on constrained devices (RSEngine)
     ui.js                        DOM helpers, toasts, dialogs, interactive waveform (RSUI)
     app.js                       state, per-card logic, batch queue (RSApp)
   worklets/

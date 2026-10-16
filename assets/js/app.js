@@ -49,6 +49,19 @@
     // a phone browser has far less room for a ZIP full of WAVs than a desktop
     softMemoryMB: isTouchDevice() ? 420 : 900,
     maxLiveTools: 120,
+    // a freshly-picked file larger than this is streamed straight into OPFS
+    // scratch storage on upload (see streamUploadToOPFS()) instead of ever
+    // being read whole into the heap by a naive `file.arrayBuffer()`; small
+    // files skip the round-trip entirely — there is nothing to protect
+    opfsUploadThresholdBytes: 24 * 1024 * 1024,
+    // a file this long (post-decode) renders through Engine.renderChunked()
+    // and streams straight into the OPFS output file instead of one
+    // whole-file Engine.render() pass — see renderCard(). Well above every
+    // fixture the automated test suites use, so their exact-size/exact-peak
+    // assertions exercise the unchanged render() path, never this one.
+    chunkedRenderThresholdSeconds: 90,
+    chunkSeconds: 10,
+    chunkCrossfadeMs: 50,
   };
 
   /* -------------------------------------------------------------------- state */
@@ -165,6 +178,40 @@
   async function forgetRender(card) {
     if (!OPFS || !card.result || !card.result.opfsKey) return;
     await OPFS.remove(card.result.opfsKey);
+  }
+
+  /**
+   * The moment a card is big enough to matter, copy its raw upload into OPFS
+   * scratch storage (bounded-chunk reads — see `RSOPFS.streamFileIntoScratch`)
+   * and rebind `card.file` to the disk-backed copy, so every later
+   * `Codecs.decodeFile(card.file)` call (there are two: the preview decode in
+   * `prepareCard()` and the export decode in `renderCard()`) reads from a
+   * `File` OPFS itself is holding, not an in-memory `Blob` the picker handed
+   * over. `decodeAudioData` itself still needs one whole `ArrayBuffer` at the
+   * moment it actually decodes — this does not change that, it only removes
+   * the *second*, redundant whole-file copy the original upload Blob would
+   * otherwise keep pinned in the heap for as long as the card exists.
+   */
+  async function streamUploadToOPFS(card) {
+    if (!OPFS || !State.opfsReady) return;
+    if (!card.file || (card.file.size || 0) < CONFIG.opfsUploadThresholdBytes) return;
+    try {
+      const key = 'upload-' + card.id;
+      const res = await OPFS.streamFileIntoScratch(card.file, key, {});
+      if (res.streamed) {
+        card.file = res.file;
+        card._uploadOpfsKey = key;
+      }
+    } catch (e) {
+      // best effort — the card simply keeps its original, in-memory File
+    }
+  }
+
+  /** Drop a card's streamed-to-OPFS upload copy, if it has one. */
+  async function forgetUpload(card) {
+    if (!OPFS || !card._uploadOpfsKey) return;
+    await OPFS.remove(card._uploadOpfsKey);
+    card._uploadOpfsKey = null;
   }
 
   /* ------------------------------------------------------------- formatting */
@@ -815,6 +862,10 @@
     card._workT0 = nowMs();
     setCardWork(card, 'decode', null);
     await nextPaint();                       // let the bar paint before the work starts
+    if (!card._uploadStreamAttempted) {
+      card._uploadStreamAttempted = true;
+      await streamUploadToOPFS(card);
+    }
     try {
       const dec = await Codecs.decodeFile(card.file);
       const buffer = dec.buffer;
@@ -906,6 +957,65 @@
   /* -------------------------------------------------------- full rendering */
 
   /**
+   * Whether a file is long enough that `renderCard()` should use the
+   * bounded-memory `Engine.renderChunked()` + incremental-encoder path
+   * instead of one whole-file `Engine.render()` pass. Pulled out as its own
+   * pure function so the threshold decision is trivially unit-testable
+   * without needing a real OPFS or a real render.
+   *
+   * Requires OPFS (the chunked path has nowhere to stream to otherwise) and
+   * a duration comfortably above anything the automated test fixtures use,
+   * so every existing exact-size/exact-peak assertion keeps exercising the
+   * unchanged `Engine.render()` path.
+   */
+  function shouldChunkRender(durationSeconds) {
+    return State.opfsReady && !!OPFS && durationSeconds >= CONFIG.chunkedRenderThresholdSeconds;
+  }
+
+  /**
+   * The memory-bounded twin of the plain `Engine.render()` + encode block in
+   * `renderCard()`: used only once `shouldChunkRender()` says the file is
+   * worth it. Each `Engine.renderChunked()` chunk is hashed straight into the
+   * matching incremental codec encoder (`Codecs.createWavStreamEncoder` /
+   * `createMp3StreamEncoder`) and then dropped — at no point does this
+   * card's full-length restored *or* encoded audio exist anywhere but on the
+   * OPFS-backed scratch file being streamed to. `RSMemoryGuard`, if the
+   * script is loaded, is picked up automatically by `Engine.renderChunked()`
+   * itself (see its own default there) and needs no wiring here.
+   */
+  async function renderCardChunked(card, dec, rate, params, neuralOpt, name, signature) {
+    await forgetRender(card);
+    const key = renderKeyFor(card);
+    const sink = await OPFS.createWriter(key);
+    const nCh = Math.min(2, dec.buffer.numberOfChannels);
+    const totalSamples = Math.max(1, Math.round((dec.buffer.length * rate) / dec.buffer.sampleRate));
+    try {
+      card._workT0 = nowMs();
+      setCardWork(card, 'render', 0);
+      const isMp3 = State.format === 'mp3';
+      const mp3Enc = isMp3 ? await Codecs.createMp3StreamEncoder(rate, State.mp3Rate, nCh, sink) : null;
+      const wavEnc = isMp3 ? null : Codecs.createWavStreamEncoder(totalSamples, rate, State.wavDepth, sink);
+      await Engine.renderChunked(dec.buffer, rate, params, {
+        chunkSeconds: CONFIG.chunkSeconds,
+        crossfadeMs: CONFIG.chunkCrossfadeMs,
+        neural: neuralOpt,
+        onProgress: (p) => setCardWork(card, 'render', p, estimateLeft(card, p)),
+        onChunk: async (channels, info) => {
+          if (mp3Enc) await mp3Enc.appendChannels(channels, info.isLast);
+          else await wavEnc.appendChannels(channels);
+        },
+      });
+      const stats = mp3Enc ? await mp3Enc.finish() : await wavEnc.finish();
+      const closed = await sink.close();
+      const file = await OPFS.getFile(key);
+      return { file, size: closed.size, name, format: State.format, rate: stats.sampleRate || rate, signature, stale: false, opfsKey: key };
+    } catch (err) {
+      await sink.abort();
+      throw err;
+    }
+  }
+
+  /**
    * Render the whole file with the current settings and keep the encoded blob.
    * @returns {Promise<{blob:Blob,name:string,format:string}>}
    */
@@ -936,51 +1046,62 @@
     // falls back to the identical pure-DSP render whenever it is omitted,
     // unavailable, or fails for any reason (see the comment there).
     const neuralOpt = (State.neuralEnabled && State.neuralAvailable) ? {} : null;
-    const res = await Engine.render(dec.buffer, rate, params, {
-      progressSteps: 24,
-      onProgress: (p) => setCardWork(card, 'render', p, estimateLeft(card, p)),
-      neural: neuralOpt,
-    });
-
-    setNote(card, State.format === 'mp3' ? t('toast.mp3Slow') : t('status.export'));
     const name = Codecs.outputName(card.name, State.format === 'mp3' ? 'mp3' : 'wav');
-    const onEncodeProgress = (p) => setCardWork(card, 'encode', p, estimateLeft(card, p));
 
     let result;
-    if (State.opfsReady && OPFS) {
-      // stream straight to disk-backed scratch storage: at no point does this
-      // card's whole output exist as one ArrayBuffer on the main thread, so a
-      // batch of large files never multiplies into the soft-memory ceiling
-      await forgetRender(card);
-      const key = renderKeyFor(card);
-      const sink = await OPFS.createWriter(key);
-      try {
+    if (shouldChunkRender(dec.buffer.duration)) {
+      // Long file, OPFS available: render *and* encode in small, overlapping
+      // chunks streamed straight to the scratch file — see
+      // renderCardChunked() — instead of materialising the whole restored
+      // signal (Engine.render()'s own return value) and then the whole
+      // encoded file as two more full-length allocations on top of it.
+      setNote(card, State.format === 'mp3' ? t('toast.mp3Slow') : t('status.export'));
+      result = await renderCardChunked(card, dec, rate, params, neuralOpt, name, signature);
+    } else {
+      const res = await Engine.render(dec.buffer, rate, params, {
+        progressSteps: 24,
+        onProgress: (p) => setCardWork(card, 'render', p, estimateLeft(card, p)),
+        neural: neuralOpt,
+      });
+
+      setNote(card, State.format === 'mp3' ? t('toast.mp3Slow') : t('status.export'));
+      const onEncodeProgress = (p) => setCardWork(card, 'encode', p, estimateLeft(card, p));
+
+      if (State.opfsReady && OPFS) {
+        // stream straight to disk-backed scratch storage: at no point does this
+        // card's whole output exist as one ArrayBuffer on the main thread, so a
+        // batch of large files never multiplies into the soft-memory ceiling
+        await forgetRender(card);
+        const key = renderKeyFor(card);
+        const sink = await OPFS.createWriter(key);
+        try {
+          card._workT0 = nowMs();
+          setCardWork(card, 'encode', 0);
+          if (State.format === 'mp3') {
+            await Codecs.encodeMp3(res.channels, res.sampleRate, State.mp3Rate, onEncodeProgress, sink);
+          } else {
+            await Codecs.encodeWavStream(res.channels, res.sampleRate, State.wavDepth, sink, onEncodeProgress);
+          }
+          const closed = await sink.close();
+          const file = await OPFS.getFile(key);
+          result = { file, size: closed.size, name, format: State.format, rate: res.sampleRate, signature, stale: false, opfsKey: key };
+        } catch (err) {
+          await sink.abort();
+          throw err;
+        }
+      } else {
         card._workT0 = nowMs();
         setCardWork(card, 'encode', 0);
+        let bytes;
         if (State.format === 'mp3') {
-          await Codecs.encodeMp3(res.channels, res.sampleRate, State.mp3Rate, onEncodeProgress, sink);
+          const out = await Codecs.encodeMp3(res.channels, res.sampleRate, State.mp3Rate, onEncodeProgress);
+          bytes = out.bytes;
         } else {
-          await Codecs.encodeWavStream(res.channels, res.sampleRate, State.wavDepth, sink, onEncodeProgress);
+          setCardWork(card, 'encode', null); // a WAV write is fast, but not instant
+          bytes = Codecs.encodeWav(res.channels, res.sampleRate, State.wavDepth);
         }
-        const closed = await sink.close();
-        const file = await OPFS.getFile(key);
-        result = { file, size: closed.size, name, format: State.format, rate: res.sampleRate, signature, stale: false, opfsKey: key };
-      } catch (err) {
-        await sink.abort();
-        throw err;
+        result = { bytes, name, format: State.format, rate: res.sampleRate, signature, stale: false };
       }
-    } else {
-      card._workT0 = nowMs();
-      setCardWork(card, 'encode', 0);
-      let bytes;
-      if (State.format === 'mp3') {
-        const out = await Codecs.encodeMp3(res.channels, res.sampleRate, State.mp3Rate, onEncodeProgress);
-        bytes = out.bytes;
-      } else {
-        setCardWork(card, 'encode', null); // a WAV write is fast, but not instant
-        bytes = Codecs.encodeWav(res.channels, res.sampleRate, State.wavDepth);
-      }
-      result = { bytes, name, format: State.format, rate: res.sampleRate, signature, stale: false };
     }
 
     clearCardWork(card);
@@ -1149,6 +1270,7 @@
     clearTimeout(card._previewTimer);
     if (card.wave && card.wave.destroy) card.wave.destroy();
     forgetRender(card);
+    forgetUpload(card);
     const i = State.cards.indexOf(card);
     if (i >= 0) State.cards.splice(i, 1);
     card.el.card.remove();
@@ -1168,6 +1290,7 @@
       clearTimeout(c._previewTimer);
       if (c.wave && c.wave.destroy) c.wave.destroy();
       forgetRender(c);
+      forgetUpload(c);
       c.el.card.remove();
     }
     State.cards = [];

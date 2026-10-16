@@ -517,6 +517,142 @@
 
   const tick = () => new Promise((r) => global.setTimeout(r, 0));
 
+  /* ------------------------------------------------- incremental stream encoders */
+  /*
+   * `encodeWavStream()`/`encodeMp3()` above already stream their *output* in
+   * bounded-size writes, but each of them still takes one whole-file
+   * `channels` array as input — exactly what `Engine.renderChunked()` is
+   * built to avoid ever materialising. The two factories below are the
+   * missing half: a persistent encoder object fed one render chunk at a
+   * time (`appendChannels()`), so the chunked render pipeline never needs
+   * the full-length audio in memory on either side of the encode step.
+   * Neither touches the existing whole-file functions above — those remain
+   * exactly as tested, for every caller that still has (or wants) the whole
+   * file in hand.
+   */
+
+  /**
+   * An incremental WAV writer: knows the total sample count up front (so the
+   * 44-byte header's sizes are right the first and only time it is written),
+   * then accepts any number of `appendChannels()` calls of any chunk length.
+   * @param {number} totalSamples the exact number of frames the finished file will hold
+   * @param {number} sr
+   * @param {16|24|32} bitDepth
+   * @param {{write:(chunk:Uint8Array)=>Promise<void>}} sink
+   */
+  function createWavStreamEncoder(totalSamples, sr, bitDepth, sink) {
+    const bd = bitDepth || 16;
+    let nCh = null;
+    let written = 0;
+    let bytesWritten = 0;
+    return {
+      /** Appends one chunk's channels (1 or 2, any length, in order). */
+      async appendChannels(channels) {
+        if (nCh === null) {
+          nCh = Math.min(2, channels.length);
+          const bytesPerSample = bd / 8;
+          const dataSize = Math.max(0, totalSamples) * nCh * bytesPerSample;
+          await sink.write(new Uint8Array(DSP.wavHeader(nCh, sr, bd, dataSize)));
+          bytesWritten += 44;
+        }
+        const n = channels[0].length;
+        if (!n) return;
+        const chunk = DSP.wavChunk(channels, bd, 0, n);
+        await sink.write(chunk);
+        bytesWritten += chunk.length;
+        written += n;
+      },
+      /** No trailing bytes to flush for WAV — every chunk is already final. Returns the summary. */
+      async finish() { return { sampleRate: sr, samples: written, bytesWritten }; },
+    };
+  }
+
+  /**
+   * An incremental MP3 encoder: the same worker-backed (main-thread
+   * fallback otherwise) lamejs pipeline `encodeMp3()`/`encodeMp3MainThread()`
+   * use, kept alive across repeated `appendChannels()` calls instead of
+   * looping over one whole-file array itself.
+   * @param {number} sr
+   * @param {number} kbps
+   * @param {number} nCh
+   * @param {{write:(chunk:Uint8Array)=>Promise<void>}} sink
+   */
+  async function createMp3StreamEncoder(sr, kbps, nCh, sink) {
+    const rate = MP3_RATES.indexOf(sr) === -1 ? mp3RateFor(sr) : sr;
+    const ch = Math.min(2, Math.max(1, nCh || 1));
+    const url = getWorkerUrl();
+    const lameUrl = Libs ? await Libs.lameUrl() : 'assets/vendor/lame.min.js';
+
+    let worker = null;
+    if (url && global.Worker) {
+      try {
+        worker = new global.Worker(url);
+        worker.postMessage({ cmd: 'init', url: lameUrl, nCh: ch, sr: rate, kbps });
+        await new Promise((resolve, reject) => {
+          const to = global.setTimeout(() => reject(new Error('worker timeout')), 15000);
+          worker.onmessage = (e) => {
+            global.clearTimeout(to);
+            if (e.data && e.data.ok) resolve(true); else reject(new Error(e.data && e.data.err));
+          };
+        });
+      } catch (err) {
+        try { worker.terminate(); } catch (e) { /* ignore */ }
+        worker = null;
+      }
+    }
+
+    let mainEnc = null;
+    if (!worker) mainEnc = new (await Libs.lame()).Mp3Encoder(ch, rate, kbps);
+
+    let bytesWritten = 0;
+    let finished = false;
+
+    async function encodeOne(l, r, last) {
+      if (worker) {
+        const transfer = r ? [l.buffer, r.buffer] : [l.buffer];
+        const resultP = new Promise((resolve, reject) => {
+          worker.onmessage = (e) => (e.data && e.data.ok ? resolve(e.data.data) : reject(new Error('mp3 chunk failed')));
+        });
+        worker.postMessage({ cmd: 'chunk', left: l, right: r, last }, transfer);
+        const data = await resultP;
+        if (data && data.byteLength) {
+          const bytes = new Uint8Array(data);
+          bytesWritten += bytes.length;
+          await sink.write(bytes);
+        }
+      } else {
+        const mb = mainEnc.encodeBuffer(l, r);
+        if (mb.length) { bytesWritten += mb.length; await sink.write(new Uint8Array(mb)); }
+        if (last) {
+          const f = mainEnc.flush();
+          if (f.length) { bytesWritten += f.length; await sink.write(new Uint8Array(f)); }
+        }
+      }
+    }
+
+    return {
+      rate,
+      /**
+       * Encode one render chunk's channels. `isLast` tells the encoder (and,
+       * for the worker path, the lamejs instance it owns) this is the final
+       * call — any internal buffering is flushed as part of it.
+       */
+      async appendChannels(channels, isLast) {
+        if (finished) return;
+        const left = toInt16(channels[0], 0, channels[0].length);
+        const right = ch > 1 ? toInt16(channels[1] || channels[0], 0, channels[0].length) : null;
+        await encodeOne(left, right, !!isLast);
+        if (isLast) finished = true;
+      },
+      /** Terminate the worker (if any) and return the final byte count. Always call this once, even if the last `appendChannels()` already marked `isLast`. */
+      async finish() {
+        if (!finished) { await encodeOne(new Int16Array(0), ch > 1 ? new Int16Array(0) : null, true); finished = true; }
+        if (worker) worker.terminate();
+        return { sampleRate: rate, bytesWritten };
+      },
+    };
+  }
+
   /* -------------------------------------------------------------------- zipping */
 
   /**
@@ -573,6 +709,7 @@
     MP3_RATES, mp3RateFor, toInt16, looksLikeMp3,
     decodeArrayBuffer, decodeFile, decodeWithFFmpeg,
     encodeWav, encodeWavStream, encodeMp3, makeBuffer, readBlob, blobOf, mimeFor,
+    createWavStreamEncoder, createMp3StreamEncoder,
     zip, download,
     outputName, formatBytes, formatDuration, formatRate, formatDb,
   };

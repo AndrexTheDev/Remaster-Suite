@@ -605,6 +605,49 @@
     }
   }
 
+  /**
+   * Copy a freshly-picked `File`/`Blob` straight into OPFS scratch storage,
+   * reading it in bounded slices (`file.slice(off, end).arrayBuffer()`)
+   * instead of the one `file.arrayBuffer()` call a naive upload handler would
+   * make — a 96 kHz FLAC or a multi-hour DJ mix can be hundreds of MB to a
+   * few GB, and that single call would need the *entire* upload resident in
+   * the main thread's heap just to start writing it anywhere. Falls back to
+   * handing the original `file` straight back, untouched, the moment OPFS or
+   * the worker is unavailable (or the file is empty) — exactly the shape
+   * every other entry point in this module already uses, so a call site
+   * never has to branch on support itself.
+   * @param {File|Blob} file
+   * @param {string} key scratch file name (caller picks something unique)
+   * @param {{chunkBytes?:number, onProgress?:(p:number)=>void}} [opts]
+   * @returns {Promise<{file:File, key:string|null, size:number, streamed:boolean}>}
+   */
+  async function streamFileIntoScratch(file, key, opts) {
+    const o = opts || {};
+    const size = file ? (file.size || 0) : 0;
+    const supported = await isSupported();
+    if (!supported || !size || typeof file.slice !== 'function') {
+      return { file, key: null, size, streamed: false };
+    }
+    const CHUNK = Math.max(256 * 1024, o.chunkBytes || (4 * 1024 * 1024));
+    const writer = await createWriter(key);
+    try {
+      let off = 0;
+      while (off < size) {
+        const end = Math.min(size, off + CHUNK);
+        const buf = await file.slice(off, end).arrayBuffer();
+        await writer.write(new Uint8Array(buf));
+        off = end;
+        if (o.onProgress) o.onProgress(off / size);
+      }
+      await writer.close();
+    } catch (err) {
+      await writer.abort();
+      throw err;
+    }
+    const opfsFile = await getFile(key);
+    return { file: opfsFile, key, size, streamed: true };
+  }
+
   const API = {
     PURE,                 // exported for Node-side unit testing of the zip bytes
     buildWorkerSource,     // exported so tests exercise the *shipped* worker code
@@ -614,6 +657,7 @@
     remove,
     resetScratch,
     packZip,
+    streamFileIntoScratch,
     get scratchDirName() { return SCRATCH_DIR; },
   };
 

@@ -328,6 +328,69 @@ async function run() {
     ok(threw && /too-large/.test(threw.message), 'an over-limit batch rejects before touching the worker', threw && threw.message);
   }
 
+  /* ------------------------------------------------- streamFileIntoScratch */
+  section('worker · streamFileIntoScratch() copies an upload in bounded chunks');
+  {
+    const fakeOPFS = makeFakeOPFS();
+    const RSOPFS = freshOPFS(fakeOPFS);
+
+    // a tracked File-like: records every slice() call so the test can prove
+    // the whole upload is never read in one go
+    function trackedFile(bytes, name) {
+      const real = new File([bytes], name || 'upload.bin');
+      const calls = [];
+      return {
+        size: real.size,
+        name: real.name,
+        slice(start, end) { calls.push({ start, end: end === undefined ? real.size : end }); return real.slice(start, end); },
+        get _calls() { return calls; },
+      };
+    }
+
+    const size = 9 * 1024 * 1024 + 123; // not a round multiple of the chunk size
+    const bytes = new Uint8Array(size);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = (i * 13 + 5) & 0xff;
+    const file = trackedFile(bytes, 'session.flac');
+
+    let lastProgress = 0;
+    const res = await RSOPFS.streamFileIntoScratch(file, 'upload-1', {
+      chunkBytes: 4 * 1024 * 1024,
+      onProgress: (p) => { lastProgress = p; },
+    });
+
+    ok(res.streamed === true, 'a supported, non-trivial file is actually streamed');
+    ok(res.key === 'upload-1', 'the scratch key is reported back');
+    ok(file._calls.length >= 3, 'the file was read in more than one slice', file._calls.length + ' reads');
+    ok(file._calls.every((c) => (c.end - c.start) <= 4 * 1024 * 1024), 'no single read exceeded the requested chunk size',
+      Math.max(...file._calls.map((c) => c.end - c.start)) + ' bytes max');
+    ok(lastProgress === 1, 'progress reaches exactly 1 at the end', String(lastProgress));
+
+    const landed = new Uint8Array(await res.file.arrayBuffer());
+    ok(landed.length === size, 'the OPFS copy has the exact original length', landed.length + ' bytes');
+    ok(Buffer.from(landed).equals(Buffer.from(bytes)), 'and byte-for-byte identical content');
+
+    await RSOPFS.remove('upload-1');
+  }
+
+  section('worker · streamFileIntoScratch() handles the tiny and the empty cases');
+  {
+    const fakeOPFS = makeFakeOPFS();
+    const RSOPFS = freshOPFS(fakeOPFS);
+
+    // a file far smaller than one chunk still round-trips in a single read
+    const tiny = new File([new Uint8Array([1, 2, 3, 4])], 'click.wav');
+    const res = await RSOPFS.streamFileIntoScratch(tiny, 'upload-tiny', { chunkBytes: 1024 * 1024 });
+    ok(res.streamed === true, 'a non-empty file is always streamed once OPFS is supported, however small');
+    const bytes = new Uint8Array(await res.file.arrayBuffer());
+    ok(bytes.length === 4 && bytes[0] === 1 && bytes[3] === 4, 'and its bytes round-trip exactly');
+    await RSOPFS.remove('upload-tiny');
+
+    // an empty file is the one case with nothing to copy: handed back untouched
+    const empty = new File([], 'empty.wav');
+    const res2 = await RSOPFS.streamFileIntoScratch(empty, 'upload-empty', {});
+    ok(res2.streamed === false && res2.file === empty, 'an empty file is returned as-is, never opening a writer for nothing');
+  }
+
   /* ------------------------------------------------------------ fallback */
   section('fallback · no OPFS, no Worker — the in-memory sink behaves the same');
   {
@@ -353,6 +416,10 @@ async function run() {
     let threw = null;
     try { await RSOPFS.packZip([{ name: 'a', key: 'mem-1' }], 'out.zip'); } catch (e) { threw = e; }
     ok(threw && /opfs-unavailable/.test(threw.message), 'packZip refuses cleanly when OPFS is unavailable — callers fall back to RSCodecs.zip');
+
+    const original = new File([new Uint8Array([9, 8, 7])], 'orig.wav');
+    const res = await RSOPFS.streamFileIntoScratch(original, 'upload-x', {});
+    ok(res.streamed === false && res.file === original, 'streamFileIntoScratch() hands the original File straight back with no OPFS, no branching required of the caller');
   }
 
   console.log('\n' + '-'.repeat(60));

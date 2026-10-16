@@ -6,6 +6,81 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Round 29 — OPFS chunked streaming for mobile audio processing: a disk-backed upload path,
+### overlapping-chunk offline rendering, and a live memory-budget guard
+
+**Mobile Safari and Chrome both kill a tab that pins too much heap for too long — exactly what holding a
+96 kHz FLAC or an hour-long DJ mix as one uncompressed in-memory buffer, twice over (once decoded, once
+rendered), does on a phone. This round removes that peak by moving both the upload and the render path to
+the Origin Private File System, chunk by chunk, with a watchdog that can shrink the chunk size live if the
+device is still under pressure.** Three additions, matching the brief's own three requirements:
+
+**1 — a stream-based decoder entry point.** `assets/js/opfs-manager.js` gains `streamFileIntoScratch(file,
+key, opts)`: instead of the picker's `File`/`Blob` sitting in memory for the card's whole lifetime, it is
+read in bounded chunks (`opts.chunkBytes`, default 4 MB) and written straight to an OPFS scratch file via
+`FileSystemSyncAccessHandle` (through the existing worker, the same one `createWriter`/`getFile` already
+use), returning a new `File` backed by that OPFS copy. `app.js`'s `streamUploadToOPFS(card)` calls this
+once per upload, above a configurable size floor (`CONFIG.opfsUploadThresholdBytes`, 24 MB), and rebinds
+`card.file` to the streamed copy — every later `Codecs.decodeFile(card.file)` call (the preview decode and
+the export decode) now reads from the disk-backed `File`, not the original in-memory `Blob`, which is free
+to be garbage-collected. `forgetUpload(card)` removes the scratch copy once the card itself is gone. Empty
+files and environments without OPFS support both fall back to the original `File`, untouched, rather than
+failing the upload.
+
+**2 — blockwise offline rendering.** `AudioEngine.prototype.renderChunked(source, sampleRate, params, opts)`
+(`assets/js/engine.js`) renders long material in overlapping spans — 10 s chunks by default, 50 ms of
+crossfade, a ~1 s preroll per chunk so each one's filter/look-ahead state settles before the audio that is
+actually kept — and hands each finished chunk to `opts.onChunk` as soon as it is ready, instead of
+assembling one whole-file array first. `app.js`'s `renderCardChunked()` pipes those chunks straight into
+`Codecs.createWavStreamEncoder`/`createMp3StreamEncoder` (also new, in `codecs.js`) writing directly to an
+OPFS output file, so the peak resident audio at any moment is a handful of chunks, not the whole render.
+`shouldChunkRender(durationSeconds)` opts a card into this path once it crosses
+`CONFIG.chunkedRenderThresholdSeconds` (90 s); shorter files keep the existing single-pass path unchanged.
+The chunk boundary itself blends with a **linear, level-preserving crossfade** (equal weights summing to 1
+across the overlap), not an equal-power one — an equal-power (`sin`/`cos`) curve is the right tool for
+blending two *independent* sources, but a chunk seam is blending two renders of the *same, correlated*
+audio, where an equal-power curve's peak `√2` gain at the seam's midpoint shows up as a real, audible +3 dB
+level bump every 10 seconds. `tests/chunked-render.test.js` checks this directly: a bypassed chunked render
+is diffed sample-for-sample against a bypassed single-pass render of the same source (max difference
+`0.00e+0`) and the chunked render's peak level is compared against the whole-file render's peak at the
+exact seam (`0.72000` either way) — both would have caught the equal-power version's bump had it shipped.
+
+**3 — a mobile memory budget guard.** `assets/js/memory-guard.js` (new) wraps `performance.memory` (where
+Chrome/Chromium exposes it) behind `heapInfo()`, returning `{supported, usedBytes, limitBytes, ratio}`;
+`deviceMemoryGB()` reads `navigator.deviceMemory` as a secondary signal on engines that don't expose heap
+details at all (notably Safari/WebKit, every iPhone's browser). `suggestChunkSeconds(current, info, opts)`
+shrinks the chunk size on a ramp between a `highWaterRatio` (0.70) and a `criticalRatio` (0.90) of the heap
+limit — unchanged below the low mark, clamped to `opts.minChunkSeconds` at or above the high mark — and
+`watch(callback, opts)` polls `heapInfo()` on an interval (floored at 250 ms so a tight polling request
+can't itself become a performance problem) and calls back with the same shape `suggestChunkSeconds` reads.
+`renderCardChunked()` wires a guard into every chunked render's `opts.onChunk`, so a chunk size decided
+before the render started can still shrink mid-render if memory pressure climbs partway through a long
+file — confirmed in `tests/chunked-render.test.js` by a render that starts at a larger chunk size than a
+simulated high-water mark allows, and ends up delivering more, smaller chunks than its starting size would
+have produced, with the guard consulted once per chunk rather than once for the whole render. On engines
+with neither `performance.memory` nor `navigator.deviceMemory` (iOS Safari, today), the guard simply never
+fires — `renderChunked()`'s own fixed default chunk size is the safety margin in that case, not a dynamic
+one.
+
+New tests: `tests/opfs.test.js` (39 checks, up from 28) covers `streamFileIntoScratch` end to end — bounded
+chunk reads, byte-exact round trips, progress reaching exactly 1, and both the empty-file and
+no-OPFS-support fallbacks. `tests/memory-guard.test.js` (new, 21 checks) covers `heapInfo`,
+`deviceMemoryGB`, the `suggestChunkSeconds` ramp and its clamps, and `watch`'s polling floor and `stop()`.
+`tests/chunked-render.test.js` (new, 50 checks) covers `renderChunked()`'s chunk shape and streamed
+delivery, the bypass/linear-crossfade correctness above, a tolerant comparison against the whole-file
+render with real DSP engaged, the memory-guard-driven shrink-mid-render path, error propagation out of a
+failing sink, both stream encoders' byte/size agreement with their existing batch counterparts, and
+`app.js`'s own `renderCard()` routing into the OPFS-backed chunked path once a file crosses the duration
+threshold (and staying on the original path below it).
+
+Changed: `assets/js/opfs-manager.js` (`streamFileIntoScratch`), `assets/js/engine.js` (`renderChunked`,
+`_renderSpan`), `assets/js/codecs.js` (`createWavStreamEncoder`, `createMp3StreamEncoder`), `assets/js/
+app.js` (`streamUploadToOPFS`, `forgetUpload`, `shouldChunkRender`, `renderCardChunked`, new `CONFIG`
+entries), `index.html` (new `memory-guard.js` script tag), `tests/opfs.test.js`, `tests/web.test.js`,
+`tests/e2e.test.js`.
+
+Added: `assets/js/memory-guard.js`, `tests/memory-guard.test.js`, `tests/chunked-render.test.js`.
+
 ### Round 28 — the neural pipeline becomes mobile/NPU-aware: WebNN detection, quantised weights,
 ### and a quiet toast when the hardware throttles mid-inference
 
