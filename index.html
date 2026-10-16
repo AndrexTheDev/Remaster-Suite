@@ -164,6 +164,14 @@
         </select>
       </div>
 
+      <div class="ctl-group" id="neuralGroup">
+        <label class="ctl-check" id="neuralLabel" data-i18n-title="ctl.neuralHint" title="Nutzt ein neuronales Modell, um bei stark komprimierten Dateien die abgeschnittenen Höhen über die DSP-Luftsynthese präziser wiederherzustellen.">
+          <input type="checkbox" id="neuralToggle">
+          <span data-i18n="ctl.neural">KI-Höhenrekonstruktion</span>
+        </label>
+        <span class="ctl-hint" id="neuralStatus" data-i18n="ctl.neuralUnavailable">Kein Modell gefunden — reine DSP-Kette aktiv</span>
+      </div>
+
       <div class="job" id="globalProgress" hidden>
         <div class="job-head">
           <span class="job-text" id="globalProgressText" aria-live="polite"></span>
@@ -383,6 +391,7 @@
 <script src="assets/js/opfs-manager.js"></script>
 <script src="assets/js/codecs.js"></script>
 <script src="assets/js/analyzer.js"></script>
+<script src="assets/js/neural-controller.js"></script>
 <script src="assets/js/engine.js"></script>
 <script src="assets/js/ui.js"></script>
 <script src="assets/js/app.js"></script>

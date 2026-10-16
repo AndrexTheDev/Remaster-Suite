@@ -1,0 +1,373 @@
+/* =============================================================================
+ * Remaster Suite — optional neural pipeline test suite
+ * -----------------------------------------------------------------------------
+ * Exercises three things, without ever needing a real .onnx file or a real
+ * GPU (neither exists in this CI environment, and the whole point of the
+ * design is that it must not need either):
+ *
+ *   1. neural-worker.js's own math (T-frame alignment, the ERB filterbank,
+ *      the Bluestein-based arbitrary-length STFT/ISTFT DeepFilterNet3's real
+ *      960-sample frame needs) — loaded exactly as shipped, via `require()`,
+ *      the same "export the shipped internals" convention opfs-manager.js's
+ *      worker source already uses.
+ *   2. The clean-fallback contract: with no weights installed (the state of
+ *      this repository, and of a fresh user profile), probing and every
+ *      model call must resolve to `{applied:false, reason:...}` — never
+ *      throw, never hang — both from the worker's own functions and from
+ *      neural-controller.js's main-thread wrapper (which also has no `Worker`
+ *      global to talk to under plain Node, a second, independent reason the
+ *      same contract has to hold).
+ *   3. The worklet's Stage-7 coupling (`NeuralAirCurve` in
+ *      remaster-processor.js): default-off, additive-only, and inert on an
+ *      all-zero or never-posted curve — run through the real worklet source
+ *      with the same harness the DSP suite uses.
+ *
+ * Run:  node tests/neural.test.js
+ * ========================================================================== */
+'use strict';
+
+const path = require('path');
+const H = require('./harness.js');
+
+const ROOT = H.ROOT;
+
+let passed = 0;
+let failed = 0;
+const failures = [];
+function ok(cond, label, detail) {
+  if (cond) { passed++; console.log('  ✓ ' + label + (detail ? '  → ' + detail : '')); }
+  else { failed++; failures.push(label); console.log('  ✗ ' + label + '  → ' + (detail === undefined ? 'failed' : detail)); }
+}
+function section(name) { console.log('\n▸ ' + name); }
+
+const RSNeuralWorker = require(path.join(ROOT, 'assets', 'js', 'neural-worker.js'));
+const RSNeural = require(path.join(ROOT, 'assets', 'js', 'neural-controller.js'));
+const DSP = H.loadDsp();
+
+/* ====================================================================== *
+ * 1 · worker-internal math
+ * ====================================================================== */
+
+function testAlignment() {
+  section('neural · T-frame alignment (multiples of 4)');
+  const bad = [];
+  // n=0 is deliberately floored to 1 frame first (there is no such thing as a
+  // zero-frame session.run()), so it aligns to 4, not to 0 — every n from 1 up
+  // follows the plain "round up to the next multiple of 4" rule.
+  for (let n = 1; n <= 20; n++) {
+    const a = RSNeuralWorker.alignT(n);
+    if (a % 4 !== 0) bad.push(n + '→' + a);
+    if (a < n) bad.push(n + '→' + a + ' (shrank)');
+    if (a - n >= 4) bad.push(n + '→' + a + ' (overshot by a whole period)');
+  }
+  ok(bad.length === 0, 'every T from 1 to 20 rounds up to the nearest multiple of 4', bad.join(', '));
+  ok(RSNeuralWorker.alignT(0) === 4, 'T=0 is floored to one frame first, then aligned (never zero frames into a session)');
+  ok(RSNeuralWorker.alignT(4) === 4 && RSNeuralWorker.alignT(8) === 8, 'an already-aligned T is left alone');
+
+  section('neural · row-major pad/trim round-trip (what every model wrapper does around session.run)');
+  const T = 7, cols = 3, Talign = RSNeuralWorker.alignT(T);
+  const flat = new Float32Array(T * cols);
+  for (let i = 0; i < flat.length; i++) flat[i] = i + 1;
+  const padded = RSNeuralWorker.padRowsTo(flat, T, cols, Talign);
+  ok(padded.length === Talign * cols, 'padded buffer has the aligned row count', padded.length + ' vs ' + (Talign * cols));
+  ok(padded.subarray(0, T * cols).every((v, i) => v === flat[i]), 'the original rows are untouched');
+  ok(padded.subarray(T * cols).every((v) => v === 0), 'the padding rows are zero, not garbage');
+  const trimmed = RSNeuralWorker.trimRowsTo(padded, Talign, cols, T);
+  ok(trimmed.length === T * cols && Array.from(trimmed).every((v, i) => v === flat[i]),
+    'trimming the padded buffer back down recovers exactly the original data');
+  const T4 = 8;
+  const flat4 = new Float32Array(T4 * cols).fill(5);
+  ok(RSNeuralWorker.padRowsTo(flat4, T4, cols, T4) === flat4, 'padRowsTo is a no-op when T is already aligned');
+  ok(RSNeuralWorker.trimRowsTo(flat4, T4, cols, T4) === flat4, 'trimRowsTo is a no-op when T is already aligned');
+}
+
+function testErbFilterbank() {
+  section('neural · ERB filterbank (DeepFilterNet3\'s 32-band grouping, and the mel-ish proxy reuse)');
+  const nBins = 481, nBands = 32;
+  const fb = RSNeuralWorker.buildErbFilterbank(nBins, nBands, 48000, 960, 1);
+  ok(fb.nBands === nBands && fb.nBins === nBins, 'reports the shape it was asked to build');
+  ok(fb.edges.length === nBands + 1 && fb.edges[0] === 0 && fb.edges[nBands] === nBins,
+    'edges span the whole bin range, start to end', fb.edges.join(','));
+  let monotone = true, gaps = 0;
+  for (let i = 1; i < fb.edges.length; i++) { if (fb.edges[i] < fb.edges[i - 1]) monotone = false; if (fb.edges[i] === fb.edges[i - 1]) gaps++; }
+  ok(monotone, 'band edges never go backwards');
+  ok(gaps === 0, 'no band is left empty (every band gets at least its minimum width)');
+  const w = (i) => fb.edges[i + 1] - fb.edges[i];
+  ok(w(20) >= w(2), 'bands grow with frequency, the way ERB spacing should', w(2) + ' → ' + w(20));
+  const flatSpec = new Float32Array(nBins).fill(1);
+  const bands = new Float32Array(nBands);
+  for (let b = 0; b < nBands; b++) { let s = 0; for (let i = 0; i < nBins; i++) s += fb.fwd[b * nBins + i] * flatSpec[i]; bands[b] = s; }
+  ok(bands.every((v) => Math.abs(v - 1) < 1e-5), 'averaging a flat spectrum over any band returns 1, not a partial sum');
+}
+
+function testFftAny() {
+  section('neural · fftAny (Bluestein reduction) against a direct DFT, power-of-two and not');
+  function naiveDft(re, im) {
+    const n = re.length, or_ = new Float64Array(n), oi = new Float64Array(n);
+    for (let k = 0; k < n; k++) {
+      let sr = 0, si = 0;
+      for (let j = 0; j < n; j++) {
+        const ang = -2 * Math.PI * k * j / n, c = Math.cos(ang), s = Math.sin(ang);
+        sr += re[j] * c - im[j] * s; si += re[j] * s + im[j] * c;
+      }
+      or_[k] = sr; oi[k] = si;
+    }
+    return { re: or_, im: oi };
+  }
+  const sizes = [5, 7, 13, 64, 960, 2048]; // 64 and 2048 are the power-of-two fast path
+  const worst = {};
+  for (const n of sizes) {
+    const re = new Float32Array(n), im = new Float32Array(n);
+    for (let i = 0; i < n; i++) re[i] = Math.sin(i * 0.73) + 0.3 * Math.cos(i * 1.31) - 0.1;
+    const got = { re: Float32Array.from(re), im: Float32Array.from(im) };
+    RSNeuralWorker.fftAny(got.re, got.im, DSP, n);
+    const ref = naiveDft(re, im);
+    let maxErr = 0;
+    for (let i = 0; i < n; i++) maxErr = Math.max(maxErr, Math.abs(got.re[i] - ref.re[i]), Math.abs(got.im[i] - ref.im[i]));
+    worst[n] = maxErr;
+  }
+  const allSmall = Object.values(worst).every((e) => e < 0.01);
+  ok(allSmall, 'fftAny matches a direct O(n²) DFT to float32 precision at every size tried',
+    Object.entries(worst).map(([n, e]) => n + ':' + e.toExponential(1)).join(' '));
+}
+
+function testStftRoundTrip() {
+  section('neural · STFT/ISTFT round-trip at the real model frame sizes');
+  const sr = 48000;
+  const sig = new Float32Array(sr);
+  for (let i = 0; i < sig.length; i++) sig[i] = Math.sin(2 * Math.PI * 440 * i / sr) + 0.2 * Math.sin(2 * Math.PI * 3000 * i / sr);
+
+  // DeepFilterNet3's own frame: 960 samples, 480 hop, Vorbis window, 481 bins —
+  // not a power of two, the exact case fftAny's Bluestein path exists for.
+  const winV = RSNeuralWorker.vorbisWindow(960);
+  const st = RSNeuralWorker.stft(sig, 960, 480, winV);
+  ok(st.nBins === 481 && st.frames > 0, 'DFN3 framing: 481 bins, at least one frame', st.nBins + ' bins, ' + st.frames + ' frames');
+  const back = RSNeuralWorker.istft(st.re, st.im, st.frames, 960, 480, winV, sig.length);
+  let err960 = 0;
+  for (let i = 960; i < sig.length - 960; i++) err960 = Math.max(err960, Math.abs(back[i] - sig[i]));
+  ok(err960 < 1e-4, 'perfect-reconstruction round trip at the DFN3 frame size (interior samples)', 'max err ' + err960.toExponential(2));
+
+  // BS-RoFormer's own frame: 2048 samples → 1025 bins, a power of two (fast path)
+  const winH = RSNeuralWorker.hannWindow(2048);
+  const st2 = RSNeuralWorker.stft(sig, 2048, 512, winH);
+  ok(st2.nBins === 1025, 'BS-RoFormer framing: 1025 bins', String(st2.nBins));
+  const back2 = RSNeuralWorker.istft(st2.re, st2.im, st2.frames, 2048, 512, winH, sig.length);
+  let err2048 = 0;
+  for (let i = 2048; i < sig.length - 2048; i++) err2048 = Math.max(err2048, Math.abs(back2[i] - sig[i]));
+  ok(err2048 < 1e-4, 'perfect-reconstruction round trip at the BS-RoFormer frame size (interior samples)', 'max err ' + err2048.toExponential(2));
+}
+
+/* ====================================================================== *
+ * 2 · the clean-fallback contract (no weights installed — the state of
+ * this repository and of a fresh user profile)
+ * ====================================================================== */
+
+async function testProbeAndFallback() {
+  section('neural · capability probe never throws and reports the honest state of this environment');
+  const p = await RSNeuralWorker.probe();
+  ok(p && p.webgpu && typeof p.webgpu.available === 'boolean', 'reports a webgpu capability object');
+  ok(p.webgpu.available === false, 'no WebGPU under plain Node — reported as such, not as a crash', JSON.stringify(p.webgpu));
+  ok(p.wasmSimd === true, 'WASM-SIMD fallback is reported available (this worker always offers it)');
+  ok(!!(p.models && p.models.deepfilternet3 && p.models.bsroformer && p.models.audiosr),
+    'reports all three model slots', Object.keys(p.models || {}).join(', '));
+  for (const key of ['deepfilternet3', 'bsroformer', 'audiosr']) {
+    ok(p.models[key].available === false && typeof p.models[key].reason === 'string',
+      key + ' honestly reports unavailable with a reason, no weights are shipped in this repo',
+      JSON.stringify(p.models[key]));
+  }
+
+  section('neural · every model call falls back cleanly with no weights installed (requirement: no errors)');
+  const sr = 48000;
+  const sig = new Float32Array(sr);
+  for (let i = 0; i < sig.length; i++) sig[i] = Math.sin(2 * Math.PI * 440 * i / sr) * 0.3;
+  const calls = [
+    ['denoiseDFN3', () => RSNeuralWorker.denoiseDFN3(sig)],
+    ['separateBSR', () => RSNeuralWorker.separateBSR(sig)],
+    ['superresCurve', () => RSNeuralWorker.superresCurve(sig, [8000, 10000, 12500, 16000, 19000, 22000])],
+  ];
+  for (const [name, fn] of calls) {
+    try {
+      const r = await fn();
+      ok(r && r.applied === false && typeof r.reason === 'string',
+        name + '() resolves {applied:false, reason} instead of throwing', JSON.stringify(r));
+    } catch (err) {
+      ok(false, name + '() must never reject', String((err && err.message) || err));
+    }
+  }
+
+  section('neural · neural-controller.js (main-thread wrapper) — no Worker global under Node, same clean contract');
+  const ctrlCalls = [
+    ['probe', () => RSNeural.probe()],
+    ['denoise', () => RSNeural.denoise(new Float32Array(100))],
+    ['separate', () => RSNeural.separate(new Float32Array(100))],
+    ['superres', () => RSNeural.superres(new Float32Array(100), [8000, 16000])],
+  ];
+  for (const [name, fn] of ctrlCalls) {
+    try {
+      const r = await fn();
+      ok(r && typeof r === 'object', 'RSNeural.' + name + '() resolves to an object, never throws, never hangs', JSON.stringify(r).slice(0, 120));
+      if (name !== 'probe') ok(r.applied === false, 'RSNeural.' + name + '() reports applied:false with no Worker to talk to');
+    } catch (err) {
+      ok(false, 'RSNeural.' + name + '() must never reject', String((err && err.message) || err));
+    }
+  }
+  let threw = null;
+  try { RSNeural.dispose(); } catch (e) { threw = e; }
+  ok(threw === null, 'dispose() is safe to call even when no worker was ever created');
+}
+
+/* ====================================================================== *
+ * 3 · the worklet's Stage-7 coupling (NeuralAirCurve)
+ * ====================================================================== */
+
+function runNeuralProcessor(sr, signal, airNeuralAmount, curve) {
+  const Processor = H.loadProcessor(sr);
+  const proc = new Processor({ processorOptions: { channels: 1 } });
+  if (curve) proc.port.onmessage({ data: { type: 'neuralAirCurve', bandsHz: curve.bandsHz, gainsDb: curve.gainsDb } });
+  const bs = 128;
+  const out = new Float32Array(signal.length);
+  const names = ['power', 'bypass', 'air', 'airNeural', 'exciter', 'sub', 'dehiss', 'declip', 'declick',
+    'reso', 'glue', 'warmth', 'tilt', 'width', 'azimuth'];
+  const arrays = {};
+  for (const n of names) arrays[n] = Float32Array.from([0]);
+  arrays.power = Float32Array.from([1]);
+  arrays.bypass = Float32Array.from([0]);
+  arrays.airNeural = Float32Array.from([airNeuralAmount]);
+  // `autoLevel` (see remaster-processor.js) is a separate, global RMS
+  // loudness-matcher that is not part of what is under test here — left on,
+  // it would partly undo any single stage's isolated gain change, which is
+  // real, correct chain behaviour but the wrong thing to measure through
+  // when the question is "does this one stage's own math do what it should".
+  arrays.autoLevel = Float32Array.from([0]);
+  for (let pos = 0; pos < signal.length; pos += bs) {
+    const n = Math.min(bs, signal.length - pos);
+    const inBlock = signal.subarray(pos, pos + n);
+    const outBlock = out.subarray(pos, pos + n);
+    proc.process([[inBlock]], [[outBlock]], arrays);
+  }
+  return out;
+}
+
+function bandRms(DSPmod, sig, sr, loHz, hiHz) {
+  // crude band energy via the shared FFT, good enough to detect "more energy
+  // showed up in this band", which is all these checks need
+  const n = 4096;
+  let sum = 0, frames = 0;
+  for (let off = 0; off + n <= sig.length; off += n) {
+    const re = new Float32Array(n), im = new Float32Array(n);
+    for (let i = 0; i < n; i++) re[i] = sig[off + i];
+    DSPmod.fft(re, im);
+    const loBin = Math.round(loHz * n / sr), hiBin = Math.round(hiHz * n / sr);
+    let e = 0;
+    for (let b = loBin; b <= hiBin && b < n / 2; b++) e += re[b] * re[b] + im[b] * im[b];
+    sum += e; frames++;
+  }
+  return frames ? Math.sqrt(sum / frames) : 0;
+}
+
+function testWorklet() {
+  section('neural · Stage-7 coupling (NeuralAirCurve) in the real worklet');
+  const sr = 48000;
+  const noise = H.noise(sr, 2, 0.4, 101); // broadband so every neural band has something to re-shape
+  const curve = { bandsHz: [8000, 10000, 12500, 16000, 19000, 22000], gainsDb: [6, 6, 6, 6, 6, 6] };
+
+  const baseline = runNeuralProcessor(sr, noise, 0, null);
+  const gatedOff = runNeuralProcessor(sr, noise, 0, curve); // curve posted but amount=0
+
+  let maxDiffGated = 0;
+  for (let i = 0; i < baseline.length; i++) maxDiffGated = Math.max(maxDiffGated, Math.abs(baseline[i] - gatedOff[i]));
+  ok(maxDiffGated === 0, 'airNeural=0 is bit-identical whether or not a curve was posted (the default-off gate)',
+    'max diff ' + maxDiffGated);
+
+  const zeroCurve = { bandsHz: curve.bandsHz, gainsDb: [0, 0, 0, 0, 0, 0] };
+  const zeroActive = runNeuralProcessor(sr, noise, 1, zeroCurve); // amount=1 but an all-zero curve
+  let maxDiffZero = 0;
+  for (let i = 0; i < baseline.length; i++) maxDiffZero = Math.max(maxDiffZero, Math.abs(baseline[i] - zeroActive[i]));
+  ok(maxDiffZero === 0, 'an all-zero curve is a true identity, even with the trust dial fully up',
+    'max diff ' + maxDiffZero);
+
+  const boosted = runNeuralProcessor(sr, noise, 1, curve);
+  const before = bandRms(DSP, baseline, sr, 8000, 20000);
+  const after = bandRms(DSP, boosted, sr, 8000, 20000);
+  ok(after > before * 1.3, 'a +6 dB curve measurably raises energy in the 8-20 kHz band it targets',
+    (20 * Math.log10(before > 0 ? before : 1e-9)).toFixed(1) + ' → ' + (20 * Math.log10(after > 0 ? after : 1e-9)).toFixed(1) + ' dBFS-ish');
+
+  // the trust dial is a genuine blend, not a switch. Measured on a wideband
+  // noise bed through six overlapping peaking filters the relationship is not
+  // a clean fraction of the dB gain (several filters already pile most of
+  // their response up by amount=0.5), so this is isolated to one tone sitting
+  // exactly on one filter's centre frequency instead, where the per-filter
+  // blend math (`x + (y - x) * amount`) has an exact, checkable answer:
+  // amount=0.5 must land at roughly `1 + (G-1)*0.5` of the full linear gain
+  // `G`, clearly short of amount=1's full `G`.
+  const toneHz = 10000; // one of NeuralAirCurve's own fixed application points
+  const tone = H.tone(toneHz, sr, 1, 0.2);
+  // curve points given at exactly NeuralAirCurve's own six fixed bands, so
+  // `setCurve`'s interpolation is an exact pass-through with no bleed from
+  // neighbouring bands onto this one — only the 10 kHz filter has any gain
+  const toneCurve = { bandsHz: [8000, 10000, 12500, 16000, 19000, 22000], gainsDb: [0, 6, 0, 0, 0, 0] };
+  const toneBase = runNeuralProcessor(sr, tone, 0, toneCurve);
+  const toneFull = runNeuralProcessor(sr, tone, 1, toneCurve);
+  const toneHalf = runNeuralProcessor(sr, tone, 0.5, toneCurve);
+  const settleRms = (sig) => {
+    const skip = Math.round(sr * 0.1); // let the filter settle first
+    let s = 0, n = 0;
+    for (let i = skip; i < sig.length; i++) { s += sig[i] * sig[i]; n++; }
+    return Math.sqrt(s / n);
+  };
+  const rBase = settleRms(toneBase), rFull = settleRms(toneFull), rHalf = settleRms(toneHalf);
+  const dbFull = 20 * Math.log10(rFull / rBase);
+  const dbHalf = 20 * Math.log10(rHalf / rBase);
+  ok(dbFull > 4.5 && dbFull < 6.5, 'amount=1 reproduces the full +6 dB design gain at the filter\'s own centre',
+    dbFull.toFixed(2) + ' dB');
+  ok(dbHalf > dbFull * 0.25 && dbHalf < dbFull * 0.85,
+    'airNeural is a continuous blend, not an on/off switch — amount=0.5 lands strictly between off and full',
+    '0 | half ' + dbHalf.toFixed(2) + ' | full ' + dbFull.toFixed(2) + ' dB');
+
+  // an absurd model prediction must not be able to do more damage than a
+  // gentle shelf could (see NEURAL_AIR_MAX_DB)
+  const wildCurve = { bandsHz: curve.bandsHz, gainsDb: [80, 80, 80, 80, 80, 80] };
+  const wild = runNeuralProcessor(sr, noise, 1, wildCurve);
+  let peak = 0;
+  for (let i = 0; i < wild.length; i++) peak = Math.max(peak, Math.abs(wild[i]));
+  ok(isFinite(peak) && peak < 50, 'a wildly out-of-range curve is clamped, not left to blow up the output', 'peak ' + peak.toFixed(2));
+
+  // low sample rates: the fixed band list must not crash a processor whose
+  // Nyquist sits below some of them
+  let threw = null;
+  try { runNeuralProcessor(8000, H.noise(8000, 0.5, 0.3, 102), 1, curve); } catch (e) { threw = e; }
+  ok(threw === null, 'a low sample rate (8 kHz) drops out-of-range bands instead of crashing',
+    threw ? String(threw.message) : 'ok');
+
+  // reset() clears the filter state but the curve itself must stay active —
+  // a reset is a transport reset (e.g. the A/B switch), not "forget the model"
+  {
+    const Processor = H.loadProcessor(sr);
+    const proc = new Processor({ processorOptions: { channels: 1 } });
+    proc.port.onmessage({ data: { type: 'neuralAirCurve', bandsHz: curve.bandsHz, gainsDb: curve.gainsDb } });
+    proc.port.onmessage({ data: { type: 'reset' } });
+    ok(proc.chains[0].neuralAir.active === true, 'a transport reset does not discard an already-posted curve');
+  }
+}
+
+async function main() {
+  testAlignment();
+  testErbFilterbank();
+  testFftAny();
+  testStftRoundTrip();
+  await testProbeAndFallback();
+  testWorklet();
+
+  console.log('\n' + '-'.repeat(60));
+  if (failed) {
+    console.log('FAILED ' + failed + ' / ' + (passed + failed) + ':\n  - ' + failures.join('\n  - '));
+    process.exitCode = 1;
+  } else {
+    console.log('ALL TESTS PASSED (' + passed + ')');
+  }
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exitCode = 1;
+});

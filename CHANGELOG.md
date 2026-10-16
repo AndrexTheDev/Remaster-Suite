@@ -6,6 +6,85 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Round 27 — an optional neural pipeline: WebGPU inference, DeepFilterNet3, BS-RoFormer, and a
+### Stage-7 coupling for the top end a lossy file never had
+
+**A new, entirely optional inference layer sits alongside the DSP chain, never inside it by default.**
+`assets/js/neural-worker.js` (new, a dedicated Worker, loaded with `new Worker(...)` the way
+`opfs-manager.js`'s worker is, never a `<script>` tag) hosts `onnxruntime-web`; `assets/js/
+neural-controller.js` (new) is the main-thread Promise wrapper the rest of the app calls — one call per
+model, and every call resolves, it never rejects. Nothing here runs unless the user turns on the new
+"AI high-frequency reconstruction" toggle in the export row *and* a model's weights are actually found,
+and the pure DSP chain is bit-for-bit unaffected when either condition is false. This addresses the task's
+three requirements in turn:
+
+**1 — WebGPU first, WASM-SIMD fallback, fp16 where it is real.** `neural-worker.js` tries
+`ort.InferenceSession.create(model, {executionProviders: [{name: 'webgpu', ...}]})` first and falls back
+to `['wasm']` on any failure (a missing adapter, a browser without WebGPU, a model that WebGPU cannot
+run); `onnxruntime-web` itself (CDN-only — the npm package unpacks to ≈145 MB, confirmed via the
+registry, which is why `library-loader.js`'s new `ortUrls()` entry follows the existing jsdeliver→unpkg
+CDN pattern instead of being vendored) is never fetched until a model is actually requested. FP16 is not
+a runtime fp32→fp16 cast — ONNX Runtime Web does not do that for free — so it is modelled honestly: each
+model in the `MODELS` manifest ships (or would ship, once weights are installed) separate `fp32`/`fp16`
+weight files, and `loadWeights()` only reaches for the fp16 file once `navigator.gpu.requestAdapter(...)`
+has confirmed the adapter's `shader-f16` feature. Every tensor the three model wrappers build pads its
+time axis up to the next multiple of 4 first (`alignT`/`padRowsTo`/`trimRowsTo`) and trims the result
+back down afterwards, exactly as asked.
+
+**2 — DeepFilterNet3 and BS-RoFormer, active only when their weights exist.** `denoiseDFN3()` and
+`separateBSR()` are wired to the real, published community ONNX exports (DeepFilterNet3: fused
+`feat_erb`[1,1,T,32]/`feat_spec`[1,2,T,96] → `erb_mask`[1,1,T,32] at 48 kHz/960-sample frames/32 ERB
+bands; BS-RoFormer: host-computed `in_spec_real`/`in_spec_imag` → `out_spec_real`/`out_spec_imag` for
+drums/bass/other/vocals at 2048-sample frames — see the in-code contract notes for the exact sources).
+`loadWeights()` looks in OPFS first, then a same-origin `models/<name>/` folder, and returns `null`
+rather than throwing when neither has the file — which is the state of this repository today, since no
+weights are shipped. Every one of the three model entry points, and the message handler that wraps them
+for the real Worker protocol, is wrapped so a missing model, a failed session, or a thrown error all
+produce the same `{applied: false, reason: ...}` object instead of an exception — confirmed in
+`tests/neural.test.js` by calling all three with no weights installed and asserting none of them reject.
+
+**3 — Stage 7 (air synthesis) gets a neural coupling, not a diffusion model.** The task's own wording
+allows "AudioSR or an equivalent DSP/AI coupling"; a real AudioSR is a 258 M-parameter latent-diffusion
+stack (UNet + VAE + HiFi-GAN, 50 DDIM steps, ≈1.3–2.5 GB of weights) that nothing in a browser tab can run
+at a usable speed, and even the lighter community alternatives evaluated for this still ship a full
+second vocoder. The coupling built instead keeps the one thing this project already does well — the
+existing, phase-correct `AirSynth` harmonic regenerator — as the *only* thing that ever synthesises a
+waveform above the cliff, and only ever asks the model to predict a magnitude correction: `superresCurve()`
+turns the dry signal into mel-ish band features, asks a (not yet installed) model for `mel_gain_db`, and
+hands back a small set of per-band dB numbers, never audio. `engine.js`'s `render()` calls this once, up
+front, on a mono downmix of the source (so it never touches the live preview or the A/B comparison
+window, both of which re-render on every slider nudge), and on a clean result posts the curve to the new
+`NeuralAirCurve` stage in `remaster-processor.js` — six fixed peaking filters (Q 1.1, clamped to ±12 dB so
+a bad prediction can never do more than a gentle shelf could) placed right after the existing Stage 5 air
+synthesiser, blended in by the new `airNeural` k-rate parameter (`x + (y − x) · amount`). Two independent
+gates keep this additive-only: `airNeural` defaults to 0 (so it is a no-op even if a curve was posted),
+and an all-zero or never-posted curve is a true identity even at `airNeural = 1` — both asserted
+bit-for-bit in `tests/neural.test.js`, along with the trust dial being a genuine blend (measured 3.51 dB
+at amount 0.5 against the full 6.00 dB design gain of a one-band test curve, matching the blend formula's
+own prediction to two decimal places) and a wildly out-of-range curve staying clamped.
+
+One real bug surfaced while building the DSP side of this and was fixed before it shipped: the project's
+shared FFT (`RSDSP.fft`, used by the analyser, the renderer, and now the STFT this worker needed) is a
+radix-2 kernel — power-of-two lengths only. DeepFilterNet3's real export, however, is specified at a
+960-sample frame, which is not a power of two; feeding it a padded 1024-point spectrum instead would
+silently stop matching the bins the weights were trained against. Rather than add a second FFT algorithm,
+`neural-worker.js` adds Bluestein's chirp-z transform (`fftAny`), which turns any length into one
+zero-padded power-of-two convolution computed with two calls into the same `dsp.fft` kernel — `dsp.fft`
+remains the project's only O(n log n) primitive. Verified in `tests/neural.test.js` against a direct O(n²)
+DFT at several power-of-two and non-power-of-two lengths (float32 precision at every size tried) and via
+full STFT/ISTFT perfect-reconstruction round trips at both DeepFilterNet3's 960/480 framing and
+BS-RoFormer's 2048/512 framing (interior reconstruction error ≈3×10⁻⁷, i.e. float32 noise floor).
+
+New: `assets/js/neural-worker.js`, `assets/js/neural-controller.js`, `tests/neural.test.js` (46 checks).
+Changed: `assets/js/library-loader.js` (`ortUrls()`), `assets/js/presets.js` (`airNeural` pass-through,
+never measurement-driven — see its own comment), `assets/js/engine.js` (`render()`'s optional `opts.neural`
+hook), `assets/js/app.js` (the toggle, `initNeural()`'s probe-driven enable/disable, wiring into the final
+export render only), `assets/js/i18n.js` (five new `ctl.neural*` strings, German and English),
+`assets/worklets/remaster-processor.js` (`NeuralAirCurve`, the `airNeural` parameter),
+`index.html`/`assets/css/app.css` (the control itself). `tests/audit.test.js` updated for the one new
+worklet parameter (60 declared, up from 59) with the same explicit "not a law parameter" exemption
+`bypass` already has, and for the new files' place in the dependency-ordered script list.
+
 ### Round 26 — hum: the mains notch is now tracked by a software PLL, not fixed at t = 0
 
 **The three mains-hum notches no longer sit at whatever frequency the file measured as, once, before

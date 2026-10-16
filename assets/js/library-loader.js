@@ -33,6 +33,19 @@
       'https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js',
       'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js',
     ],
+    // onnxruntime-web (the neural inference runtime, see neural-worker.js):
+    // the `.webgpu` build is the one UMD bundle that carries *both* the
+    // WebGPU and the WASM/SIMD execution providers, so one load covers the
+    // "prefer WebGPU, fall back to WASM" requirement without a second
+    // network round trip when the fallback fires. There is no bundled local
+    // copy — the unpacked package is ~140 MB, two orders of magnitude over
+    // every other dependency this project ships, so it is CDN-only and
+    // loaded lazily, exactly like ffmpeg: never fetched unless a neural
+    // feature is actually invoked, so the zero-network default is unchanged.
+    ort: [
+      'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.webgpu.min.js',
+      'https://unpkg.com/onnxruntime-web@1.20.1/dist/ort.webgpu.min.js',
+    ],
   };
 
   /** Bundled copies — always present in this project. */
@@ -157,6 +170,15 @@
     },
 
     ffmpegCore: FFMPEG_CORE,
+
+    /**
+     * Candidate onnxruntime-web URLs, in try order, for `neural-worker.js` to
+     * `importScripts()` itself (a worker has no `document` to inject a
+     * `<script>` into, so this hands back the *list*, not a loaded global,
+     * and the worker runs its own `importScripts` try/fallback loop — see
+     * `loadOrt()` there). CDN-only, by design (see the `ort` entry above).
+     */
+    ortUrls() { return CDN.ort.slice(); },
 
     /** Absolute URL of a bundled file (workers need an absolute path). */
     localUrl(file) {

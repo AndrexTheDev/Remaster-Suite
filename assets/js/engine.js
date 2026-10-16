@@ -260,6 +260,32 @@
       const Ctor = global.OfflineAudioContext || global.webkitOfflineAudioContext;
       if (!Ctor) throw new Error('OfflineAudioContext unavailable');
 
+      // Optional neural Stage-7 coupling (see NeuralAirCurve in the worklet,
+      // and neural-worker.js's superresCurve): runs once, up front, on a mono
+      // downmix of the dry source — it only ever predicts a dB curve, never a
+      // waveform, so it has to finish before the worklet graph starts, not
+      // during it. Anything short of a clean, non-empty result (the model
+      // unavailable, no weights installed, a thrown error, RSNeural missing
+      // entirely because the script was not loaded) leaves `neuralCurve` null
+      // and the render proceeds exactly as if `opts.neural` had not been
+      // passed — this call can never make a render fail or sound different
+      // from the pure-DSP path by surprise.
+      let neuralCurve = null;
+      if (o.neural && global.RSNeural && typeof global.RSNeural.superres === 'function') {
+        try {
+          const bandsHz = (o.neural.bandsHz && o.neural.bandsHz.length) ? o.neural.bandsHz : [8000, 10000, 12500, 16000, 19000, 22000];
+          const mono = nCh > 1
+            ? (() => {
+              const m = new Float32Array(srcLen);
+              for (let c = 0; c < nCh; c++) { const ch = srcChans[c]; for (let i = 0; i < srcLen; i++) m[i] += ch[i] / nCh; }
+              return m;
+            })()
+            : srcChans[0];
+          const r = await global.RSNeural.superres(mono, bandsHz);
+          if (r && r.applied && Array.isArray(r.gainsDb) && r.gainsDb.length) neuralCurve = { bandsHz, gainsDb: r.gainsDb };
+        } catch (e) { /* fall back to the pure DSP path, silently and completely */ }
+      }
+
       const ctx = new Ctor({ numberOfChannels: nCh, length: len, sampleRate: sr });
       await this._loadWorklet(ctx);
       const node = new global.AudioWorkletNode(ctx, 'remaster-processor', {
@@ -269,6 +295,15 @@
         channelCount: nCh,
         channelCountMode: 'explicit',
       });
+      if (neuralCurve) {
+        node.port.postMessage({ type: 'neuralAirCurve', bandsHz: neuralCurve.bandsHz, gainsDb: neuralCurve.gainsDb });
+        // the caller's own params object is never mutated — only the copy the
+        // worklet actually receives below picks up a non-zero trust amount,
+        // and only when the caller did not already ask for a specific one
+        const amount = (o.neural && isFinite(o.neural.amount)) ? o.neural.amount : 1;
+        params = Object.assign({}, params);
+        if (!(params.airNeural > 0)) params.airNeural = amount;
+      }
 
       // source buffer built by hand, at its *own* rate: the graph resamples only
       // when the export rate really differs from the source rate

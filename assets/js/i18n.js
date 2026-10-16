@@ -48,6 +48,11 @@
       'ctl.zip': 'ZIP herunterladen',
       'ctl.clear': 'Liste leeren',
       'ctl.export': 'Export',
+      'ctl.neural': 'KI-Höhenrekonstruktion',
+      'ctl.neuralHint': 'Nutzt ein neuronales Modell, um bei stark komprimierten Dateien (z. B. alte 128-kbit/s-MP3s) die abgeschnittenen Höhen über die DSP-Luftsynthese präziser wiederherzustellen. Läuft nur, wenn ein Modell lokal/OPFS gefunden wird — sonst bleibt die reine DSP-Kette unverändert aktiv.',
+      'ctl.neuralUnavailable': 'Kein Modell gefunden — reine DSP-Kette aktiv',
+      'ctl.neuralWebgpu': 'WebGPU',
+      'ctl.neuralWasm': 'WASM',
 
       'preset.auto': 'Automatisch · pro Song analysiert',
       'preset.garage': 'Garage / Ein-Mikrofon (60er/70er)',
@@ -414,6 +419,11 @@
       'ctl.zip': 'Download ZIP',
       'ctl.clear': 'Clear list',
       'ctl.export': 'Export',
+      'ctl.neural': 'AI high-frequency reconstruction',
+      'ctl.neuralHint': 'Uses a neural model to more precisely rebuild the cut-off highs on heavily lossy files (e.g. old 128 kbit/s MP3s), coupled through the DSP air synthesiser. Only runs when a model is found locally/in OPFS — otherwise the pure DSP chain stays active unchanged.',
+      'ctl.neuralUnavailable': 'No model found — pure DSP chain active',
+      'ctl.neuralWebgpu': 'WebGPU',
+      'ctl.neuralWasm': 'WASM',
 
       'preset.auto': 'Automatic · analysed per song',
       'preset.garage': 'Garage / one-mic (60s/70s)',

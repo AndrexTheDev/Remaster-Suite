@@ -193,6 +193,8 @@ code { font-family: var(--mono); }
 .ctl { display: flex; flex-direction: column; gap: 6px; min-width: 230px; }
 .ctl-row { display: flex; align-items: center; gap: 12px; }
 .ctl-hint { font-size: .74rem; color: var(--ink-mute); max-width: 34ch; }
+.ctl-check { display: flex; align-items: center; gap: 8px; font-size: .86rem; font-weight: 650; cursor: pointer; }
+.ctl-check input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--gold); cursor: pointer; }
 .ctl-actions { flex-direction: row; align-items: center; gap: 10px; margin-left: auto; }
 
 input[type="range"] {

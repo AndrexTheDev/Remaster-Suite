@@ -473,6 +473,85 @@ class AirSynth {
 }
 
 /* -------------------------------------------------------------------------- */
+/* neural air curve (Stage 7 coupling): applies a dB correction curve that a   */
+/* separate, optional neural model predicted offline, on top of the DSP air   */
+/* synthesiser above. It never generates a waveform of its own — only a small */
+/* fixed bank of peaking filters shaped by numbers that arrive over the port  */
+/* — so the existing phase-correct AirSynth stays the only thing that puts    */
+/* energy into 8–24 kHz; this stage can only re-shape it.                     */
+/* -------------------------------------------------------------------------- */
+
+/** Fixed application points, independent of whatever bands the model used. */
+const NEURAL_AIR_BANDS = [8000, 10000, 12500, 16000, 19000, 22000];
+const NEURAL_AIR_Q = 1.1;
+/** A prediction error may never do more damage than a gentle shelf could. */
+const NEURAL_AIR_MAX_DB = 12;
+
+/** Linear interpolation of an arbitrary (possibly unsorted) curve at `f`. */
+function interpCurve(xs, ys, f) {
+  const n = xs.length;
+  if (!n) return 0;
+  if (n === 1) return ys[0];
+  // assume xs is ascending (true for every caller in this file); degrade to
+  // a linear scan rather than requiring the caller to pre-sort
+  if (f <= xs[0]) return ys[0];
+  if (f >= xs[n - 1]) return ys[n - 1];
+  for (let i = 1; i < n; i++) {
+    if (f <= xs[i]) {
+      const x0 = xs[i - 1], x1 = xs[i];
+      const t = x1 > x0 ? (f - x0) / (x1 - x0) : 0;
+      return ys[i - 1] + (ys[i] - ys[i - 1]) * t;
+    }
+  }
+  return ys[n - 1];
+}
+
+class NeuralAirCurve {
+  constructor(sr) {
+    this.sr = sr;
+    // Nyquist-safe subset: at 44.1/48 kHz all six survive, lower rates drop
+    // the ones that would sit above setPeak's own clamp.
+    this.bands = NEURAL_AIR_BANDS.filter((f) => f < sr * 0.47);
+    this.filters = this.bands.map(() => new Biquad());
+    this.gains = new Float32Array(this.bands.length); // all-zero == identity
+    this.active = false; // only a curve with a non-trivial gain sets this
+  }
+  reset() { for (const b of this.filters) b.reset(); }
+  /**
+   * @param {number[]} bandsHz centres the curve was predicted at (any count,
+   *   any spacing — the neural worker's own band choice)
+   * @param {number[]} gainsDb matching dB correction at each centre
+   */
+  setCurve(bandsHz, gainsDb) {
+    if (!Array.isArray(bandsHz) || !Array.isArray(gainsDb) || !bandsHz.length || bandsHz.length !== gainsDb.length) {
+      this.active = false;
+      return;
+    }
+    let any = false;
+    for (let i = 0; i < this.bands.length; i++) {
+      let g = interpCurve(bandsHz, gainsDb, this.bands[i]);
+      if (!isFinite(g)) g = 0;
+      g = clamp(g, -NEURAL_AIR_MAX_DB, NEURAL_AIR_MAX_DB);
+      this.gains[i] = g;
+      if (Math.abs(g) > 0.01) any = true;
+      this.filters[i].setPeak(this.sr, this.bands[i], NEURAL_AIR_Q, g);
+    }
+    this.active = any;
+  }
+  /**
+   * @param {number} x
+   * @param {number} amount 0..1 trust dial (the `airNeural` parameter): 0 is
+   *   bit-identical to the curve never having arrived at all.
+   */
+  tick(x, amount) {
+    if (!this.active || !(amount > 0.0001)) return x;
+    let y = x;
+    for (const b of this.filters) y = b.process(y);
+    return x + (y - x) * amount;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
 /* sub-harmonic synthesizer (octave down, lands in 30–60 Hz)                   */
 /* -------------------------------------------------------------------------- */
 
@@ -2980,6 +3059,9 @@ class ChannelChain {
     this.excEven = 0.55;                 // + warmth, see prepare()
 
     this.air = new AirSynth(sr);
+    // Default-off, additive-only Stage 7 coupling: stays a no-op until both a
+    // curve has arrived over the port *and* `airNeural` is raised above 0.
+    this.neuralAir = new NeuralAirCurve(sr);
     this.sub = new SubSynth(sr);
     this.hiss = new DeHiss(sr, 3200);
     this.deess = new DeEsser(sr);
@@ -3064,7 +3146,7 @@ class ChannelChain {
     this.deess.reset();
     for (const r of this.reso) r.reset();
     for (const e of this.exc) e.reset();
-    this.air.reset(); this.sub.reset(); this.hiss.reset();
+    this.air.reset(); this.neuralAir.reset(); this.sub.reset(); this.hiss.reset();
     this.declip.reset();
     this.click.reset();
     this.dryRing.fill(0); this.dryW = 0; this.dry = 0; this.delay = 0;
@@ -3274,6 +3356,13 @@ class ChannelChain {
       const h = this.air.tick(y, 2.6 * drive, this.airRoom);
       y += h * p.air * ds * this.air.prog * drive * AIR_MIX;
     }
+
+    // 5b ── optional neural air coupling: re-shapes what Stage 5 just built
+    // (and whatever survived above it) using a dB curve a model predicted
+    // offline from the dry source. No-op unless a curve was posted in AND
+    // `airNeural` > 0 — see NeuralAirCurve above for why this can never
+    // synthesise anything the DSP stage did not already put there.
+    if (p.airNeural > 0.0001) y = this.neuralAir.tick(y, p.airNeural);
 
     // 6 ── sub-harmonic synthesis (30–60 Hz)
     if (p.sub > 0.0001 && drive > 0.001) y += this.sub.tick(y, p.subRatio) * p.sub * drive;
@@ -3544,6 +3633,10 @@ class RemasterProcessor extends AudioWorkletProcessor {
       k('subRatio', 0.5, 0.34, 0.66),
       k('exciter', 0),
       k('air', 0),
+      // trust dial for the optional neural Stage-7 coupling (see
+      // NeuralAirCurve): 0 = ignore any curve posted over the port, exactly
+      // as if the feature did not exist. Default 0 — opt-in only.
+      k('airNeural', 0),
       k('dehiss', 0),
       k('declip', 0),
       k('declipLevel', -0.1, -60, 0),   // the measured plateau level, dBFS
@@ -3619,7 +3712,7 @@ class RemasterProcessor extends AudioWorkletProcessor {
     // right one down with it and the stereo image stays where it was
     this.tp = new TruePeakLimiter(sampleRate);
     this.prm = {
-      power: 0, bypass: 1, sub: 0, subRatio: 0.5, exciter: 0, air: 0, dehiss: 0,
+      power: 0, bypass: 1, sub: 0, subRatio: 0.5, exciter: 0, air: 0, airNeural: 0, dehiss: 0,
       declip: 0, declipLevel: -0.1, declick: 0, reso: 0, glue: 0, warmth: 0, tilt: 0,
       hum: 0, hum2: 0, hum3: 0, humHz: 50, boxF1: 200, boxQ1: 3, boxG1: 0, boxF2: 400, boxQ2: 3, boxG2: 0,
       width: 0, azimuth: 0, airRoom: 0.5, airF: 6000, hissTilt: 0, hissMax: 0, refDb: 0, refLin: 1,
@@ -3665,6 +3758,18 @@ class RemasterProcessor extends AudioWorkletProcessor {
         this.azimuth.reset();
         this.powerSm = 0;
         this.powerInit = false;
+      } else if (d.type === 'neuralAirCurve') {
+        // Posted by the main thread once (per render) after an optional,
+        // async worker call — see neural-controller.js / engine.js. Every
+        // channel gets its own copy of the bands array so per-channel curves
+        // (e.g. stereo-aware super-resolution later) are already possible
+        // without changing this message shape.
+        const bandsHz = Array.isArray(d.bandsHz) ? d.bandsHz : [];
+        const perChannel = Array.isArray(d.gainsDb) ? d.gainsDb : [];
+        for (let i = 0; i < this.chains.length; i++) {
+          const gainsDb = Array.isArray(perChannel[i]) ? perChannel[i] : perChannel;
+          this.chains[i].neuralAir.setCurve(bandsHz, Array.isArray(gainsDb) ? gainsDb : []);
+        }
       }
     };
   }
@@ -3714,6 +3819,7 @@ class RemasterProcessor extends AudioWorkletProcessor {
     pr.azimuth = g('azimuth', 0);
     pr.airRoom = g('airRoom', 0.5);
     pr.airF = g('airF', 6000);
+    pr.airNeural = g('airNeural', 0);
     pr.hissTilt = g('hissTilt', 0);
     pr.hissMax = g('hissMax', 0);
     pr.autoLevel = g('autoLevel', 1);

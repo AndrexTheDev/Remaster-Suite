@@ -258,6 +258,7 @@ and runs per sample, control-rate decimated for speed:
 | 5b | **De-esser** | a dynamic dip over 5.2–9.5 kHz, keyed on the fast/slow ratio of that band: a quiet "s" and a loud one are the same problem, and a recording without sibilance measures zero. The *diagnosis* that arms it is a per-frame scan of the 7 kHz/2.6 kHz balance, and it has been cheated twice by material that is not a sibilant — a phrased organ (the 2.6 kHz band falls between the phrases, so the balance "rises" 4.3 dB: the old scan read 4.29 and the card named `sibilance` on a clean organ) and a sustained cymbal wash (the balance is over zero *all the time* — a wash breathes everywhere — and the median tilt of +4.73 dB, real enough, was amplified by 2 into a 0.61 dose). The scan now asks two things of the peak frame: the balance must *cross over* (7 kHz above 2.6 kHz, the one claim a sibilant makes by definition) and the file's own median balance must not already be over zero — and a file whose median frame *is* top-heavy is asked for a band-limited top end (7 kHz over 12 kHz: −0.5 dB on the wash, +2.1 on a continuous "s", +4.1…+4.8 on every burst fixture) before its median tilt may count as evidence. Measured: the organ 4.29 → 0.00 and the wash 2.52 → 0.00 of scan, both `deess 0.000`, both never ducked by the chain (+1.00 and +0.35 dB of 7 kHz, the tone stage's own lift); a singer whose "s" never stops still reads `sibilance` with a 0.558 dose and the chain takes its own 7 kHz band down 5.0 dB. Its amount is a *measurement*, like the de-hisser's: the law hands it zero unless a departure was measured, so the intensity curve was scaling the file's own reading — it took 0.830 of it, and the app's own export of §10's burst fixture came back diagnosed `sibilance` because of it. Measured with the curve removed (probes `sib11/sib12.js`, and the acceptance matrix's own §10 rows): the 7 kHz band of the loudest frames down 3.06 instead of 2.61 dB, the scan the card names the defect with 5.46 → 2.43, and the export **healthy** at a 0.226 dose against the 0.255 naming line. Every clean fixture still measures a dose of exactly 0. It sits before the synthesisers, so the exciter and the air cannot rebuild what it just removed |
 | 6 | **Harmonic exciter** | 3 bands, each: band-pass → asymmetric saturation (even *and* odd harmonics) → band-pass → envelope gate. Synthesise the overtones that were never recorded. |
 | 7 | **Air synthesis 8–16 kHz** | takes the surviving 4.5–7.5 kHz band and generates 2nd/3rd order content above it, gated by the presence follower and limited to a fraction of the band it came from |
+| 7b | **Neural air coupling (optional, off by default)** | six fixed peaking filters (8–22 kHz, clamped to ±12 dB) re-shape what stage 7 just built, driven by a dB correction curve an optional neural model predicts *offline*, once, from the dry source — see [Optional neural enhancement](#optional-neural-enhancement). It never synthesises a waveform of its own; stage 7 stays the only thing that puts energy above the cliff, this stage can only re-shape it, and it is bit-identical to not existing unless both a curve was posted and the control is turned on |
 | 8 | **Sub-bass 30–60 Hz** | 6th-order low pass → hysteresis zero-crossing detector → divide-by-two pitch tracking → oscillator with a gated envelope. A 60–120 Hz bass line gains its missing bottom octave. |
 | 9 | **Glue compressor** | soft 2:1 with automatic make-up; attack and release follow the file's measured percussive character. When `dynamicRangeDb < 12`, the dose is halved and warmth is capped: a squashed master is not compressed again. Measured on the acceptance fixture, the app reads **8.70 → 8.27 dB** and the independent 20 ms envelope reads **12.82 → 11.45 dB** — the class stays `squashed`; no transient shaper is shipped because the peaks are no longer present to reconstruct |
 | 10 | **Warmth + tilt** | gentle saturation and a low/high shelf pair for the final tone balance |
@@ -328,6 +329,36 @@ before you pack.
 
 ---
 
+## Optional neural enhancement
+
+**Off by default, and invisible unless both a model is installed and the toggle is turned on.** Next to
+the export format row is "AI high-frequency reconstruction" (`#neuralToggle`); it stays disabled, with a
+status line explaining why, until `neural-controller.js`'s probe finds at least one model and a working
+execution provider. Nothing about the pure-DSP chain changes when it is off — this is additive-only, not
+a different mode.
+
+* **Execution.** [`assets/js/neural-worker.js`](assets/js/neural-worker.js) runs `onnxruntime-web` in a
+  dedicated Worker, WebGPU first (with fp16 weights once the adapter confirms `shader-f16`), falling back
+  to WASM-SIMD automatically if WebGPU is unavailable or fails for any reason. The library itself is
+  fetched from a CDN only once a model is actually used (see [Privacy](#privacy)) — it is never bundled
+  (the npm package unpacks to ≈145 MB) and never loaded just because the toggle exists on the page.
+* **Models.** Two restoration models — [DeepFilterNet3](https://github.com/Rikorose/DeepFilterNet)
+  (noise suppression) and [BS-RoFormer](https://github.com/ZFTurbo/Music-Source-Separation-Training)
+  (stem separation: vocals / drums / bass / other) — and the Stage-7 air coupling below are all wired to
+  real, published ONNX export contracts, but **no weights ship with this repository.** Drop a model's
+  `.onnx` file (and its auxiliary weights, where the export needs one) into OPFS or a same-origin
+  `models/<name>/` folder to activate it; with nothing there, every call cleanly reports
+  `{applied: false, reason: 'weights-not-found'}` and the DSP chain runs exactly as it always has.
+* **Stage 7 coupling, not AudioSR.** A real AudioSR is a 258 M-parameter latent-diffusion model (UNet +
+  VAE + HiFi-GAN, 50 sampling steps, over a gigabyte of weights) — nothing a browser tab can run at a
+  usable speed. What ships instead keeps this project's existing, phase-correct `AirSynth` harmonic
+  regenerator (row 7 of [the signal chain](#the-signal-chain)) as the only thing that ever synthesises a
+  waveform above the codec cliff, and asks a (not yet installed) model only for a small per-band dB
+  correction curve — six fixed peaking filters apply it, blended in by the `airNeural` amount, clamped to
+  ±12 dB so a bad prediction can never do more than a gentle shelf could.
+* **When it runs.** Only on the final export render, never on the live preview or the A/B comparison
+  window — both re-render on every slider nudge, and inference is not instant.
+
 ## Privacy
 
 * **No server.** Nothing to send your audio to, and nothing that would.
@@ -341,6 +372,11 @@ before you pack.
 * **Optional FFmpeg.wasm rescue decoder:** if a browser refuses to decode a file itself, the suite
   can pull FFmpeg.wasm (single-threaded core, so it works on plain static hosting) from unpkg and
   convert the file to WAV locally. It is never loaded unless a file needs it.
+* **Optional neural enhancement, same rule:** turning the "AI high-frequency reconstruction" toggle
+  on (see [below](#optional-neural-enhancement)) is the only thing that fetches `onnxruntime-web`
+  from the jsDelivr/unpkg CDN (≈145 MB unpacked — far too large to vendor); the *audio* never leaves
+  the machine either way, inference runs entirely in a local Worker against weights that live in
+  OPFS or a local folder, never uploaded or referenced from the network.
 
 Full text: *Privacy* in the footer of the app.
 
@@ -366,6 +402,11 @@ assets/
                                  FileSystemSyncAccessHandle in a Worker (RSOPFS)
     codecs.js                    decode, WAV/MP3 encode (in memory or streamed), ZIP, download (RSCodecs)
     analyzer.js                  file → measurements, diagnosis, waveform envelopes (RSAnalyzer)
+    neural-controller.js         main-thread handle onto neural-worker.js — one Promise-returning
+                                 call per model, never rejects (RSNeural)
+    neural-worker.js             optional, best-effort WebGPU/WASM inference: DeepFilterNet3,
+                                 BS-RoFormer, and the Stage-7 air super-resolution curve (worker-only,
+                                 loaded with `new Worker(...)`, not a <script> tag)
     engine.js                    AudioContext + AudioWorklet, live monitor and offline render (RSEngine)
     ui.js                        DOM helpers, toasts, dialogs, interactive waveform (RSUI)
     app.js                       state, per-card logic, batch queue (RSApp)

@@ -14,6 +14,7 @@
   const Analyzer = global.RSAnalyzer;
   const Engine = global.RSEngine;
   const OPFS = global.RSOPFS;
+  const Neural = global.RSNeural;
 
   const $ = UI.$;
   const $$ = UI.$$;
@@ -68,6 +69,15 @@
     // set once `RSOPFS.isSupported()` resolves (see `initStreaming()`); while
     // it is still pending, batch rendering uses the safe in-memory path
     opfsReady: false,
+    // the user's own choice, off by default (see `initNeural()`): whether the
+    // optional neural Stage-7 coupling should run on the *final* export
+    // render. It only ever has an effect when `neuralAvailable` is also true.
+    neuralEnabled: false,
+    // set once `RSNeural.probe()` resolves: true only when at least one of
+    // DeepFilterNet3 / BS-RoFormer / the air super-resolution model actually
+    // has weights installed *and* a WebGPU or WASM session could be built —
+    // never true just because the feature exists in this build.
+    neuralAvailable: false,
   };
 
   /* ------------------------------------------------------- OPFS scratch I/O */
@@ -86,6 +96,38 @@
       State.opfsReady = false;
     }
     if (State.opfsReady) OPFS.resetScratch();
+  }
+
+  /* ---------------------------------------------------------- neural panel */
+
+  /**
+   * Probe the optional neural pipeline once at boot: does WebGPU (or at
+   * least WASM-SIMD) work here, and is any model's weights file actually
+   * installed (OPFS or a local `models/<name>/` folder)? The checkbox stays
+   * disabled with an explanatory status line until this resolves true — the
+   * feature is opt-in *and* only ever offered when it can really do
+   * something, never a control that silently does nothing when toggled.
+   */
+  async function initNeural() {
+    const toggle = $('#neuralToggle');
+    const status = $('#neuralStatus');
+    if (!toggle) return;
+    if (!Neural || typeof Neural.probe !== 'function') { toggle.disabled = true; return; }
+    let probe;
+    try { probe = await Neural.probe(); } catch (e) { toggle.disabled = true; return; }
+    const models = (probe && probe.models) || {};
+    const anyModel = Object.keys(models).some((k) => models[k] && models[k].available);
+    State.neuralAvailable = !!anyModel;
+    toggle.disabled = !State.neuralAvailable;
+    toggle.checked = false;
+    if (status) {
+      if (State.neuralAvailable) {
+        const provider = probe.webgpu && probe.webgpu.available ? t('ctl.neuralWebgpu') : t('ctl.neuralWasm');
+        status.textContent = Object.keys(models).filter((k) => models[k] && models[k].available).join(', ') + ' · ' + provider;
+      } else {
+        status.textContent = t('ctl.neuralUnavailable');
+      }
+    }
   }
 
   /** A fresh, collision-free OPFS scratch key for this card's next render. */
@@ -861,9 +903,18 @@
     card._workT0 = nowMs();
     setCardWork(card, 'render', 0);
     setNote(card, t('status.processing'));
+    // The neural Stage-7 coupling only ever runs on this, the final export
+    // render — never on the live preview or the A/B comparison window, both
+    // of which re-render on every slider nudge and would otherwise pay an
+    // inference cost the user never gets to hear the benefit of before the
+    // next nudge discards it. It is also always optional: `Engine.render`
+    // falls back to the identical pure-DSP render whenever it is omitted,
+    // unavailable, or fails for any reason (see the comment there).
+    const neuralOpt = (State.neuralEnabled && State.neuralAvailable) ? {} : null;
     const res = await Engine.render(dec.buffer, rate, params, {
       progressSteps: 24,
       onProgress: (p) => setCardWork(card, 'render', p, estimateLeft(card, p)),
+      neural: neuralOpt,
     });
 
     setNote(card, State.format === 'mp3' ? t('toast.mp3Slow') : t('status.export'));
@@ -1238,6 +1289,14 @@
         markAllStale();
       });
     }
+
+    const neural = $('#neuralToggle');
+    if (neural) {
+      neural.addEventListener('change', () => {
+        State.neuralEnabled = neural.checked && State.neuralAvailable;
+        markAllStale();   // the final export differs, so any cached render is now stale
+      });
+    }
   }
 
   /** Any change of export settings invalidates already rendered results. */
@@ -1361,6 +1420,7 @@
     setAB('restored');           // a first listen should be the restored version
     refreshAllText();
     initStreaming();
+    initNeural();
     initCOI();
   }
 
@@ -1389,7 +1449,7 @@
     State, CONFIG, Job, boot, addFiles, prepareCard, renderCard, processAll, downloadZip,
     adoptRecommendedPower, setCardWork, revealCard, isTouchDevice, refreshAllText,
     setAB, ensurePlaying, clearAll, removeCard, refreshPreview, P,
-    initStreaming, initCOI,
+    initStreaming, initCOI, initNeural,
   };
   global.RSApp = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;

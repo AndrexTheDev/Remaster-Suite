@@ -1586,6 +1586,14 @@
       glueTime: num(a.glueTime, 0.5),
       hissF: num(clamp(a.hissF, 2000, 8000), 3200),
       autoLevel: 1,
+      // Trust dial for the optional neural Stage-7 coupling (see
+      // neural-controller.js / remaster-processor.js's NeuralAirCurve). This
+      // is deliberately NOT derived from the measurement the way every other
+      // parameter above is — whether the model ran at all depends on whether
+      // a weights file is installed and a WebGPU/WASM session could be built,
+      // which `app.js` only knows after an async probe. It stays 0 (off)
+      // here; a caller that got a real curve back raises it via `overrides`.
+      airNeural: 0,
     };
     // the corrective EQ: twelve bands, same amount curve as the profile's
     for (let i = 0; i < 12; i++) {

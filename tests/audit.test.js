@@ -30,7 +30,7 @@ function ok(cond, label, detail) {
 function section(name) { console.log('\n▸ ' + name); }
 
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
-const APP_JS = ['dsp-utils', 'presets', 'i18n', 'library-loader', 'opfs-manager', 'codecs', 'analyzer', 'engine', 'ui', 'app']
+const APP_JS = ['dsp-utils', 'presets', 'i18n', 'library-loader', 'opfs-manager', 'codecs', 'analyzer', 'neural-controller', 'engine', 'ui', 'app']
   .map((f) => 'assets/js/' + f + '.js');
 
 const html = read('index.html');
@@ -59,7 +59,11 @@ section('audit · repository hygiene');
   const re = /(?:src|href)="([^"]+)"/g;
   let m;
   while ((m = re.exec(html))) referenced.add(m[1]);
-  const orphans = jsFiles.filter((f) => !referenced.has(f) && f.indexOf('dsp-utils') === -1);
+  // dsp-utils.js and neural-worker.js are both loaded indirectly rather than
+  // via a <script src>: dsp-utils.js through importScripts()/require() inside
+  // workers and the Node test harness, neural-worker.js as a dedicated Worker
+  // script (`new Worker('assets/js/neural-worker.js')` in neural-controller.js).
+  const orphans = jsFiles.filter((f) => !referenced.has(f) && f.indexOf('dsp-utils') === -1 && f.indexOf('neural-worker') === -1);
   ok(orphans.length === 0, 'no orphaned JavaScript file', orphans.join(', '));
   ok(referenced.has('assets/css/app.css'), 'stylesheet is referenced');
 
@@ -153,7 +157,7 @@ section('audit · markup');
 
   // script order must match the dependency order of the modules
   const order = [...html.matchAll(/<script src="assets\/js\/([a-z0-9-]+)\.js">/g)].map((m) => m[1]);
-  const want = ['dsp-utils', 'presets', 'i18n', 'library-loader', 'opfs-manager', 'codecs', 'analyzer', 'engine', 'ui', 'app'];
+  const want = ['dsp-utils', 'presets', 'i18n', 'library-loader', 'opfs-manager', 'codecs', 'analyzer', 'neural-controller', 'engine', 'ui', 'app'];
   ok(JSON.stringify(order) === JSON.stringify(want), 'scripts load in dependency order', order.join(' → '));
 
   // wiring audit: every id / data hook the JavaScript looks for must exist
@@ -678,7 +682,10 @@ section('audit · presets and parameters');
   // peak (`refDb`), which the stages that are *not* an absolute target read to
   // place their thresholds relative to this recording (see `refLin` in the
   // worklet and the level-invariance section in tests/dsp.test.js).
-  ok(declared.length === 59, 'the processor declares the whole per-song parameter set', String(declared.length));
+  // 60 = 59 + `airNeural`, the optional neural Stage-7 coupling's trust dial
+  // (see NeuralAirCurve in the worklet) — an orchestration flag app.js sets
+  // from outside the measurement-driven law, not a parameter it derives.
+  ok(declared.length === 60, 'the processor declares the whole per-song parameter set', String(declared.length));
   // A mains line that is not a pure sine. Real hum arrives with its harmonics,
   // and a recording with a 100 Hz buzz has to be notched there *because that was
   // measured* — this is the fixture that proves the harmonic notches are wired to
@@ -1044,6 +1051,7 @@ section('audit · presets and parameters');
     .concat([() => stereoM, () => phaseM, () => rumbleM, () => clippedM]);
   const untouched = declared.filter((k) => {
     if (k === 'bypass') return false;            // the A/B switch, not a law parameter
+    if (k === 'airNeural') return false;         // neural Stage-7 trust dial: app.js sets it, not the law (see buildParams)
     let moved = false;
     for (const probe of probes) {
       for (const p of [0.25, 0.75, 1]) {
