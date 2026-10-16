@@ -16,6 +16,14 @@
  *   node tools/acceptance.js
  * ========================================================================== */
 const U = require('./util.js');
+/* RS_REQUIRE_FFMPEG=1 (set by CI): ffmpeg is part of the matrix, not an option.
+ * Without it the run stops here, and any section that would be SKIPPED fails
+ * the gate below. Locally the variable is unset and the skips stay visible. */
+const REQUIRE_FFMPEG = process.env.RS_REQUIRE_FFMPEG === '1';
+if (REQUIRE_FFMPEG && !U.hasFfmpeg()) {
+  console.error('RS_REQUIRE_FFMPEG=1 but no ffmpeg was found (set FFMPEG=/path/to/ffmpeg)');
+  process.exit(1);
+}
 const { H, RSDSP, SR, db } = U;
 const RP = require('../assets/js/presets.js');
 const Processor = H.loadProcessor(SR);
@@ -46,6 +54,12 @@ const rms = (a, from, to) => {
  * −inf dBFS), and reading it cost a probe one run. Take the *last* Summary.
  */
 function fileTruePeakDb(file) {
+  // no ffmpeg: a WAV is read and metered in pure JS (4× oversampled, util.truePeak)
+  if (!U.hasFfmpeg() && /\.wav$/i.test(file)) {
+    const ch = U.wavRead(file).chans;
+    return { tp: U.truePeakDb(ch) };
+  }
+  if (!U.hasFfmpeg()) throw new U.NoDecoder('MP3 true peak needs ffmpeg (ebur128): ' + require('path').basename(file));
   const r = U.ffmpeg(['-i', file, '-filter_complex', 'ebur128=peak=true', '-f', 'null', '-']);
   const s = (r.stderr || '').slice((r.stderr || '').lastIndexOf('Summary:'));
   const mI = s.match(/Integrated loudness:[\s\S]{0,120}?I:\s*(-?[\d.]+)\s*LUFS/);
@@ -135,12 +149,42 @@ function run(chans, over) {
    * name a defect on the export that the chain has just repaired. It is recorded
    * here rather than per section so that *every* class is covered by
    * construction — a class that forgets its own export row still shows up. */
-  const exp = RP.diagnose(RSDSP.measure(U.enc(r.out, 320, U.WORK + '/accept-export' + EXPORTS.length + '.mp3'), SR));
-  EXPORTS.push({ cls: cls.id, dry: dry.issues, wet: wet.issues, exp: exp.issues });
+  // Without ffmpeg the MP3 re-upload cannot be decoded. The class still runs (its
+  // in-memory checks need no codec); only its export row is marked as not decoded.
+  let expIssues = null;
+  if (U.hasFfmpeg()) {
+    const exp = RP.diagnose(RSDSP.measure(U.enc(r.out, 320, U.WORK + '/accept-export' + EXPORTS.length + '.mp3'), SR));
+    expIssues = exp.issues;
+  } else if (!EXPORTS.length) {
+    SKIPPED.push('export honesty: the 320 kbit/s re-uploads are not decoded (no ffmpeg), so they are not gated');
+  }
+  EXPORTS.push({ cls: cls.id, dry: dry.issues, wet: wet.issues, exp: expIssues });
   return { m, mo, P, cls, out: r.out, lat: r.latency, latency: r.latency, dry, wet };
+}
+/** Runs one acceptance section. A section that needs a codec this sandbox does
+ * not have (no ffmpeg, and lamejs cannot decode) is SKIPPED with its reason; the
+ * rest of the matrix still runs and is gated. Any other error still fails. */
+const SKIPPED = [];
+function section(fn) {
+  try { fn(); } catch (e) {
+    if (e && e.name === 'NoDecoder') { SKIPPED.push(e.message); console.log('  SKIPPED ' + e.message); return; }
+    throw e;
+  }
 }
 const ROWS = [];
 const row = (defect, stat, dry, wet, note) => ROWS.push([defect, stat, dry, wet, note || '']);
+/* The gate. Each check is a stated acceptance criterion with a measured value;
+ * the run exits 1 if any of them fails, so `npm test` can see it. Rows that are
+ * reported but not yet gated are listed in KNOWN at the end, not hidden. */
+const CHECKS = [];
+const check = (label, ok, detail, known) => CHECKS.push({ label, ok: !!ok, detail: detail || '', known: !!known });
+/* A KNOWN_ISSUE is a measured residual the chain does not remove yet. It is
+ * reported as KNOWN_ISSUE (never as PASS), and it gates on its recorded ceiling:
+ * it stays exit 0 while the residual is at or below the ceiling, and a rise
+ * above it is a regression and fails the run like any other check. */
+const knownIssue = (label, value, ceiling, detail) =>
+  check(label, value <= ceiling, N(value, 2) + ' ≤ ceiling ' + N(ceiling, 2) + (detail ? ' · ' + detail : ''), true);
+const KNOWN = [];
 const N = (v, d) => (typeof v === 'number' && isFinite(v) ? v.toFixed(d === undefined ? 2 : d) : String(v));
 /** a 0–1 clamp for the rows that re-derive a statistic from the exposed fields */
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
@@ -167,7 +211,7 @@ const bed = (lp, norm, depth) => {
 
 mark('section 1');
 /* 1 ── crackle ───────────────────────────────────────────────────────────── */
-{
+section(() => {
   const clean = bed(9000, 0.7), dirty = H.addCrackle(clean, 9, 0.85, 8);
   const r = run([dirty]);
   const HP4 = bq('HP', 4000, 0.707), LP12 = bq('LP', 12000, 0.707);
@@ -224,7 +268,7 @@ mark('section 1');
     'pops above it: ' + w.over + '/' + w.n + ' → ' + w320.over + '/' + w320.n + ' · aligned by correlation, lag ' + lag + ' samples');
   row('crackle', 're-upload at 320 kbit/s → diagnosis', r.dry.issues.join(','), RP.diagnose(rm).issues.join(',') || 'healthy',
     'crackleIndex ' + N(rm.crackleIndex) + ' · what the user re-uploads is this file, and it must not be named a crackle the chain has repaired');
-}
+});
 mark('section 2');
 /* 2 ── hiss ────────────────────────────────────────────────────────────────
  * The de-hisser's dose is not a strength: it is the fraction of a *measured*
@@ -319,7 +363,7 @@ mark('section 2');
  * music where they are loud are what the difference between the per-sample cut (15.9 dB, plus
  * up to 12.9 of shelf where the witnesses agree) and the energy-weighted 12.1 dB is.
  * ------------------------------------------------------------------------- */
-{
+section(() => {
   const clean = bed(9000, 0.7);
   const hiss = H.mul(H.filter(RSDSP, H.noise(SR, SEC, 1, 21), SR, 'hp', 2000, 0.5), 0.040);
   const dirty = H.normalize(H.mix([clean, hiss]), 0.7);
@@ -361,10 +405,10 @@ mark('section 2');
     + ' — the tilt is *not* what names the export any more (0.00): ' + witnesses(rm)
     + '. What is left is the deficit: the export\'s top end still stands ' + N(rm.hissDeficitDb, 2)
     + ' dB above where the music predicts it, which matches the 4–6 dB of floor the deepest pauses still carry over the clean copy (probe hiss24) — an honest bound, not a missed repair');
-}
+});
 mark('section 3');
 /* 3 ── mains hum ─────────────────────────────────────────────────────────── */
-{
+section(() => {
   const clean = bed(9000, 0.7);
   const hum = (f, a) => H.tone(f, SR, SEC, a);
   const dirty = H.normalize(H.mix([clean, hum(50, 0.030), hum(150, 0.012)]), 0.7);
@@ -373,16 +417,29 @@ mark('section 3');
   row('mains hum', '50 + 150 Hz vs a non-hum bin (dB)', humDb(dirty), humDb(r.out[0], r.lat),
     'humScore ' + N(r.m.humScore) + ' → ' + N(r.mo.humScore) + ' · ' + r.dry.issues.join(','));
   row('mains hum', 'analyser humPeakDb', r.m.humPeakDb, r.mo.humPeakDb, '');
+  // PRIMARY criterion: the analyser's own hum peak (the level of the 50/150 Hz
+  // lines over the non-hum floor, as the classifier reads it) must be under 1 dB.
+  check('mains hum: humPeakDb after the chain < 1.0 dB (primary)', r.mo.humPeakDb < 1.0,
+    N(r.mo.humPeakDb, 2) + ' dB (input ' + N(r.m.humPeakDb, 2) + ')');
+  // The 50/150 vs 113 Hz bin is a secondary, reported number. It is confounded by
+  // program music in the same bins: the clean bed alone already reads
+  // humDb(clean) dB there, so the bin cannot go to zero and is gated as a
+  // reduction (≥ 5 dB below the input), not as an absolute level.
+  check('mains hum: 50/150 Hz bin down ≥ 5 dB vs input (secondary; bin floor is program)',
+    humDb(dirty) - humDb(r.out[0], r.lat) >= 5,
+    N(humDb(dirty), 2) + ' → ' + N(humDb(r.out[0], r.lat), 2) + ' dB · clean bed alone ' + N(humDb(clean), 2) + ' dB');
   /* the export the user gets back, re-uploaded — the honesty check from the
    * request: a fault the chain has repaired may not still be named on it */
   const re = U.enc(r.out, 320, U.WORK + '/accept-hum-320.mp3')[0];
   const rm = RSDSP.measure([re], SR);
+  check('mains hum does not come back on export (320 kbit/s re-upload)', !RP.diagnose(rm).issues.includes('hum'),
+    'diagnosis ' + (RP.diagnose(rm).issues.join(',') || 'healthy'));
   row('mains hum', 're-upload at 320 kbit/s → diagnosis', r.dry.issues.join(','), RP.diagnose(rm).issues.join(',') || 'healthy',
     'card ' + r.cls.id + ' → ' + RP.classify(rm).id + ' · the 320 kbit/s encoder puts its own noise floor under the file, which is what the analyser reads on it');
-}
+});
 mark('section 4');
 /* 4 ── rumble ────────────────────────────────────────────────────────────── */
-{
+section(() => {
   let clean = bed(6000, 0.7);
   clean = H.normalize(H.filter(RSDSP, clean, SR, 'hp', 60, 0.707), 0.7);
   /* The rumble has to *dominate* the band that is supposed to see it, or the row
@@ -416,7 +473,7 @@ mark('section 4');
   const rm = RSDSP.measure([re], SR);
   row('rumble', 're-upload at 320 kbit/s → diagnosis', r.dry.issues.join(','), RP.diagnose(rm).issues.join(',') || 'healthy',
     'card ' + r.cls.id + ' → ' + RP.classify(rm).id + ' · infraExcess on the export ' + N(rm.infraExcessDb, 1) + ' dB');
-}
+});
 mark('section 5');
 /* 5 ── clipping ────────────────────────────────────────────────────────────
  * Two meters, and a row that used to compare two things that cannot be.
@@ -525,7 +582,7 @@ function clipCase(tag, orig, rail, note) {
     'a repair that writes here is damage, whatever else it does');
   if (note) row('clipping (' + tag + ')', note, '', '', '');
 }
-{
+section(() => {
   const noise = H.normalize(H.noise(SR, SEC, 0.7, 5), 0.95);
   clipCase('noise', noise, 0.75);
   const tone = H.tone(997, SR, SEC, 1.25);
@@ -533,7 +590,7 @@ function clipCase(tag, orig, rail, note) {
   clipCase('997 Hz tone', H.tone(997, SR, SEC, 1.25), 0.99);
   let kick = H.normalize(H.mix([H.noise(SR, SEC, 0.5, 9), H.tone(60, SR, SEC, 0.6)]), 0.98);
   clipCase('kick + bass', kick, 0.75);
-}
+});
 mark('section 6');
 /* 6 ── codec wall ──────────────────────────────────────────────────────────
  * Two walls, because they are two different situations and the app has to get
@@ -564,10 +621,165 @@ function codecCase(tag, kb, bandLo, bandHi) {
   row('codec wall (' + kb + 'k)', 're-upload at 320 kbit/s → diagnosis', r.dry.issues.join(','), RP.diagnose(rm).issues.join(',') || 'healthy',
     'profile ' + r.cls.id + ' → ' + RP.classify(rm).id);
 }
-codecCase('32k', 32, 8000, 16000);
-codecCase('64k', 64, 15000, 20000);
+section(() => codecCase('32k', 32, 8000, 16000));
+section(() => codecCase('64k', 64, 15000, 20000));
+// 128 kbit/s is the common download rate and the case the MP3 export margin
+// (presets.js, codecMargin: 2.1 dB) is written for. The measured wall of this
+// encoder at 128 kbit/s sits at ≈ 19.3 kHz (the row's `cliff` note), so the band
+// is the region above it, where the bed still has content to lose.
+section(() => codecCase('128k', 128, 19600, 20000));
+/* 128 kbit/s with the 17 kHz lowpass a typical 128 kbit/s encoder sets (ffmpeg
+ * libmp3lame -cutoff 17000). This is the case C1 is about: the wall sits inside
+ * 15.5–19.3 kHz, where the old search could not see it. */
+function codecWallCase() {
+  const orig = bed(20000, 0.72);
+  const wav = U.WORK + '/accept-wall-src.wav';
+  U.wavWrite(wav, [orig], SR);
+  const mp3f = U.WORK + '/accept-128-cut17k.mp3';
+  // lamejs has no encoder-side lowpass knob, so the 17 kHz wall needs ffmpeg's -cutoff
+  if (!U.hasFfmpeg()) throw new U.NoDecoder('128 kbit/s at a 17 kHz cutoff needs ffmpeg (-cutoff); skipped');
+  U.ffmpeg(['-i', wav, '-c:a', 'libmp3lame', '-b:a', '128k', '-cutoff', '17000', mp3f]);
+  const mp3 = U.dec(mp3f)[0];
+  const r = run([mp3]);
+  const HP = bq('HP', 12000, 0.707), LP = bq('LP', 16000, 0.707);
+  const lvl = (sig, lat) => 10 * Math.log10(Math.pow(rms(filt(sig.subarray(lat || 0), [HP, LP])), 2));
+  row('codec wall (128k, 17 kHz)', 'codecWall128k finding (input → after chain)', r.m.codecWall128k ? 'yes' : 'no',
+    r.mo.codecWall128k ? 'yes' : 'no', 'the wall the 128 kbit/s encoder cut at ' + N(r.m.mp3BrickwallHz, 0) + ' Hz · issues ' + r.dry.issues.join(','));
+  row('codec wall (128k, 17 kHz)', '12–16 kHz vs the pre-encode original (dB)',
+    lvl(mp3) - lvl(orig), lvl(r.out[0], r.lat) - lvl(orig),
+    'profile ' + r.cls.id + ' · air gain ' + N(r.P.airGainDb, 1) + ' dB · ceiling ' + N(r.P.tpCeil, 1) + ' dBTP');
+  // C1: a 15.5–19.3 kHz steep wall is codecWall128k, not healthy
+  check('C1 128k wall is detected', r.m.codecWall128k, 'wall ' + N(r.m.mp3BrickwallHz, 0) + ' Hz');
+  check('C1 128k wall: limiter ceiling takes the 128 margin', r.P.tpCeil <= -3.0, 'tpCeil ' + N(r.P.tpCeil, 2));
+  // C2: BWE/air gain +1.5…+2.5 dB in 8–16 kHz only with measured codec loss
+  check('C2 air gain only on codec loss', r.P.airGainDb >= 1.5 && r.P.airGainDb <= 2.5, 'airGainDb ' + N(r.P.airGainDb, 2));
+}
+section(() => codecWallCase());
+
+/* 6b ── bandwidth extension (BWE) synthesis ──────────────────────────────────
+ * A 32 kbit/s encode has nothing above its ~7 kHz cliff. The chain's air stage
+ * rebuilds the top from the band below the cliff. Three things have to hold:
+ * the band above the cliff comes back (8–12 kHz), the synthesis is what brings
+ * it back (the same chain with air switched off does not), and it does not
+ * overshoot the original — a synthesised top end that is brighter than the
+ * source is a fake sheen, not a restoration (12–16 kHz, must stay ≤ +3 dB).
+ */
+section(() => {
+  const orig = bed(20000, 0.72);
+  const mp3 = U.enc([orig], 32, U.WORK + '/accept-bwe32.mp3')[0];
+  const r = run([mp3]);
+  const noAir = H.renderEx(Processor, [mp3], Object.assign({}, r.P, { air: 0 }));
+  const band = (lo, hi) => {
+    const HPb = bq('HP', lo, 0.707), LPb = bq('LP', hi, 0.707);
+    return (sig, lat) => 10 * Math.log10(Math.pow(rms(filt(sig.subarray(lat || 0), [HPb, LPb])), 2) + 1e-30);
+  };
+  const top = band(8000, 12000), high = band(12000, 16000);
+  row('bandwidth extension (32k)', '8–12 kHz vs the original (dB)',
+    top(mp3) - top(orig), top(r.out[0], r.lat) - top(orig),
+    'cliff ' + N(r.m.cliffHz, 0) + ' Hz · air ' + N(r.P.air, 3) + ' · ' + r.cls.id);
+  row('bandwidth extension (32k)', 'the same chain with air off, 8–12 kHz vs original (dB)',
+    top(mp3) - top(orig), top(noAir.out[0], noAir.latency) - top(orig),
+    'the synthesis is what closes the gap when this differs from the row above');
+  row('bandwidth extension (32k)', '12–16 kHz vs the original, no overshoot (dB)',
+    high(mp3) - high(orig), high(r.out[0], r.lat) - high(orig),
+    'a synthesised top end brighter than the source is a fake sheen (must stay ≤ +3 dB)');
+  check('C2 BWE 12–16 kHz does not overshoot the original', high(r.out[0], r.lat) - high(orig) <= 3,
+    N(high(r.out[0], r.lat) - high(orig), 2) + ' dB');
+  check('C2 BWE 32k: air is what closes the 8–12 kHz gap', top(r.out[0], r.lat) > top(noAir.out[0], noAir.latency),
+    N(top(r.out[0], r.lat) - top(noAir.out[0], noAir.latency), 2) + ' dB from air');
+});
+/** RBJ peaking EQ: a boost of `gdb` dB at `f`, width `q` — the room-mode model. */
+function peakEq(x, f, q, gdb) {
+  const A = Math.pow(10, gdb / 40), w = 2 * Math.PI * f / SR, c = Math.cos(w), s = Math.sin(w), al = s / (2 * q);
+  const b0 = 1 + al * A, b1 = -2 * c, b2 = 1 - al * A, a0 = 1 + al / A, a1 = -2 * c, a2 = 1 - al / A;
+  return RSDSP.applyBiquad(x, [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0]);
+}
+/* A realistic multi-peak room, not a fixture built from the detector's own
+ * model. The room is a box (5.4 × 4.3 × 2.8 m): its modes are the standing
+ * waves f = c/2 · √((nx/Lx)² + (ny/Ly)² + (nz/Lz)²), each one a resonator of its
+ * own with a decay set by a 0.6 s reverberation time (Q = π f T60 / 2.2 ≈ 2–4
+ * per mode at these frequencies, so the peaks are narrow and stand apart), and
+ * each excited by the source with its own level. The microphone hears the sum
+ * of the direct sound and every mode: many peaks, unequal, at positions the
+ * room decides and the fixture does not. Deterministic: no random numbers. */
+// a small room: its 2.7 m length makes the axial family 63.5 Hz · n, so the
+// strong modes fall where a room's ring is heard (230–780 Hz, the room-notch
+// field) instead of below it
+const ROOM = { Lx: 2.7, Ly: 4.3, Lz: 2.8, c: 343, T60: 0.6 };
+function roomModes(lo, hi) {
+  const modes = [];
+  for (let nx = 0; nx <= 8; nx++) for (let ny = 0; ny <= 8; ny++) for (let nz = 0; nz <= 8; nz++) {
+    if (nx + ny + nz === 0) continue;
+    const f = ROOM.c / 2 * Math.sqrt((nx / ROOM.Lx) ** 2 + (ny / ROOM.Ly) ** 2 + (nz / ROOM.Lz) ** 2);
+    if (f >= lo && f <= hi) modes.push({ f, n: nx + ny + nz, axial: [nx, ny, nz].filter((v) => v > 0).length === 1 });
+  }
+  // The axial modes (one index non-zero) are the ones a microphone hears as
+  // peaks: they couple to the source best and are the least damped. The
+  // oblique ones overlap into a faint floor.
+  return modes.sort((a, b) => a.f - b.f).map((m) => ({
+    f: m.f,
+    q: Math.PI * m.f * ROOM.T60 / 2.2,
+    // one dominant mode (the 318 Hz standing wave, n = 5 along the 2.7 m length)
+    // stands +6 dB; the other axial modes +3 dB; the oblique ones are a floor and
+    // are not boosted. Gains are in dB of a peaking boost (see roomSim).
+    boostDb: m.axial ? (Math.abs(m.f - 318) < 8 ? 6 : 3) : 0,
+  }));
+}
+/* The room as the microphone hears it: each axial mode is a peaking boost of the
+ * programme at its own frequency. A physical 2.7 m axial mode is narrower than
+ * one 5.9 Hz analysis bin (T60 0.6 s), so Q 40 (≈ 8 Hz) is the narrowest peak the
+ * measurement can show and the fixture stays inside what a microphone can see. */
+function roomSim(clean) {
+  let y = Float32Array.from(clean);
+  for (const m of roomModes(120, 900)) {
+    if (m.boostDb > 0) y = peakEq(y, m.f, 40, m.boostDb);
+  }
+  return y;
+}
+
+/* 7b ── one-microphone room resonance ───────────────────────────────────────
+ * One microphone in a room hears the room's modes as narrow ringing peaks. The
+ * room-notch field (230–780 Hz) is opened by the measured resonance score and
+ * is supposed to lower them. Two things: the 320 Hz ring comes down, and a clean
+ * recording with no room in it is left alone (its 200–800 Hz level must not move).
+ */
+section(() => {
+  const clean = bed(6000, 0.7);
+  const ringAt = (sig, f, q) => filt(sig, [bq('BP', f, q)]);
+  // A room mode is a narrow boost of what the source already carries at its
+  // frequency (a peaking filter), not a copy of the band added on top of it.
+  const roomy = H.normalize(roomSim(clean), 0.7);
+  if (process.env.ROOM_DEBUG) console.error('modes', roomModes(120, 900).map((m) => m.f.toFixed(0) + '/' + m.boostDb).join(' '));
+  const r = run([roomy]);
+  const ring = (sig, lat) => {
+    const e = rms(filt(sig.subarray(lat || 0), [bq('BP', 320, 6)]));
+    const nb = rms(filt(sig.subarray(lat || 0), [bq('BP', 200, 2)])) + rms(filt(sig.subarray(lat || 0), [bq('BP', 500, 2)]));
+    return 10 * Math.log10(e / (0.5 * nb + 1e-20));
+  };
+  row('one-microphone room', '320 Hz ring vs its neighbours (dB)', ring(roomy), ring(r.out[0], r.lat),
+    'roomResonanceScore ' + N(r.m.roomResonanceScore, 2) + ' → ' + N(r.mo.roomResonanceScore, 2)
+    + ' · room notch ' + N(r.P.roomNotch, 2) + ' · gate ' + N(r.P.roomScore, 2));
+  const band200 = bq('HP', 200, 0.707), band800 = bq('LP', 800, 0.707);
+  const bandDb = (sig, lat) => 10 * Math.log10(Math.pow(rms(filt(sig.subarray(lat || 0), [band200, band800])), 2) + 1e-30);
+  const rc = run([clean]);
+  row('one-microphone room', 'clean recording, 200–800 Hz level change (dB)', 0,
+    bandDb(rc.out[0], rc.lat) - bandDb(clean),
+    'the field must stay shut on a recording with no room in it: gate ' + N(rc.P.roomScore, 2));
+  // the gate itself: the measured mode is detected, the field opens on it and
+  // takes the ring down; the room score falls with it
+  check('one-microphone room: the 320 Hz ring comes down by ≥ 1.5 dB', ring(r.out[0], r.lat) <= ring(roomy) - 1.5,
+    N(ring(r.out[0], r.lat) - ring(roomy), 2) + ' dB');
+  check('one-microphone room: the room score is detected (≥ 0.5 on the fixture) and falls under the notch (≥ 0.4)',
+    r.m.roomResonanceScore >= 0.5 && r.m.roomResonanceScore - r.mo.roomResonanceScore >= 0.4,
+    N(r.m.roomResonanceScore, 2) + ' → ' + N(r.mo.roomResonanceScore, 2));
+  check('C3 clean recording: 200–800 Hz level unchanged (±1 dB)',
+    Math.abs(bandDb(rc.out[0], rc.lat) - bandDb(clean)) <= 1, N(bandDb(rc.out[0], rc.lat) - bandDb(clean), 2) + ' dB');
+  check('C3 room fixture is multi-peak (≥3 modes above +3 dB)', roomModes(120, 900).filter((m) => m.boostDb >= 3).length >= 3,
+    roomModes(120, 900).filter((m) => m.boostDb >= 3).length + ' modes boosted ≥ 3 dB');
+});
+
 /* 7 ── boxy resonance ───────────────────────────────────────────────────── */
-{
+section(() => {
   const clean = bed(6000, 0.7);
   let out = Float32Array.from(clean);
   const ring = filt(clean, [bq('BP', 220, 4)]);
@@ -581,10 +793,10 @@ codecCase('64k', 64, 15000, 20000);
   };
   row('boxy resonance', '220 Hz ring vs its neighbours (dB)', excess(out), excess(r.out[0], r.lat),
     'resoExcess ' + N(r.m.resoExcessDb, 1) + ' → ' + N(r.mo.resoExcessDb, 1) + ' · notch ' + N(r.P.boxG1, 2) + ' dB @ ' + N(r.P.boxF1, 0) + ' Hz');
-}
+});
 mark('section 8');
 /* 8 ── narrow stereo ────────────────────────────────────────────────────── */
-{
+section(() => {
   const mid = bed(9000, 0.7);
   const side = H.normalize(filt(bed(9000, 0.7), [bq('HP', 300, 0.707)]), 0.06);
   const L = Float32Array.from(mid, (x, i) => x + side[i]);
@@ -594,10 +806,10 @@ mark('section 8');
   const out = H.renderEx(Processor, [L, R], P).out;
   row('narrow image', 'side/mid energy (dB)', sideRatio([L, R]), sideRatio(out),
     'correlation ' + N(m.correlation, 3) + ' · width ' + N(P.width, 2) + ' · ' + RP.classify(m).id);
-}
+});
 mark('section 9');
 /* 9 ── DC offset ────────────────────────────────────────────────────────── */
-{
+section(() => {
   const clean = bed(9000, 0.7);
   const dirty = new Float32Array(clean.length);
   for (let i = 0; i < clean.length; i++) dirty[i] = clean[i] + 0.02;
@@ -609,10 +821,10 @@ mark('section 9');
   };
   row('dc offset', 'mean sample value', mean(dirty), mean(r.out[0], r.lat),
     'dcOffsetDb ' + N(r.m.dcOffsetDb, 1) + ' → ' + N(r.mo.dcOffsetDb, 1));
-}
+});
 mark('section 10');
 /* 10 ── sibilance ───────────────────────────────────────────────────────── */
-{
+section(() => {
   const clean = bed(9000, 0.7);
   const dirty = Float32Array.from(clean);
   const F = Math.round(SR * 0.12);
@@ -759,11 +971,11 @@ mark('section 10');
   row('sibilance', 'a continuous “s” through the chain: 7 kHz of the loudest 20 % of frames (dBFS)',
     N(loud20(unending, unending), 1), N(loud20(ru.out[0].subarray(ru.lat), unending), 1),
     'the de-esser at dose ' + N(ru.P.deess, 3) + ' on the file that needs it — and the same chain never ducks the band on §20\'s wash and organ (tests/dsp.test.js measures both directions through the engine)');
-}
+});
 
 mark('section 11');
 /* 11 ── thin bass ────────────────────────────────────────────────────────── */
-{
+section(() => {
   let clean = bed(9000, 0.7);
   clean = H.normalize(filt(clean, [bq('HP', 200, 0.707), bq('HP', 200, 0.707)]), 0.7);
   const r = run([clean]);
@@ -798,10 +1010,10 @@ mark('section 11');
    * below that. If the row above moves *down*, one of them is writing where the
    * file has nothing while the other does not write at all. */
 
-}
+});
 mark('section 12');
 /* 12 ── boxy low mids ───────────────────────────────────────────────────── */
-{
+section(() => {
   const clean = bed(9000, 0.7);
   const hump = filt(clean, [bq('BP', 240, 0.55)]);
   let dirty = new Float32Array(clean.length);
@@ -811,7 +1023,7 @@ mark('section 12');
   const humpDb = (sig, lat) => bandSumDb(sig, 180, 320, lat) - bandSumDb(sig, 600, 1200, lat);
   row('boxy mids', '180–320 Hz vs 600–1200 Hz (dB)', humpDb(dirty), humpDb(r.out[0], r.lat),
     'mudScore ' + N(r.m.mudScore) + ' · band1 ' + N(r.P.band1) + ' · band2 ' + N(r.P.band2) + ' · ' + r.dry.issues.join(','));
-}
+});
 mark('section 13');
 /* 13 ── dull top end ──────────────────────────────────────────────────────
  * Where the class's line sits, measured by sweeping the low-pass corner of the
@@ -834,7 +1046,7 @@ mark('section 13');
  * verdicts rather than only the dry one, so the reader can see which of the two
  * happened.
  * ------------------------------------------------------------------------- */
-{
+section(() => {
   const clean = bed(20000, 0.7);
   let dull = H.normalize(filt(clean, [bq('LP', 5200, 0.707), bq('LP', 5200, 0.707)]), 0.7);
   const r = run([dull]);
@@ -844,10 +1056,10 @@ mark('section 13');
     + ' · topLoss ' + N(r.m.topLoss) + ' → ' + N(r.mo.topLoss) + ' · air ' + N(r.P.air) + ' · airF ' + N(r.P.airF, 0)
     + ' · ' + r.dry.issues.join(',') + ' → ' + (r.wet.issues.join(',') || 'healthy')
     + ' (the synthesiser may not overtake the band it derives from — a 7 kHz corner is closed, a 5 kHz one is not)');
-}
+});
 mark('section 14');
 /* 14 ── harsh presence ──────────────────────────────────────────────────── */
-{
+section(() => {
   let clean = bed(9000, 0.7);
   /* a honk at 3 kHz needs +9.5 dB *relative to the programme's own slope* before
    * the analyser calls it harsh (it compares the 2–4 kHz median with the
@@ -861,10 +1073,10 @@ mark('section 14');
   const harshDb = (sig, lat) => bandSumDb(sig, 2000, 4000, lat) - bandSumDb(sig, 800, 1600, lat);
   row('harsh presence', '2–4 kHz vs 0.8–1.6 kHz (dB)', harshDb(dirty), harshDb(r.out[0], r.lat),
     'harshness ' + N(r.m.harshness) + ' → ' + N(r.mo.harshness) + ' · band4 ' + N(r.P.band4) + ' · ' + r.dry.issues.join(','));
-}
+});
 mark('section 15');
 /* 15 ── a squashed master ───────────────────────────────────────────────── */
-{
+section(() => {
   let clean = bed(9000, 0.7);
   /* squashed the way an over-limited master is: the peaks are pulled flat, so
    * the file's own 98th percentile sits almost on its 5th — and squashed hard
@@ -915,10 +1127,10 @@ mark('section 15');
     'the class is deliberately not repaired: card ' + r.dry.issues.join(',') + ' → ' + (r.wet.issues.join(',') || 'healthy')
     + ' · wr39 stage controls: de-clip is off on this clean squashed fixture; glue off 8.34 app dB, warmth off 8.34, '
     + 'synthesis off 8.25, limiter off 8.52 — the later stages do not invent dynamics, and the final limiter is the export ceiling');
-}
+});
 mark('section 16');
 /* 16 ── an out-of-phase bottom ──────────────────────────────────────────── */
-{
+section(() => {
   const a = bed(9000, 0.7, 0.30);
   const bIn = bed(9000, 0.7, 0.30);
   const lowB = filt(bIn, [bq('LP', 200, 0.707)]);
@@ -982,7 +1194,7 @@ mark('section 16');
   row('out-of-phase bottom', 'a merely wide bottom — control (ratio)', RSDSP.stereoCorrelation(widePair), RSDSP.stereoCorrelation(rw.out),
     "the app's own low-band correlation " + N(rw.m.stereo.low, 3) + ' · bassMono ' + N(rw.P.bassMono, 2)
     + ' · issues ' + (rw.dry.issues.join(',') || 'healthy') + ' · the two independent meters must agree that nothing was folded');
-}
+});
 
 mark('section 17');
 /* 17 ── everything a vinyl rip brings, at once ─────────────────────────────
@@ -1037,7 +1249,7 @@ mark('section 17');
  * this residue, and tilt stationarity is no witness either. What is left in the
  * file is the arrival's own error, shaped like its music.
  * ------------------------------------------------------------------------- */
-{
+section(() => {
   const clean = bed(9000, 0.62, 0.30);
   let rec = Float32Array.from(clean);
   rec = H.mix([rec, H.filter(RSDSP, H.filter(RSDSP, H.mul(H.noise(SR, SEC, 1, 12), 0.12), SR, 'lp', 35, 0.707), SR, 'lp', 35, 0.707)]);
@@ -1159,7 +1371,7 @@ mark('section 17');
   const rm = RSDSP.measure([re], SR);
   row('worn record (all at once)', 're-upload at 320 kbit/s → diagnosis', r.dry.issues.join(','), RP.diagnose(rm).issues.join(',') || 'healthy',
     'card ' + r.cls.id + ' → ' + RP.classify(rm).id + ' · tilt step on the export ' + N(rm.hissTiltStepDb) + ' dB — the defect the 128 kbit/s arrival left loudest does not come back: the pauses no longer sit above the music\'s own tilt (before this round: card cassette, step 6.86)');
-}
+});
 mark('section 18');
 /* 18 ── the modern master, hot ─────────────────────────────────────────────
  * The other world of the request: a newer song. Nothing worn about it — no
@@ -1194,7 +1406,7 @@ mark('section 18');
  * The export reads `squashed` — the clipping is gone from it, and what is left
  * is the master's own dynamics, honestly reported.
  * ------------------------------------------------------------------------- */
-{
+section(() => {
   const clean = bed(9000, 0.7, 0.35);
   const sqEnv = H.songEnvelope(SR, SEC, 0.35);
   const sq = new Float32Array(clean.length);
@@ -1238,7 +1450,7 @@ mark('section 18');
   const rm = RSDSP.measure([re], SR);
   row('hot modern master', 're-upload at 320 kbit/s → diagnosis', r.dry.issues.join(','), RP.diagnose(rm).issues.join(',') || 'healthy',
     'card ' + r.cls.id + ' → ' + RP.classify(rm).id + ' — the clipping is gone from the export, and what is left is the master\'s own dynamics, honestly reported');
-}
+});
 
 mark('section 19');
 /* 19 ── the app's honesty about its own export, for every class at once ────
@@ -1255,6 +1467,7 @@ mark('section 19');
  * It covers every class *by construction*: the entry is recorded in `run()`, so
  * a class that forgets its own export row still shows up here. */
 for (const e of EXPORTS) {
+  if (!e.exp) continue;   // not decoded in this run (no ffmpeg): listed under SKIPPED
   /* `healthy` is a *token in the list*, not an absence of one (`diagnose`
    * pushes it when nothing else fired), so it has to be filtered out of both
    * comparisons — without this the first fixture whose export comes back
@@ -1268,6 +1481,28 @@ for (const e of EXPORTS) {
     (back.length ? '**a repaired defect is back on the export: ' + back.join(',') + '**' : 'no repaired defect returns')
     + ' · the chain\'s own output reads ' + (e.wet.join(',') || 'healthy')
     + (codec.length ? ' · the encode itself adds ' + codec.join(',') : ''));
+}
+
+/* The export-honesty rows above are gated, not only printed: a defect that the
+ * chain repaired must not come back on the 320 kbit/s re-upload. Every return
+ * is recorded as `class:defect`. The one return that is measured and not yet
+ * repaired is a KNOWN_ISSUE (listed, never a PASS); any other return fails. */
+const KNOWN_RETURNS = ['general:hum'];
+{
+  const returns = [];
+  for (const e of EXPORTS) {
+    if (!e.exp) continue;
+    const names = (a) => a.filter((x) => x !== 'healthy');
+    for (const x of names(e.dry)) {
+      if (names(e.exp).includes(x) && !names(e.wet).includes(x)) returns.push(e.cls + ':' + x);
+    }
+  }
+  const unknown = returns.filter((r) => !KNOWN_RETURNS.includes(r));
+  check('export honesty: no repaired defect returns on the 320 kbit/s re-upload (beyond the recorded one)',
+    unknown.length === 0, unknown.join(', ') || 'none beyond ' + KNOWN_RETURNS.join(', '));
+  const recorded = KNOWN_RETURNS.filter((r) => returns.includes(r));
+  check('export honesty: recorded return on the re-upload (not yet repaired)',
+    true, recorded.length ? recorded.join(', ') + ' still present on the export' : 'no longer present — update KNOWN_RETURNS', true);
 }
 
 mark('section 20');
@@ -1318,7 +1553,7 @@ mark('section 20');
  * this tool's independent time-domain meter — every click's peak in the 4–12 kHz
  * band against the same file *without* the clicks.
  * ------------------------------------------------------------------------- */
-{
+section(() => {
   const P0 = Processor;
   /* a train of 0.4 ms top-end bursts with no body and no tail: a click train by
    * every statistic this file has (see the header) — and the app now says so */
@@ -1701,7 +1936,7 @@ mark('section 20');
     N(bandSumDb(master, 8000, 16000) - bandSumDb(master, 8000, 16000), 2), N(bandSumDb(expo, 8000, 16000) - bandSumDb(master, 8000, 16000), 2),
     'card ' + dm.id + ' → ' + de.id + ' · issues ' + (dm.issues.join(',') || 'healthy') + ' → ' + (de.issues.join(',') || 'healthy')
     + ' — the brick wall and the noise floor the encoder adds are not defects the card names');
-}
+});
 
 mark('section 21');
 /* 21 ── dropouts ───────────────────────────────────────────────────────────
@@ -1729,7 +1964,7 @@ mark('section 21');
  * would be left as a step — the click this stage exists to remove. So the class
  * is measured, named and *not* claimed: it is the bound next to the stage that
  * repairs impulses. */
-{
+section(() => {
   const SEC4 = 4, P0 = Math.round(2 * SR), HL = 25;
   const rbjCoef = (t, f, q) => {
     const w = 2 * Math.PI * Math.min(f, SR * 0.49) / SR, c = Math.cos(w), si = Math.sin(w), al = si / (2 * (q || 0.707)), a0 = 1 + al;
@@ -1758,7 +1993,7 @@ mark('section 21');
   row('dropouts', 'analyser crackleIndex — a file of dropouts is not named crackle', N(dm.crackleIndex, 3), N(rm.crackleIndex, 3),
     'card ' + RP.classify(dm).id + ' → ' + RP.classify(rm).id + ' · the chain is dosed at the profile\'s floor (declick ' + N(P1.declick, 3)
     + '), so the stage stands by on a file whose holes are −6.8 dB deep in the music\'s own band');
-}
+});
 
 mark('section 22');
 /* 22 ── the file the user keeps: a lossy export holds its ceiling ───────────
@@ -1785,7 +2020,7 @@ mark('section 22');
  * encoder and ffmpeg's meter: before the margin → with it. Material that stays
  * under the ceiling is bit-transparent to the margin (last row: 0.00 dB), so the
  * room is paid for by the masters whose limiter is already working. */
-{
+section(() => {
   /* A hot modern master: full bandwidth, envelope flattened, saturated. The
    * bandwidth is the whole point — section 18's hot master is low-passed at
    * 9 kHz for the de-clipper's sake, and a 9 kHz-limited waveform leaves the
@@ -1802,7 +2037,7 @@ mark('section 22');
   const prom = HP0.tpCeil;
   const ceilFindings = (file) => {
     const mm = RSDSP.measure(U.dec(file), SR);
-    const keys = RP.recipe(mm, RP.buildParams('auto', mm, 0.7), 0.7).findings.map((z) => z.key);
+    const keys = RP.recipe(mm, RP.buildParams('auto', mm, 0.7)).findings.map((z) => z.key);
     return { n: keys.filter((k) => k === 'truePeak' || k === 'hotPeak').length, keys };
   };
   for (const kbps of [128, 320]) {
@@ -1839,7 +2074,7 @@ mark('section 22');
   row('export', 'the same margin on a fixture whose limiter never works (dBTP)', N(qTp(qB, 'b'), 2), N(qTp(qA, 'a'), 2),
     'the ceiling is ' + N(QP.tpCeil, 2) + ' dBTP and this fixture renders at ' + N(RSDSP.measure(qB, SR).ispDb, 2)
     + ' dBTP, so a lower ceiling changes nothing: the delivered file is the same to 0.00 dB. A file that stays under its ceiling is bit-transparent to the whole stage');
-}
+});
 
 /* ── print ──────────────────────────────────────────────────────────────── */
 /* ── print ──────────────────────────────────────────────────────────────── */
@@ -1857,3 +2092,20 @@ for (const [d, s, a, b, note] of ROWS) {
   console.log('%s %s %s %s   %s', d.padEnd(W[0]), s.padEnd(W[1]), fmt(a).padStart(W[2]), fmt(b).padStart(W[3]), note);
 }
 console.log('\n%d rows · %d defect classes', ROWS.length, new Set(ROWS.map((r) => r[0].replace(/ \(.*/, ''))).size);
+
+/* ── gate ─────────────────────────────────────────────────────────────────── */
+{
+  const bad = CHECKS.filter((c) => !c.ok);
+  const known = CHECKS.filter((c) => c.known && c.ok);
+  const passed = CHECKS.filter((c) => !c.known && c.ok);
+  console.log('\ngate: %d checks · %d pass · %d known issue · %d FAILED · %d section(s) skipped',
+    CHECKS.length, passed.length, known.length, bad.length, SKIPPED.length);
+  for (const c of CHECKS) console.log('  %s %s  (%s)', !c.ok ? 'FAIL' : c.known ? 'KNOWN_ISSUE' : 'PASS', c.label, c.detail);
+  for (const k of KNOWN) console.log('  NOT GATED  %s', k);
+  for (const k of SKIPPED) console.log('  SKIPPED  %s', k);
+  if (REQUIRE_FFMPEG && SKIPPED.length) {
+    console.log('  FAIL  RS_REQUIRE_FFMPEG: %d section(s) skipped, the matrix must run whole', SKIPPED.length);
+    process.exitCode = 1;
+  }
+  if (bad.length) process.exitCode = 1;
+}

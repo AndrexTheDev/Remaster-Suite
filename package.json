@@ -4,16 +4,19 @@
   "private": true,
   "description": "Harmonic Restoration · Remaster Suite — 100 % client-side audio restoration in vanilla HTML/CSS/JS",
   "scripts": {
-    "test": "node tests/dsp.test.js && node tests/web.test.js && node tests/audit.test.js && node tests/e2e.test.js && node tests/tuning.test.js",
+    "test": "node tools/run-tests.js",
     "test:dsp": "node tests/dsp.test.js",
     "test:web": "node tests/web.test.js",
+    "test:neural": "node tests/neural.test.js",
     "test:audit": "node tests/audit.test.js",
     "test:e2e": "node tests/e2e.test.js",
     "serve": "python3 -m http.server 8080",
-    "test:beta": "node tests/beta/beta.js"
+    "test:beta": "node tests/beta/beta.js",
+    "test:serial": "node tools/run-tests.js --serial"
   },
   "devDependencies": {
-    "jsdom": "^22.1.0"
+    "jsdom": "^22.1.0",
+    "onnxruntime-node": "^1.20.1"
   },
   "license": "MIT",
   "author": "AndrexTheDev <hippie.highho@gmail.com>",

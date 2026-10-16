@@ -15,7 +15,12 @@ const DSP = H.loadDsp();
 /* --------------------------------------------------------------- AudioBuffer */
 
 class AudioBufferStub {
+  // the spec's form is an options dictionary; the positional form stays for the stub's own callers
   constructor(numberOfChannels, length, sampleRate) {
+    if (numberOfChannels && typeof numberOfChannels === 'object') {
+      const o = numberOfChannels;
+      numberOfChannels = o.numberOfChannels; length = o.length; sampleRate = o.sampleRate;
+    }
     this.numberOfChannels = numberOfChannels;
     this.length = length;
     this.sampleRate = sampleRate;
@@ -148,6 +153,16 @@ class SourceNodeStub extends NodeStub {
   }
 }
 
+/* a delay line: the engine's dry path. Its delay is a parameter; the stub does
+ * not render it (the offline render is the processor's own, not this stub's). */
+class DelayNodeStub extends NodeStub {
+  constructor(ctx, max) {
+    super(ctx);
+    this.delayTime = new ParamStub({ name: 'delayTime', defaultValue: 0 });
+    this.maxDelayTime = max || 1;
+  }
+}
+
 class GainNodeStub extends NodeStub {
   constructor(ctx) {
     super(ctx);
@@ -247,6 +262,7 @@ class BaseContextStub {
   createBuffer(nCh, len, sr) { return new AudioBufferStub(nCh, len, sr || this.sampleRate); }
   createBufferSource() { return new SourceNodeStub(this); }
   createGain() { return new GainNodeStub(this); }
+  createDelay(max) { return new DelayNodeStub(this, max); }
   async resume() { this.state = 'running'; return undefined; }
   async close() { this.state = 'closed'; return undefined; }
   async decodeAudioData(arrayBuffer) {

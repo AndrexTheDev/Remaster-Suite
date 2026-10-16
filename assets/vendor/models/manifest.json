@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "comment": "Model chain for the hybrid path. Each stage lists its candidates in order of preference; the first one present locally is used, otherwise the stage falls back to the pure-DSP chain. No candidate is ever fetched from a network host unless the page is in 'cdn' mode and the model was registered with a remote source (RSLibs.registerModel). Weight files (*.onnx) are git-ignored.",
+  "stages": {
+    "denoise": {
+      "label": "DeepFilterNet3 (non-stationary noise removal, 48 kHz)",
+      "candidates": [
+        { "id": "dfn3", "files": ["dfn3-enc.onnx", "dfn3-erb-dec.onnx", "dfn3-df-dec.onnx"] }
+      ],
+      "fallback": "dsp"
+    },
+    "superRes": {
+      "label": "Super-resolution to 48 kHz (NovaSR / LavaSR)",
+      "candidates": [
+        { "id": "novasr-full", "tier": "full", "files": ["novasr-full.onnx"] },
+        { "id": "novasr-compact", "tier": "compact", "files": ["novasr-compact.onnx"] }
+      ],
+      "fallback": "dsp"
+    }
+  }
+}

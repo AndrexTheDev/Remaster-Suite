@@ -97,7 +97,19 @@ function staticChecks(doc) {
   const allCode = code + readIndexHtml();
   ok(!/<script[^>]+src=["']https?:/.test(allCode), 'no remote script is loaded by default');
   ok(!/<link[^>]+href=["']https?:/.test(allCode), 'no remote stylesheet or font is loaded');
-  ok(/localStorage/.test(allCode) === false, 'no localStorage is used');
+  // storage: exactly two settings, both chosen by the user (the third-party opt-in
+  // and the budget ceiling). The keys live in one constant of the loader; storage
+  // is touched only there. No other storage, no cookies, no identifiers.
+  const loaderSrc = fs.readFileSync(path.join(ROOT, 'assets', 'js', 'library-loader.js'), 'utf8');
+  const storeBlock = (loaderSrc.match(/const STORE = \{([^}]*)\}/) || [])[1] || '';
+  const uniqueKeys = [...storeBlock.matchAll(/['"](rs\.[A-Za-z0-9.]+)['"]/g)].map((m) => m[1]).sort();
+  const storageUsers = jsSources(ROOT).filter((f) => /localStorage/.test(fs.readFileSync(f, 'utf8')));
+  ok(JSON.stringify(uniqueKeys) === JSON.stringify(['rs.inferenceBudgetMaxMs', 'rs.online'])
+    && storageUsers.length === 1 && /library-loader\.js$/.test(storageUsers[0]),
+    'storage holds only the two user settings (rs.online, rs.inferenceBudgetMaxMs), in one place',
+    uniqueKeys.join(', ') + ' · used in ' + storageUsers.map((f) => path.basename(f)).join(', '));
+  ok(!/sessionStorage|indexedDB|document\.cookie|navigator\.sendBeacon/.test(allCode),
+    'no other storage, cookie or beacon is used');
   ok(/document\.cookie/.test(allCode) === false, 'no cookie is written');
 }
 
@@ -171,7 +183,7 @@ function bootApp(opts) {
   win.eval(fs.readFileSync(path.join(ROOT, 'assets/vendor/lame.min.js'), 'utf8'));
 
   const order = ['dsp-utils.js', 'presets.js', 'i18n.js', 'library-loader.js', 'codecs.js',
-    'analyzer.js', 'engine.js', 'ui.js', 'app.js'];
+    'analyzer.js', 'ring-buffer.js', 'neural-dsp.js', 'engine.js', 'ui.js', 'app.js'];
   for (const file of order) {
     const code = fs.readFileSync(path.join(ROOT, 'assets', 'js', file), 'utf8');
     win.eval(code);
@@ -199,6 +211,46 @@ async function run() {
   const coin = win.document.querySelector('.coin').getAttribute('data-copy');
   ok(coin === '79KsqtJJdhKFJ9woxnYgtf3nq7HxQveafWBCtC3mxWi8', 'SOL address is exact', coin.slice(0, 8) + '…');
   ok(/hippie\.highho@gmail\.com/.test(win.document.querySelector('.credit').textContent), 'author contact is in the footer');
+
+  section('engine · the monitor delays its dry path by the latency actually in the path');
+  {
+    // the worklet reports its own look-ahead; each neural stage reports its own;
+    // the total is what `latency` holds and what the dry path is delayed by
+    const E = win.RSEngine;
+    E._workletLatency = 153;                       // declick + limiter, as measured
+    E.setNeuralLatency('denoise', 512);
+    ok(E.latency === 665, 'worklet + denoise sum to the latency', String(E.latency));
+    E.setNeuralLatency('superRes', 2048);
+    ok(E.latency === 2713, 'a super-resolution stage adds its window', String(E.latency));
+    E.setNeuralLatency('superRes', 0);
+    ok(E.latency === 665, 'a stage taken out of the path leaves the sum', String(E.latency));
+    E.disposeNeural();
+    ok(E.latency === 153, 'disposing the neural side drops its stages', String(E.latency));
+    E._workletLatency = 0; E._updateLatency();
+    ok(E.latency === 0, 'nothing in the path, no latency', String(E.latency));
+  }
+
+  section('engine · play() resumes a context the browser has suspended');
+  {
+    // init() returns early once the context is loaded, so a suspended context
+    // used to stay suspended while the monitor reported itself as playing
+    const E = win.RSEngine;
+    const keepBuffer = E.buffer;
+    E.buffer = new win.AudioBuffer({ length: 48000, numberOfChannels: 2, sampleRate: 48000 });
+    await E.init();
+    const ctx = E.ctx;
+    let resumes = 0;
+    const realResume = ctx.resume.bind(ctx);
+    ctx.resume = () => { resumes++; return realResume(); };
+    E.stop();
+    ctx.state = 'suspended';
+    await E.play();
+    ok(resumes >= 1 && ctx.state === 'running', 'play() resumes a suspended context', 'resume calls ' + resumes + ' · state ' + ctx.state);
+    ok(E.playing === true, 'and only then reports the monitor as playing', String(E.playing));
+    E.stop();
+    ctx.resume = realResume;
+    E.buffer = keepBuffer;
+  }
 
   section('boot · language switching');
   const deText = win.document.querySelector('.hero h1').textContent;

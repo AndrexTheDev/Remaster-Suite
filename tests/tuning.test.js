@@ -389,5 +389,228 @@ H.section('tuning · honesty of the extreme settings');
   H.ok(t1 < 2, 'and a dull recording never comes out as a bright modern one', t1.toFixed(1) + ' dB from neutral');
 }
 
-const ok = H.summarize();
-process.exit(ok ? 0 : 1);
+/* ──────────────────────────────────── codec, room and comb signatures ──
+ * Synthetic material for the four defect measurements: a 128 kbit/s cut at
+ * 15.5 / 16.5 / 17 kHz (with and without the codec's zeroed bands), a steady and
+ * a phase-jittering room ring, and a comb built from a delayed copy. Each signal
+ * is checked for the number it should produce, and for the number a clean
+ * control must not produce.
+ */
+
+/** An ideal encoder low-pass: everything above fc removed in the frequency domain. */
+function brickwallFft(sig, fc) {
+  let N = 1;
+  while (N < sig.length) N <<= 1;
+  const re = new Float32Array(N), im = new Float32Array(N);
+  re.set(sig);
+  DSP.fft(re, im);
+  const cut = Math.round((fc / SR) * N);
+  for (let k = 0; k < N; k++) {
+    const kk = k <= N / 2 ? k : N - k;
+    if (kk > cut) { re[k] = 0; im[k] = 0; }
+  }
+  for (let k = 0; k < N; k++) im[k] = -im[k];      // inverse via conjugation
+  DSP.fft(re, im);
+  const out = new Float32Array(sig.length);
+  for (let i = 0; i < sig.length; i++) out[i] = re[i] / N;
+  return out;
+}
+
+/**
+ * Band-wise holes the way a low-bit-rate encoder leaves them: per 2048-sample
+ * granule, whole 16-bin bands are zeroed at random (above fc always).
+ */
+function codecBands(sig, fc, share, seed) {
+  const N = 2048;
+  const rnd = H.rng(seed);
+  const out = new Float32Array(sig.length);
+  const cut = Math.floor(fc / (SR / N));
+  for (let off = 0; off < sig.length; off += N) {
+    const re = new Float32Array(N), im = new Float32Array(N);
+    for (let i = 0; i < N; i++) re[i] = off + i < sig.length ? sig[off + i] : 0;
+    DSP.fft(re, im);
+    for (let b = 0; b * 16 <= N / 2; b++) {
+      const zero = rnd() < share;
+      for (let k = b * 16; k < b * 16 + 16 && k <= N / 2; k++) {
+        if (k > cut || (k > 2 && zero)) {
+          re[k] = 0; im[k] = 0;
+          if (k > 0 && k < N / 2) { re[N - k] = 0; im[N - k] = 0; }
+        }
+      }
+    }
+    for (let k = 0; k < N; k++) im[k] = -im[k];
+    DSP.fft(re, im);
+    for (let i = 0; i < N && off + i < sig.length; i++) out[off + i] = re[i] / N;
+  }
+  return out;
+}
+
+/** A sine added to sig; with scrambleEvery > 0 its phase is redrawn at that interval. */
+function addTone(sig, f, amp, scrambleEvery) {
+  const rnd = H.rng(4242);
+  const out = new Float32Array(sig.length);
+  let ph = 0;
+  for (let i = 0; i < sig.length; i++) {
+    if (scrambleEvery && i % scrambleEvery === 0) ph = rnd() * 2 * Math.PI;
+    out[i] = sig[i] + amp * Math.sin(2 * Math.PI * f * i / SR + ph);
+  }
+  return out;
+}
+
+/** sig plus a delayed copy: notches every SR/D Hz. */
+function addComb(sig, D, g) {
+  const out = new Float32Array(sig.length);
+  for (let i = 0; i < sig.length; i++) out[i] = sig[i] + (i >= D ? g * sig[i - D] : 0);
+  return out;
+}
+
+const bed = H.normalize(H.pink(SR, 6, 0.5, 7), 0.5);
+
+H.section('codec · a 128 kbit/s cut is found where it sits, its holes counted');
+for (const fc of [15500, 16500, 17000]) {
+  const clean = brickwallFft(bed, fc);
+  const coded = codecBands(clean, fc, 0.5, 3);
+  const mc = DSP.measure([clean], SR);
+  const mk = DSP.measure([coded], SR);
+  H.ok(Math.abs(mc.mp3BrickwallHz - fc) < 150 && Math.abs(mk.mp3BrickwallHz - fc) < 150,
+    `the ${fc / 1000} kHz wall is found within 150 Hz, with and without the codec's holes`,
+    `clean ${mc.mp3BrickwallHz.toFixed(0)} Hz, coded ${mk.mp3BrickwallHz.toFixed(0)} Hz`);
+  H.ok(mk.mp3Brickwall.slopeDbPerOct >= 36 && mk.mp3Brickwall.sharpness >= 0.6,
+    `the wall is steeper than 36 dB/oct and concentrated in an eighth of an octave`,
+    `${mk.mp3Brickwall.slopeDbPerOct.toFixed(0)} dB/oct, sharpness ${mk.mp3Brickwall.sharpness.toFixed(2)}`);
+  H.ok(mk.spectralHoleDensity > 0.02 && mk.spectralHoleDensity > 5 * mc.spectralHoleDensity,
+    `the zeroed bands are counted as holes: ${(mk.spectralHoleDensity * 100).toFixed(1)} % of the bins below the wall, against ${(mc.spectralHoleDensity * 100).toFixed(2)} % clean`,
+    `energy missing ${mk.spectralHoles.energyRatio.toExponential(1)}`);
+}
+
+H.section('codec · a clean control and a gentle slope show no wall and no holes');
+{
+  const mp = DSP.measure([bed], SR);
+  H.ok(mp.mp3BrickwallHz === 0 && mp.spectralHoleDensity === 0,
+    'an uncut recording reports no wall and no holes', `wall ${mp.mp3BrickwallHz}, holes ${mp.spectralHoleDensity}`);
+  const soft = H.filter(DSP, bed, SR, 'lp', 12000, 0.707);
+  const ms = DSP.measure([soft], SR);
+  H.ok(ms.mp3BrickwallHz === 0,
+    'a 12 kHz filter slope is steep, but it is not a wall, and is not reported as one',
+    `slope ${ms.mp3Brickwall.slopeDbPerOct.toFixed(0)} dB/oct, sharpness ${ms.mp3Brickwall.sharpness.toFixed(2)}`);
+}
+
+H.section('room · a steady ring is phase-stable, a jittering one is not');
+{
+  const steady = addTone(bed, 310, 0.03, 0);
+  const ms = DSP.measure([steady], SR);
+  H.ok(ms.roomResonanceScore >= 0.8 && ms.roomResonances.length > 0 && Math.abs(ms.roomResonances[0].hz - 310) < 15,
+    'a steady 310 Hz ring scores as a room resonance',
+    `score ${ms.roomResonanceScore.toFixed(2)} at ${ms.roomResonances.length ? ms.roomResonances[0].hz.toFixed(0) : '—'} Hz, coherence ${ms.roomResonances.length ? ms.roomResonances[0].coherence.toFixed(2) : '—'}`);
+  const jitter = addTone(bed, 310, 0.03, 512);
+  const mj = DSP.measure([jitter], SR);
+  H.ok(mj.roomResonanceScore <= 0.1,
+    'the same tone with its phase redrawn every 512 samples does not score',
+    `score ${mj.roomResonanceScore.toFixed(2)}`);
+  const mp = DSP.measure([bed], SR);
+  H.ok(mp.roomResonanceScore === 0, 'noise alone has no phase-stable peak', `score ${mp.roomResonanceScore.toFixed(2)}`);
+}
+
+H.section('comb · notches spaced evenly in frequency show as a periodic spectrum');
+for (const [D, expectHz] of [[48, 1000], [160, 300]]) {
+  const m = DSP.measure([addComb(bed, D, 0.9)], SR);
+  H.ok(m.combFilterPeriod > 0 && Math.abs(m.combFilterPeriod - expectHz) < expectHz * 0.025,
+    `a ${D}-sample echo gives notches every ${expectHz} Hz`,
+    `measured ${m.combFilterPeriod.toFixed(0)} Hz, strength ${m.combFilter.strength.toFixed(2)}`);
+}
+{
+  const mp = DSP.measure([bed], SR);
+  H.ok(mp.combFilterPeriod === 0, 'and noise without an echo has no comb', `strength ${mp.combFilter.strength.toFixed(2)}`);
+}
+
+/* ------------------------------------------------- power curves and ceiling */
+H.section('power · the slider curves have the shapes the contract names');
+{
+  const { fix, amt, neuralBlend } = Presets;
+  const near = (a, b) => Math.abs(a - b) < 1e-9;
+  H.ok(fix(0) === 0 && near(fix(0.2), 1) && fix(0.19) < 1 && fix(0.1) > 0.4 && fix(0.1) < 0.6,
+    'fix(P) — measured repairs switch fully on from 20 % (ramped below)',
+    `fix(0.1)=${fix(0.1).toFixed(3)} fix(0.2)=${fix(0.2).toFixed(3)}`);
+  H.ok(amt(0) === 0 && near(amt(1), 1) && near(amt(0.5), Math.pow(0.5, 0.85)),
+    'amt(P) — harmonic enrichment follows P^0.85',
+    `amt(0.5)=${amt(0.5).toFixed(4)}`);
+  H.ok(neuralBlend(0) === 0 && neuralBlend(0.1) === 0 && neuralBlend(0.9) === 1 && neuralBlend(1) === 1
+    && near(neuralBlend(0.5), 0.5),
+    'neuralBlend(P) — continuous fade between 10 % and 90 %',
+    `nb(0.3)=${neuralBlend(0.3).toFixed(3)} nb(0.5)=${neuralBlend(0.5).toFixed(3)} nb(0.7)=${neuralBlend(0.7).toFixed(3)}`);
+  let mono = true;
+  for (let i = 1; i <= 200; i++) if (neuralBlend(i / 200) < neuralBlend((i - 1) / 200) - 1e-12) mono = false;
+  H.ok(mono, 'neuralBlend never steps backwards on the way up');
+}
+
+H.section('power · a measured repair is at full strength from 20 %, not at half power');
+{
+  const hum = Array.from(H.garageSim(DSP, SR, 6));
+  const tone = H.tone(50, SR, 6, 0.03);
+  for (let i = 0; i < hum.length; i++) hum[i] += tone[i];
+  const m = DSP.measure([Float32Array.from(hum)], SR);
+  const at20 = Presets.buildParams('garage', m, 0.2);
+  const at100 = Presets.buildParams('garage', m, 1);
+  const at10 = Presets.buildParams('garage', m, 0.1);
+  H.ok(at100.hum > 0 && at20.hum === at100.hum,
+    'the mains notch is at its measured depth already at 20 % power',
+    `hum 20 % ${at20.hum.toFixed(3)} · 100 % ${at100.hum.toFixed(3)} · 10 % ${at10.hum.toFixed(3)}`);
+}
+
+H.section('power · the true-peak ceiling is −1 dBTP minus the encoder margin');
+{
+  const c = (o) => Presets.ceilingDb(o);
+  H.ok(near2(c({ format: 'mp3', kbps: 128 }), -3.1) && near2(c({ format: 'mp3', kbps: 320 }), -1.5),
+    'MP3 128 kbit/s → −3.1 dBTP (2.1 dB margin), 320 kbit/s → −1.5 dBTP (0.5 dB margin)',
+    `128 → ${c({ format: 'mp3', kbps: 128 })} · 320 → ${c({ format: 'mp3', kbps: 320 })}`);
+  H.ok(c({ format: 'wav' }) === -1 && c({ format: 'wav', loud: true }) === -2,
+    'lossless exports keep −1 dBTP, or −2 dBTP for a master louder than −14 LUFS');
+  function near2(a, b) { return Math.abs(a - b) < 1e-9; }
+}
+
+H.section('power · the limiter holds the ceiling it is given (measured, through the processor)');
+{
+  // A dense, over-driven master: the hardest case the limiter sees in practice.
+  const src = H.garageSim(DSP, SR, 4);
+  const hot = Float32Array.from(src, (v) => Math.tanh(v * 4) * 0.99);
+  const base = Object.assign({}, H.DEFAULT_PARAMS, { power: 1, autoLevel: 0, bypass: 0 });
+  for (const [label, o] of [['MP3 128 kbit/s', { format: 'mp3', kbps: 128 }], ['MP3 320 kbit/s', { format: 'mp3', kbps: 320 }]]) {
+    const ceil = Presets.ceilingDb(o);
+    const out = H.render(Processor, [hot], Object.assign({}, base, { tpCeil: ceil }))[0];
+    const isp = DSP.measure([out], SR).ispDb;
+    H.ok(isp <= ceil + 0.05, `${label}: the render's true peak stays under ${ceil} dBTP`,
+      `measured ${isp.toFixed(2)} dBTP`);
+  }
+  // A quiet master well under the ceiling is not limited at all.
+  const quiet = Float32Array.from(src, (v) => v * 0.15);
+  const qOut = H.render(Processor, [quiet], Object.assign({}, base, { tpCeil: -3.1 }))[0];
+  const dIn = DSP.measure([quiet], SR).ispDb, dOut = DSP.measure([qOut], SR).ispDb;
+  H.ok(Math.abs(dOut - dIn) < 0.1, 'a quiet master below the ceiling passes through unlimited',
+    `in ${dIn.toFixed(2)} → out ${dOut.toFixed(2)} dBTP`);
+}
+
+/* the sliced measurement reports the same codec, room and comb numbers */
+function slicedCodecCheck() {
+  const coded = codecBands(brickwallFft(bed, 15500), 15500, 0.5, 3);
+  const jitter = addTone(coded, 310, 0.03, 512);
+  const sync = DSP.measure([jitter], SR);
+  return DSP.measureAsync([jitter], SR).then((sliced) => {
+    H.section('codec · the sliced measurement is the same measurement');
+    H.ok(sliced.mp3BrickwallHz === sync.mp3BrickwallHz
+      && sliced.spectralHoleDensity === sync.spectralHoleDensity
+      && sliced.roomResonanceScore === sync.roomResonanceScore
+      && sliced.combFilterPeriod === sync.combFilterPeriod,
+      'mp3BrickwallHz, spectralHoleDensity, roomResonanceScore and combFilterPeriod match the synchronous run',
+      `${sliced.mp3BrickwallHz.toFixed(0)} Hz / ${sliced.spectralHoleDensity.toFixed(4)} / ${sliced.roomResonanceScore.toFixed(2)} / ${sliced.combFilterPeriod.toFixed(0)} Hz`);
+  });
+}
+
+slicedCodecCheck()
+  .then(() => {
+    const ok = H.summarize();
+    process.exit(ok ? 0 : 1);
+  })
+  .catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });

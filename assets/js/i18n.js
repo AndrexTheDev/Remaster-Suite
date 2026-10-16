@@ -83,6 +83,9 @@
       'card.remove': 'Datei entfernen',
       'card.waveAria': 'Wellenform-Vergleich Original und Repariert',
       'card.legendOriginal': 'Original',
+      'card.legendClicks': 'Knackser entfernt',
+      'card.legendBright': 'Höhen aufgehellt',
+      'card.previewNote': 'Chips, Wellenform und Markierungen beziehen sich auf das ~40-Sekunden-Vorschaufenster.',
       'card.legendRestored': 'Repariert',
       'card.analyzing': 'Analyse läuft …',
       'card.profile': 'Klangprofil',
@@ -145,6 +148,7 @@
       'issue.crackle': 'Knacksen',
       'issue.hum': 'Netzbrummen',
       'issue.codec': 'abgeschnittene Höhen (Codec)',
+      'issue.codecWall128k': 'Codec-Kante bei 128 kbit/s (15,5–19,3 kHz)',
       'issue.harsh': 'scharfe Höhen',
       'issue.clipping': 'Übersteuerung',
       'issue.squashed': 'kaum Dynamik',
@@ -249,8 +253,8 @@
       'toast.zipFail': 'ZIP konnte nicht gebaut werden.',
       'toast.engineFail': 'Audio-Engine konnte nicht gestartet werden.',
       'toast.workletFail': 'Der DSP-Prozessor wurde blockiert. Bitte die Seite über http(s) öffnen (nicht als lokale Datei).',
-      'toast.libLocal': 'Bibliotheken: lokale Kopien (keine externen Aufrufe).',
-      'toast.libCdn': 'Bibliotheken: CDN aktiviert — dabei wird die CDN-Adresse aufgerufen.',
+      'toast.libLocal': 'Online-Quellen aus: keine Verbindung zu Drittanbietern.',
+      'toast.libCdn': 'Online-Quellen an: Bibliotheken können von einem CDN geladen werden; das CDN sieht dabei Ihre IP-Adresse.',
       'toast.cleared': 'Liste geleert.',
       'toast.tooBig': '„{name}“ ist größer als {mb} MB und wurde übersprungen.',
       'toast.mp3Slow': 'MP3 wird encodiert — das dauert etwas länger als WAV.',
@@ -374,9 +378,9 @@
   <li>Für den MP3-Export wird etwas länger gerechnet. WAV geht schneller und ist verlustfrei.</li>
 </ul>`,
 
-      'about.libLocal': 'Bibliotheken: lokal (empfohlen)',
-      'about.libCdn': 'Bibliotheken: freies CDN',
-      'about.libToggle': 'Klick wechselt zwischen lokalen Kopien und dem Bezug über ein freies CDN.',
+      'about.libLocal': 'Bibliotheken: nur lokal (Standard)',
+      'about.libCdn': 'Bibliotheken: Online-Quellen erlaubt',
+      'about.libToggle': 'Klick schaltet die Online-Quellen ein oder aus. Aus: es wird kein Drittanbieter-Server kontaktiert.',
     },
 
     /* -------------------------------------------------------------- English */
@@ -447,6 +451,9 @@
       'card.remove': 'Remove file',
       'card.waveAria': 'Waveform comparison of original and restored audio',
       'card.legendOriginal': 'Original',
+      'card.legendClicks': 'Clicks removed',
+      'card.legendBright': 'Top end lifted',
+      'card.previewNote': 'Chips, waveform and highlights refer to the ~40-second preview window.',
       'card.legendRestored': 'Restored',
       'card.analyzing': 'Analysing …',
       'card.profile': 'Sound profile',
@@ -509,6 +516,7 @@
       'issue.crackle': 'crackle',
       'issue.hum': 'mains hum',
       'issue.codec': 'chopped-off highs (codec)',
+      'issue.codecWall128k': 'codec cutoff at 128 kbit/s (15.5–19.3 kHz)',
       'issue.harsh': 'harsh highs',
       'issue.clipping': 'overload',
       'issue.squashed': 'hardly any dynamics',
@@ -613,8 +621,8 @@
       'toast.zipFail': 'ZIP could not be built.',
       'toast.engineFail': 'The audio engine could not be started.',
       'toast.workletFail': 'The DSP processor was blocked. Please open the page over http(s), not as a local file.',
-      'toast.libLocal': 'Libraries: local copies (no external requests).',
-      'toast.libCdn': 'Libraries: CDN enabled — this contacts the CDN host.',
+      'toast.libLocal': 'Online sources off: no connection to third-party hosts.',
+      'toast.libCdn': 'Online sources on: libraries may load from a CDN, which sees your IP address.',
       'toast.cleared': 'List cleared.',
       'toast.tooBig': '“{name}” is larger than {mb} MB and was skipped.',
       'toast.mp3Slow': 'Encoding MP3 — this takes a bit longer than WAV.',
@@ -738,9 +746,9 @@
   <li>MP3 export takes a little longer to compute. WAV is faster and lossless.</li>
 </ul>`,
 
-      'about.libLocal': 'Libraries: local (recommended)',
-      'about.libCdn': 'Libraries: free CDN',
-      'about.libToggle': 'Click to switch between bundled local copies and fetching from a free CDN.',
+      'about.libLocal': 'Libraries: local only (default)',
+      'about.libCdn': 'Libraries: online sources allowed',
+      'about.libToggle': 'Click to turn online sources on or off. Off: no third-party host is ever contacted.',
     },
   };
 

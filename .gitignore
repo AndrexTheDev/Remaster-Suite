@@ -9,3 +9,13 @@ scratch/
 
 # build output of the probes (measurement work files)
 tools/work/
+
+# generated screenshots: the beta writes them to test-results/beta/ (local, never committed)
+test-results/
+docs/beta/*.png
+
+# ML model weights: large binaries, never committed (see assets/vendor/models/README.md).
+# The README in that folder stays tracked.
+assets/vendor/models/*
+!assets/vendor/models/README.md
+!assets/vendor/models/manifest.json

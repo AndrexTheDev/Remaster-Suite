@@ -64,6 +64,14 @@ crest/clipping analysis) and produces:
   on a second bar above the list that names the file the queue is on. Steps that cannot be counted
   (the browser's own decode) sweep instead of inventing a number.
 
+### Read it without colour
+
+The waveform marks what the restoration changed, so you can see the repair as well as hear it.
+Gold is a click that was taken out, drawn as a **diagonal hatch**. Cyan is top end that was lifted
+where there is music, drawn as a **dot grid**. The two highlights differ in texture as well as in
+hue, so they stay apart for a reader who cannot tell gold from cyan. A legend sits under every
+waveform.
+
 ### On a phone
 
 The suite is built to be used in a phone browser:
@@ -81,7 +89,7 @@ The suite is built to be used in a phone browser:
   cannot blow up a mobile browser, and a **screen wake lock** keeps the tab alive during a long
   render.
 * Verified in a real browser at 320, 360, 390, 414 and 768 px wide — no horizontal scrolling
-  anywhere, in `tests/beta/beta.js` and the screenshot matrix in [`docs/beta/`](docs/beta).
+  anywhere, in `tests/beta/beta.js` and the screenshot matrix (generated locally in `test-results/beta/`, not committed).
 
 ### The one slider
 
@@ -171,6 +179,11 @@ Automatic mode therefore works on a **chain**, not on a label:
   same air repair). Without the split the app called its own 320 kbit/s export "low bitrate" on every
   re-upload, because lame's antialias filter leaves a 15 dB wall at 18 955 Hz — a wall that removes
   nothing anybody hears.
+* **The cut frequency names the bitrate class.** A steep wall (steeper than 30 dB per octave) is
+  classed by where it cuts: at or below **15.5 kHz** it is a 64 kbit/s encode (`codecWall64k`); above
+  15.5 kHz and up to **18.0 kHz** it is a 128 kbit/s encode (`codecWall128k`). Both count as codec loss
+  for the air repair, and each sets its own true-peak margin for the next encode. A wall above 18 kHz
+  is left to the 320 kbit/s reading, as before.
 * **Every threshold is relative to the file, never to full scale.** What a recording sounds like
   does not change when you turn the fader down, so neither may the answer: the same recording
   uploaded 20 dB quieter has to get the same repair, and the analyser has to *read* it the same.
@@ -232,7 +245,7 @@ and runs per sample, control-rate decimated for speed:
 | 5 | **De-hiss** | Linkwitz-Riley split, keyed on the *tilt* of the top end (4 kHz+ against the 1.45 kHz band — the same two bands, cascaded the same way, in the same 2048-sample window the analyser measures), so it attenuates where the top end stops following the programme and leaves everything else alone: on a cassette-class file the same repair is worth 3.2 dB between the notes and 0.2 dB over music. Getting the mid band's cascade right was worth 4.4 dB of ask on the frames a hiss owns: with one filter instead of two, the key's reference reads the noise's own body and the quiet frames' tilt comes out 4.38 dB low. The split itself is measured too (2.2–4 kHz, where this file's noise starts). The gate closes over 60 ms and opens in 8 ms — the closing lag is worth 1.9 dB of the repair on the hiss fixtures for ≤0.2 dB of the music's own top end, and the pops are untouched at every close time because the de-clicker runs in front of it — and its last 0.1 % of range is a continuous crossfade rather than a branch. Its level reference is a band RMS measured exactly like the key (same band, same 2048-sample window), so it needs no absolute ceiling — and with one at 0.01 it went quiet on anything louder than −49 dBFS: measured on one recording rendered at 0 and at −20 dBFS, the finished files were 12.6 dB apart with the ceiling and 33.5 dB apart without it. Its own shape was the next limit, and it was structural: `low + high` is the Linkwitz-Riley allpass, so `low + high·g` sums back a unit-magnitude copy of the whole signal at the gate's gain — measured as a static transfer with the gate held closed (probes hiss12/hiss13), the split delivers **26 / 47 / 63 %** of its request at 4 / 6 / 8 kHz (a steeper split is worth 1.0–1.4 dB, a lower crossover 0–1 dB: neither is the lever). Where the two floor witnesses agree — the key band at the measured HF floor *and* the tilt anomaly at its measured maximum — the missing part now comes from a high-shelf on the same corner, at 0.75 of the measured step; the fraction comes from a four-fixture sweep in which the pause floor stops falling after it and the pauses' own tilt crosses the music's there (hiss19). On the acceptance hiss fixture's pause frames (probe hiss24, dB over the clean copy at 1–12 kHz) the chain went 11/16/17/17/17/18/21 → **9/12/12/11/8/8/10**, the tilt step the card prints 18.35 → **0.00 dB**, its amount gate 1.00 → **0.39**, and the user's own re-upload workflow (`tools/workflow-check.js`, worn record → MP3 320) reads `hiss` → **healthy** while the loud and soft musical frames stay within 0.06 dB per band (a forced dose on loud music is bit-identical). The automatic dose only asks for the repair when the measurement found a tilt step, because on a *stationary* top end — a dull pad, a synthesizer bed — the quiet-frame floor and the programme are the same number and the gate cannot tell hiss from music (a clean dull bed measured 0.04 dB of tilt step and lost 4.3 dB of its 9–13 kHz band to the profile's half dose). Round 15 measured what the *tilt* term cannot see: a **broadband** floor — an arrival's own top end in a quiet passage, e.g. a 128 kbit/s MP3 — lifts the 4 kHz+ band and the 1.45 kHz reference together, so the tilt difference stays at 0.0 dB while the level key allows 19–20 dB of cut, and the floor survives (on the acceptance fixture's quiet-passage pop the arrival's own top end stands **22.2 dB** over the clean copy's and the stage takes 1.3 dB of it). Where a frame's tilt *does* sit above the reference, the same burst comes out **15.2 dB** down. Reading the broadband case would mean a *local* instead of a *file-wide* reference — a depth policy, and one the suites pin on purpose (`dsp.test.js`, "the floor regime delivers what was measured"). Round 16 built that lever anyway and priced it: letting the *level* key decide where the tilt term reads nothing buys **~9 dB** on the worn record's arrival floor, but the app then names a new defect on its own exports (`dullTop` on the hiss, cassette, vinyl and worn rows, which read `hiss`/`healthy` before) — the level key cannot tell a quiet top end from a floor one, so the answer would have to be a *content* witness in the analyser, not a retune. It is not in the tree; the numbers are in the changelog. Round 17 also measured the *content* witness that would gate this arbitration — the shape inside the key band (11 kHz against 5.5 kHz): it separates analog hiss from programme with room to spare (**+1.8…+2.1 dB** on the noise-owned frames against **−3.2…−4.9** on the music-owned ones), but it is **redundant with the tilt term** wherever it opens (88 of 88 frames already ask the full measured step — a flat top end *is* the tilt anomaly), and at the codec residue it reads *programme*, correctly: the encoder's error is shaped like the music it encoded. Round 20 then measured the statistic a *band-level* repair would have to key on — the HF excess over the local programme — and it is the music that closes it: the pops' neighbourhoods come out of the chain at the level of the clicks-free copy (p50 2.3 dB against the control's 2.0, from 11.9 on arrival), while **hi-hats read 20.4 dB** and twelve "s" bursts 9.8 of the same statistic, i.e. a gate on it would cut cymbals harder than it cuts the defect. So that residue is the arrival's, and it stays a documented row rather than another repair |
 | 5b | **De-esser** | a dynamic dip over 5.2–9.5 kHz, keyed on the fast/slow ratio of that band: a quiet "s" and a loud one are the same problem, and a recording without sibilance measures zero. The *diagnosis* that arms it is a per-frame scan of the 7 kHz/2.6 kHz balance, and it has been cheated twice by material that is not a sibilant — a phrased organ (the 2.6 kHz band falls between the phrases, so the balance "rises" 4.3 dB: the old scan read 4.29 and the card named `sibilance` on a clean organ) and a sustained cymbal wash (the balance is over zero *all the time* — a wash breathes everywhere — and the median tilt of +4.73 dB, real enough, was amplified by 2 into a 0.61 dose). The scan now asks two things of the peak frame: the balance must *cross over* (7 kHz above 2.6 kHz, the one claim a sibilant makes by definition) and the file's own median balance must not already be over zero — and a file whose median frame *is* top-heavy is asked for a band-limited top end (7 kHz over 12 kHz: −0.5 dB on the wash, +2.1 on a continuous "s", +4.1…+4.8 on every burst fixture) before its median tilt may count as evidence. Measured: the organ 4.29 → 0.00 and the wash 2.52 → 0.00 of scan, both `deess 0.000`, both never ducked by the chain (+1.00 and +0.35 dB of 7 kHz, the tone stage's own lift); a singer whose "s" never stops still reads `sibilance` with a 0.558 dose and the chain takes its own 7 kHz band down 5.0 dB. Its amount is a *measurement*, like the de-hisser's: the law hands it zero unless a departure was measured, so the intensity curve was scaling the file's own reading — it took 0.830 of it, and the app's own export of §10's burst fixture came back diagnosed `sibilance` because of it. Measured with the curve removed (probes `sib11/sib12.js`, and the acceptance matrix's own §10 rows): the 7 kHz band of the loudest frames down 3.06 instead of 2.61 dB, the scan the card names the defect with 5.46 → 2.43, and the export **healthy** at a 0.226 dose against the 0.255 naming line. Every clean fixture still measures a dose of exactly 0. It sits before the synthesisers, so the exciter and the air cannot rebuild what it just removed |
 | 6 | **Harmonic exciter** | 3 bands, each: band-pass → asymmetric saturation (even *and* odd harmonics) → band-pass → envelope gate. Synthesise the overtones that were never recorded. |
-| 7 | **Air synthesis 8–16 kHz** | takes the surviving 4.5–7.5 kHz band and generates 2nd/3rd order content above it, gated by the presence follower and limited to a fraction of the band it came from |
+| 7 | **Air synthesis 8–16 kHz** | takes the surviving 4.5–7.5 kHz band and generates 2nd/3rd order content above it, gated by the presence follower and limited to a fraction of the band it came from. Where a codec loss was measured, its level rises by up to **+2.5 dB** (the 12–16 kHz band may not overshoot the original by more than +3 dB). Without the optional neural super-resolution weights this DSP synthesis is the whole path |
 | 8 | **Sub-bass 30–60 Hz** | 6th-order low pass → hysteresis zero-crossing detector → divide-by-two pitch tracking → oscillator with a gated envelope. A 60–120 Hz bass line gains its missing bottom octave. |
 | 9 | **Glue compressor** | soft 2:1 with automatic make-up; attack and release follow the file's measured percussive character. When `dynamicRangeDb < 12`, the dose is halved and warmth is capped: a squashed master is not compressed again. Measured on the acceptance fixture, the app reads **8.70 → 8.27 dB** and the independent 20 ms envelope reads **12.82 → 11.45 dB** — the class stays `squashed`; no transient shaper is shipped because the peaks are no longer present to reconstruct |
 | 10 | **Warmth + tilt** | gentle saturation and a low/high shelf pair for the final tone balance |
@@ -254,10 +267,12 @@ repairs that cannot be done without seeing a little of the future:
   sixteen samples the interpolator reaches past that interval (88 samples at 48 kHz), because a
   ceiling that is only enforced after the peak has passed is a clipper.
 
-The sums are reported per render (`latency`, 0 when the stages are off), and the cross-fade delays
+Together they make the chain's total latency **424 samples at 48 kHz** (271 + 65 + 88, 8.8 ms), the
+figure the test suites measure. The sums are reported per render (`latency`, 0 when the processor is bypassed), and the cross-fade delays
 its dry side by the same amount, so the A/B switch and the strength slider stay phase-coherent and
-sample-aligned: you hear the change and not the delay. With the repair stages off — or at strength
-0 — the latency is exactly 0. The offline render (the file you save) is bit-identical to what you
+sample-aligned: you hear the change and not the delay. The latency is a constant of the running chain: the 424
+samples hold whatever the de-clipper and de-clicker are set to, switched on or off, so the toggles never move the
+waveform. Only the bypass (or zero power) reports exactly 0. The offline render (the file you save) is bit-identical to what you
 heard live either way.
 
 **The whole chain is scale-free, and that is measured end to end.** A transfer that arrives 12 dB
@@ -298,16 +313,23 @@ eye on the projected size and warns before you pack.
 ## Privacy
 
 * **No server.** Nothing to send your audio to, and nothing that would.
-* **No cookies, no localStorage, no analytics, no fonts or icons from the network.** The whole UI
-  is local — system fonts, inline SVG, bundled CSS.
+* **Strict local mode is the default.** With the bundled files present, the page makes no request
+  to any host but its own. If a bundled file is missing, the loader refuses it at once and the DSP
+  path runs; there is no silent CDN fallback.
+* **No cookies, no analytics, no fonts or icons from the network.** The whole UI is local — system
+  fonts, inline SVG, bundled CSS. Storage holds exactly two user settings in `localStorage`:
+  `rs.online` (the online switch below) and `rs.inferenceBudgetMaxMs` (the budget ceiling). The
+  suite checks that no other storage, cookie or beacon exists.
 * **No external request by default:** JSZip (ZIP export) and lamejs (MP3 encoder) ship with the
   project in [`assets/vendor/`](assets/vendor).
-* **Optional CDN mode:** *About & credits → Libraries* switches those two libraries to a free CDN
-  (unpkg / cdnjs / jsDelivr, with fallback to the bundled copy). Only then does your IP reach a
-  third party — exactly one request, as with any ordinary web page.
-* **Optional FFmpeg.wasm rescue decoder:** if a browser refuses to decode a file itself, the suite
-  can pull FFmpeg.wasm (single-threaded core, so it works on plain static hosting) from unpkg and
-  convert the file to WAV locally. It is never loaded unless a file needs it.
+* **Online sources are an explicit opt-in:** *About & credits → Libraries* turns them on (stored as
+  `rs.online`). Only then may the libraries, the ONNX runtime, the neural models and the FFmpeg rescue
+  decoder be fetched from a free CDN (unpkg / cdnjs / jsDelivr), always after the bundled copy has
+  been tried. Turning it off again stops every third-party request, including in the neural worker,
+  which is handed the setting by the page. Offline browsers are never asked for a CDN.
+* **FFmpeg.wasm rescue decoder (online sources only):** if a browser refuses to decode a file itself,
+  and online sources are on, the suite can pull FFmpeg.wasm (single-threaded core) from unpkg and
+  convert the file to WAV locally. Without the opt-in the file is reported as undecodable.
 
 Full text: *Privacy* in the footer of the app.
 
@@ -324,30 +346,53 @@ assets/
                                  WAV writer + reader, sample-rate sniffing  (RSDSP)
     presets.js                   the six profiles, auto-classification, adaptive tuning (RSPresets)
     i18n.js                      every German and English string, including the legal texts (RSi18n)
-    library-loader.js            bundled copies ⇄ free CDNs, optional FFmpeg.wasm (RSLibs)
+    library-loader.js            bundled copies ⇄ free CDNs, optional FFmpeg.wasm,
+                                 lazy onnxruntime-web + ONNX models (RSLibs)
     codecs.js                    decode, WAV/MP3 encode, ZIP, download (RSCodecs)
     analyzer.js                  file → measurements, diagnosis, waveform envelopes (RSAnalyzer)
-    engine.js                    AudioContext + AudioWorklet, live monitor and offline render (RSEngine)
+    ring-buffer.js               lock-free SharedArrayBuffer ring: the audio thread’s
+                                 128-frame quanta ⇄ the ML worker’s 512…2048-frame hops,
+                                 lossless and latency-compensated (RSRing)
+    engine.js                    AudioContext + AudioWorklet, live monitor and offline
+                                 render, spawns the ML worker (RSEngine)
+    neural-dsp.js                pure DSP of the neural path: FFT, ERB bank, DeepFilterNet3
+                                 stream, linear-phase FIR lowpass, memory tier (RSNeural)
+    neural-worker.js             offscreen ML inference: onnxruntime-web with WebGPU and
+                                 an automatic WASM (SIMD) fallback, drains the rings
     ui.js                        DOM helpers, toasts, dialogs, interactive waveform (RSUI)
     app.js                       state, per-card logic, batch queue (RSApp)
   worklets/
     remaster-processor.js        the complete DSP chain (the heart of the suite)
   vendor/                        jszip.min.js (MIT), lame.min.js (LGPL-3.0) + licence note
+    models/                      ONNX models, loaded lazily by RSLibs.onnxModel
+                                 (local first, registered CDN fallback)
   img/
     logo.svg                     the brand mark (vector, scales to any size)
     logo.png                     512×512 raster version
     apple-touch-icon.png         180×180 home-screen icon
     og-image.jpg                 512×512 social preview
     favicon.svg                  the waveform alone — the record ring is unreadable at 16 px
+tools/
+  run-tests.js                   the test runner behind `npm test`: the seven suites run in
+                                 parallel (one job per CPU core, the slowest first), then the
+                                 suite with wall-clock budgets (audit) alone, so a neighbour's
+                                 load cannot fail a timing check; each log in tools/work/logs/;
+                                 `--only a,b` runs a subset, `--serial` runs them one by one,
+                                 and the exit code gates a commit
+  work/                          scratch output of the probes and the acceptance matrix (git-ignored)
 tests/
   harness.js                     Node harness + signal simulators (garage session,
                                  cassette, vinyl rip, low bitrate, clean, and the
                                  combination fixture: a vinyl transfer that went
                                  through a 128 kbit/s encoder)
   dsp.test.js                    DSP/engine suite: transparency, sub, air, exciter, de-hiss,
-                                 de-click, measured hum/hiss repair, and the contract that a
-                                 broken file never becomes NaN parameters (160 checks)
-  tuning.test.js                 the tuning contract: what the automatic mode may do to a file (17 checks)
+                                 de-click, measured hum/hiss repair, the lock-free ring
+                                 buffer (every size, both hops, two real threads), and the
+                                 contract that a broken file never becomes NaN parameters
+                                 (213 checks)
+  tuning.test.js                 the tuning contract: what the automatic mode may do to a file, and
+                                 the codec, room and comb signatures on synthetic 128 kbit/s and
+                                 resonant material (35 checks)
   web.test.js                    static, DOM and app suite (137 checks)
   audit.test.js                  repository hygiene, markup, contrast, i18n, parameter,
                                  codec and robustness audit — including the mains-notch law,
@@ -378,7 +423,12 @@ belong to the test suite.
 
 ```bash
 npm install          # only for the test suite (jsdom)
-npm test             # runs all five suites
+npm test             # runs all seven suites in parallel, the acceptance matrix among them (tools/run-tests.js; the neural checks
+                     # need the model files, see assets/vendor/models/README.md, and skip with a
+                     # message without them). `npm run test:serial` runs them one by one,
+                     # the audit suite (wall-clock budgets) runs alone after the others;
+                     # `node tools/run-tests.js --only dsp,audit` runs a subset; each suite's
+                     # full log goes to tools/work/logs/ (git-ignored)
 node tests/dsp.test.js     # engine: transparency, sub, air, exciter, de-hiss, de-click,
                            # de-resonator, level match, power scaling, WAV/MP3/ZIP, classification
 node tests/web.test.js     # static integrity, bilingual coverage, boot, drop → analyse → render
@@ -402,10 +452,27 @@ node tests/beta/beta.js    # big beta: drives a real headless Chromium over the 
                            # machine's own rate, not an absolute budget. 94 checks
 ```
 
-The beta writes `docs/BETA-REPORT.md` and the screenshot matrix to `docs/beta/`.
+**Acceptance matrix and real MP3 round-trips.** `tools/acceptance.js` runs the fixtures through the
+whole chain and through a real MP3 encode and decode, and gates on the result. It needs an `ffmpeg`
+binary (`FFMPEG=/path/to/ffmpeg` or on the `PATH`). Without one, the MP3 sections are reported as
+SKIPPED. With `RS_REQUIRE_FFMPEG=1` the run fails instead, and any skipped section fails the gate, so
+a run either covers the whole matrix or says it did not. The gate also counts a repaired defect that
+comes back on the 320 kbit/s re-upload: the one known return (`general:hum`) is a recorded
+`KNOWN_ISSUE`, and any new return fails the run.
+
+**Continuous integration.** [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to
+`main` and every pull request on Ubuntu: Node 22, `ffmpeg` from apt, `npm install` (no lockfile is
+committed), then `npm test` with `RS_REQUIRE_FFMPEG=1`. The browser beta is not in CI, as it needs a
+packaged Chromium; it is run locally and its report is in [`docs/BETA-REPORT.md`](docs/BETA-REPORT.md).
+
+**Listening tests.** Measures do not replace listening. The manual protocol for the psychoacoustic
+stages (Air synthesis, De-Click, BWE) with 3–5 golden samples is in
+[`docs/LISTENING-TESTS.md`](docs/LISTENING-TESTS.md). No audio is committed.
+
+The beta writes `docs/BETA-REPORT.md` and the screenshot matrix to `test-results/beta/`, which is git-ignored.
 It needs the optional dev dependency `@sparticuz/chromium` (a packaged headless
 Chromium, used because CI machines rarely ship a browser); `npm test` runs the
-five dependency-free suites and stays green everywhere.
+seven suites without the browser and stays green everywhere.
 
 Signals are simulated (garage session, cassette, vinyl rip, low-bitrate, clean — plus a vinyl
 transfer that was later pushed through a 128 kbit/s encoder, the file that needs more than one
@@ -424,8 +491,22 @@ engine, not a mock.
 | Safari | 14.1+ | `AudioWorklet`; MP3 export works, encoding is a little slower |
 | Mobile | current iOS/Android | works, but batch processing many long files deserves a desktop |
 
-Decoding uses the browser's own codecs — MP3, WAV, FLAC, OGG/Vorbis and M4A/AAC all work
-wherever the browser supports them. Anything the browser refuses is handed to FFmpeg.wasm.
+Decoding uses the browser's own decoder first, and every decode reports which path produced it
+(`path`: `native-live`, `native-offline` or `ffmpeg`). The page's own live context (created on the play
+gesture) is reused. Without one, an `OfflineAudioContext` decodes, which needs no gesture and raises no
+autoplay warning. A temporary live context is created only where neither exists, and it is closed with
+`ctx.close()` as soon as its decode has settled. MP3, WAV, FLAC, OGG/Vorbis and M4A/AAC all work wherever
+the browser supports them. Anything the browser refuses is handed to FFmpeg.wasm, loaded on demand.
+
+Neural stages are optional and never block the page. Without the ONNX weights, or without a usable
+onnxruntime, a stage reports itself as unavailable and the DSP chain runs unchanged — there is no
+error to see. Every network attempt of one load (the CDN list, the bundled copy, the model sources and
+the runtime) shares one load budget. The default is **5 s**, the floor is 3 s, and the ceiling is 5 s
+unless raised for a high-end device with `localStorage.setItem('rs.inferenceBudgetMaxMs', '20000')`
+(any value from 5 to 60 s; `RSLibs.setBudgetMax(ms)` does the same). A load that finds no source gives
+up when the budget runs out, and the DSP path takes over. The page's watchdog uses the same window,
+so a worker that stalls while it acquires a model is cut at that limit. Without the opt-in no
+third-party source is tried at all, so a missing model is refused at once.
 
 ---
 

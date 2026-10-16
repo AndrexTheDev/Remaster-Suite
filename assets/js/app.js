@@ -93,7 +93,9 @@
        * tools/work/tp2.js). The monitor builds its parameters here too, so what
        * you hear is still what you save, at every format and bitrate; a ceiling
        * that was switched off (0) stays off. */
-      if (params.tpCeil < 0) params.tpCeil -= Presets.codecMargin(State.format, State.mp3Rate);
+      if (params.tpCeil < 0) {
+        params.tpCeil = Presets.ceilingDb({ format: State.format, kbps: State.mp3Rate, loud: params.tpCeil <= -2 });
+      }
       return params;
     },
     signature(card) {
@@ -435,7 +437,10 @@
       size: Codecs.formatBytes(card.size, global.RSi18n.lang),
     });
     card.el.diagnosis.innerHTML = UI.diagnosisText(a.diag);
-    const chips = UI.chipsFrom(card.analysis.chips, card.after ? card.after.chips : null);
+    // with a restoration rendered, the before side is the same window, measured
+    // on the original; before that the whole file's own numbers are shown
+    const before = card.after && card.analysis.windowChips ? card.analysis.windowChips : card.analysis.chips;
+    const chips = UI.chipsFrom(before, card.after ? card.after.chips : null);
     card.el.chips.textContent = '';
     for (const c of chips) card.el.chips.appendChild(c);
     refreshAnalysis(card);
@@ -452,6 +457,7 @@
     const data = {
       before: card.analysis.windowEnvelope,
       after: card.after ? card.after.envelope : null,
+      corrections: card.after ? card.after.corrections : null,
       duration: card.analysis.window ? card.analysis.window.seconds : card.analysis.duration,
     };
     card.wave.setData(data);
@@ -468,7 +474,7 @@
     const a = card.analysis;
     if (!a || !a.metrics) { box.hidden = true; return; }
     const params = P.params(card);
-    const r = Presets.recipe(a.metrics, params, P.power(card));
+    const r = Presets.recipe(a.metrics, params);
     card.recipe = r;
     box.hidden = false;
     card.el.analysisCount.textContent = r.headline.count === 1
@@ -545,7 +551,9 @@
   /** Called whenever the per-file preset or power changes. */
   function onCardParamsChanged(card, live, final) {
     if (!card.analysis) return;
-    if (State.current === card) applyLiveParams(card);
+    if (State.current === card) {
+      if (live) scheduleLive(card); else applyLiveParams(card);
+    }
     if (live) {
       clearTimeout(card._previewTimer);
       card._previewTimer = setTimeout(() => refreshPreview(card), 420);
@@ -572,13 +580,34 @@
         onProgress: slow ? (p) => setCardWork(card, 'preview', p, estimateLeft(card, p)) : undefined,
       });
       if (slow) clearCardWork(card);
-      const env = Analyzer.envelope(res.channels, card.analysis.windowEnvelope.max.length);
-      card.after = { envelope: env, chips: Analyzer.analyzeChannels(res.channels, res.sampleRate).chips };
+      const buckets = card.analysis.windowEnvelope.max.length;
+      const env = Analyzer.envelope(res.channels, buckets);
+      card.after = {
+        envelope: env,
+        chips: Analyzer.analyzeChannels(res.channels, res.sampleRate).chips,
+        corrections: Analyzer.correctionMap(card.analysisWindowChannels, res.channels, buckets),
+      };
       refreshCardText(card);
     } catch (err) { /* preview refresh is best effort */ }
   }
 
   /* ------------------------------------------------------------ live playback */
+
+  /* A slider drag fires `input` at display rate or faster. The live parameters are
+   * applied once per frame, with the values the sliders hold at that moment: the same
+   * end state, with one batch of AudioParam automation per frame instead of one per event. */
+  let liveCard = null, liveFrame = 0;
+  function scheduleLive(card) {
+    liveCard = card;
+    if (liveFrame) return;
+    const frame = global.requestAnimationFrame || ((fn) => global.setTimeout(fn, 16));
+    liveFrame = frame(() => {
+      liveFrame = 0;
+      const c = liveCard;
+      liveCard = null;
+      if (c && State.current === c) applyLiveParams(c);
+    });
+  }
 
   function applyLiveParams(card) {
     const params = P.params(card);
@@ -636,10 +665,18 @@
     if (!card || !card.analysis) return;
     const dur = card.analysis.window.seconds;
     const f = dur ? Math.max(0, Math.min(1, pos / dur)) : 0;
-    card.el.seek.style.width = (f * 100).toFixed(2) + '%';
-    const seekEl = $('[data-act="seek"]', card.el.card);
-    if (seekEl) seekEl.setAttribute('aria-valuenow', String(Math.round(f * 100)));
-    card.el.time.textContent = Codecs.formatDuration(pos) + ' / ' + Codecs.formatDuration(dur);
+    // a tick arrives every frame: write to the DOM only when the text changes
+    const width = (f * 100).toFixed(2) + '%';
+    const aria = String(Math.round(f * 100));
+    const time = Codecs.formatDuration(pos) + ' / ' + Codecs.formatDuration(dur);
+    const shown = card._shown || (card._shown = {});
+    if (shown.width !== width) { card.el.seek.style.width = width; shown.width = width; }
+    if (shown.aria !== aria) {
+      if (!card._seekEl) card._seekEl = $('[data-act="seek"]', card.el.card);
+      if (card._seekEl) card._seekEl.setAttribute('aria-valuenow', aria);
+      shown.aria = aria;
+    }
+    if (shown.time !== time) { card.el.time.textContent = time; shown.time = time; }
     card.wave.setPosition(pos);
   });
 
@@ -743,6 +780,10 @@
       card.analysisWindowChannels = chans;
       card.previewBuffer = Codecs.makeBuffer(chans, analysis.sampleRate);
       card.buffer = null;                    // let the full decode go
+      // the "before" side of the chips, measured on the very window the "after"
+      // side is measured on — a whole-file figure next to a 40 s figure is not a
+      // before/after comparison
+      analysis.windowChips = Analyzer.analyzeChannels(chans, analysis.sampleRate).chips;
 
       // the restored side of the comparison (short window → fast, always real)
       const params = P.params(card);
@@ -755,7 +796,10 @@
         });
         const env = Analyzer.envelope(res.channels, 1400);
         const after = Analyzer.analyzeChannels(res.channels, res.sampleRate);
-        card.after = { envelope: env, chips: after.chips };
+        card.after = {
+          envelope: env, chips: after.chips,
+          corrections: Analyzer.correctionMap(chans, res.channels, 1400),
+        };
         card.afterScore = after.score;
       }
       $('[data-act="retry"]', card.el.card).hidden = true;
@@ -1091,7 +1135,7 @@
         }
       }
       const card = State.current;
-      if (card) applyLiveParams(card);
+      if (card) scheduleLive(card);
       debouncePreviewAll();
     });
 
@@ -1185,15 +1229,15 @@
     const libBtn = $('#btnLibMode');
     if (libBtn) {
       const paint = () => {
-        const cdn = global.RSLibs.mode === 'cdn';
-        libBtn.textContent = t(cdn ? 'about.libCdn' : 'about.libLocal');
+        const online = global.RSLibs.online;
+        libBtn.textContent = t(online ? 'about.libCdn' : 'about.libLocal');
         libBtn.title = t('about.libToggle');
       };
       paint();
       libBtn.addEventListener('click', () => {
-        global.RSLibs.toggle();
+        global.RSLibs.setOnline(!global.RSLibs.online);
         paint();
-        UI.toast(t(global.RSLibs.mode === 'cdn' ? 'toast.libCdn' : 'toast.libLocal'), 'ok', 5200);
+        UI.toast(t(global.RSLibs.online ? 'toast.libCdn' : 'toast.libLocal'), 'ok', 5200);
       });
       global.RSLibs._paint = paint;
     }
