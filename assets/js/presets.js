@@ -749,6 +749,29 @@
     const widenGuard = m.channels > 1 && isFinite(st.mid) ? 1 : 0;
     const phaseNeed = widenGuard * smoothstep(0.05, -0.35, lowRho);
 
+    /* ── tape azimuth: a timing, not a polarity, mismatch ────────────────────
+     * A tape head tilted a few microradians off true vertical reads the two
+     * tracks at slightly different points along the tape — a pure *delay*
+     * between the channels, not an inversion. Its signature in the three-band
+     * correlation above is the opposite shape from a phase fault: the bottom
+     * stays correlated (a bass wavelength dwarfs a few hundred microseconds of
+     * skew) while the *top* reads worse than the middle, because that is
+     * where the delay is large next to a wavelength. A hard-panned mix reads
+     * low everywhere, not just at the top, so asking for the high band
+     * specifically to under-read the middle (not just the low band) is what
+     * keeps this need from firing on an ordinary wide mix.
+     *
+     * This number only decides whether the worklet's own corrector is allowed
+     * to act at all — it is not the correction itself. `AzimuthCorrector` in
+     * remaster-processor.js runs its own sliding cross-correlation on every
+     * render and gates the actual sample-by-sample delay it applies on how
+     * much that correlation genuinely improves at the lag it finds, so a file
+     * that this estimate under- or over-reads is still protected by the
+     * worklet's own, independent confidence test. */
+    const midRho = (m.channels > 1 && isFinite(st.mid)) ? st.mid : 1;
+    const highRho = (m.channels > 1 && isFinite(st.high)) ? st.high : 1;
+    const azimuthNeed = widenGuard * smoothstep(0.08, 0.32, midRho - highRho) * smoothstep(0.3, 0.7, midRho);
+
     // How percussive the material is (crest factor: a bed of sound sits at
     // 12–15 dB, hits and notes at 18–22 dB). It decides how the glue
     // compressor is timed — a compressor that grabs a drum recording the way
@@ -793,7 +816,7 @@
       humNeed, resoNeed: clamp((resoExcess - 2) / 8, 0, 1), resoExcess,
       resoList, widenNeed, airRoom, codecRoom,
       // the per-song six
-      sibDb, sibNeed, infraDb, infraNeed, lowRho, phaseNeed, percussive, hissStartHz, conf,
+      sibDb, sibNeed, infraDb, infraNeed, lowRho, phaseNeed, azimuthNeed, percussive, hissStartHz, conf,
       needMud: clamp(mudExcessDb / 10, 0, 1),
       needHarsh: clamp(harshExcessDb / 8, 0, 1),
       needReso: clamp(Math.max(mudExcessDb / 12, harshExcessDb / 10, boxExcessDb / 10,
@@ -1310,6 +1333,13 @@
     // audible, which is exactly what the bass-mono stage above prevents.
     a.bassMono = clamp(D.phaseNeed * 1.0, 0, 1);
 
+    // 9c2 · tape azimuth — arms the worklet's own sliding cross-correlation
+    // repair (see remaster-processor.js, AzimuthCorrector) wherever the top
+    // end reads worse correlated than the middle. The measurement here only
+    // decides whether the stage may act at all; how much it actually moves
+    // any one sample is the worklet's own, independent confidence test.
+    a.azimuth = clamp(D.azimuthNeed * 1.0, 0, 1);
+
     // 9d · how a *hit* behaves → the glue compressor's timing. Percussive
     // material gets a slower attack and a shorter release (let the hit
     // through, be back at unity for the next one); sustained material gets the
@@ -1523,6 +1553,9 @@
       boxG2: num(fix(a.box[1]), 0), boxF2: a.boxF[1], boxQ2: a.boxQ[1],
       // width is taste, not a defect: it follows the repair curve with the rest
       width: num(repair(a.width), 0),
+      // azimuth is a repair, like hum or the measured resonance notches: it is
+      // either measured or it is not, and a slider at 100 % must not invent it
+      azimuth: num(fix(a.azimuth), 0),
       // how much top end the synthesiser may rebuild, and where it derives it
       // from: a low-bitrate file needs the source band below its cliff, not the
       // fixed 6 kHz band that sits partly above it. (`num` keeps a parameter

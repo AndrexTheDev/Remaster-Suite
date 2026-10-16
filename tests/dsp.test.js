@@ -1139,8 +1139,8 @@ H.section('engine · de-clipper on a clipped master');
   const SOLO = () => Object.assign({}, H.DEFAULT_PARAMS, { power: 1, autoLevel: 1 });
   const off = H.renderEx(Processor, [clipped], Object.assign({}, SOLO(), { declip: 0, declick: 0 }));
   const on = H.renderEx(Processor, [clipped], Object.assign({}, SOLO(), { declip: 0.72, declick: 0 }));
-  H.ok(on.latency === 271 && off.latency === 0,
-    'the de-clipper declares its 271 samples of look-ahead (5.6 ms, the longest run it will repair), and none when idle',
+  H.ok(on.latency === 1330 && off.latency === 0,
+    'the de-clipper declares its 1330 samples of look-ahead (27.7 ms, enough for the CBAR model\u2019s context on either side of an extended plateau), and none when idle',
     'engaged ' + on.latency + ', bypassed ' + off.latency);
 
   // find one flat top in the middle of the file and look at what came out —
@@ -1267,7 +1267,7 @@ H.section('engine · de-clipper on a clipped master');
   H.ok(arcBoth.hi - arcBoth.lo > 0.05 && arcBoth.lo > 0.6,
     'and leaves the de-clipper\'s repair standing when both stages run',
     'range ' + (arcBoth.hi - arcBoth.lo).toFixed(4) + ' at ' + arcBoth.lo.toFixed(3));
-  H.ok(both.latency === 336, 'the two repair stages add up to 336 samples of reported latency',
+  H.ok(both.latency === 1395, 'the two repair stages add up to 1395 samples of reported latency',
     String(both.latency));
 }
 
@@ -1411,8 +1411,8 @@ H.section('engine · true-peak limiter (the export ceiling)');
   for (let i = 0; i < full.out[0].length; i++) if (!isFinite(full.out[0][i])) nonFinite++;
   H.ok(nonFinite === 0, 'with every repair stage engaged the output is finite — every sample of delay is covered',
     nonFinite + ' non-finite samples, latency ' + full.latency);
-  H.ok(full.latency === 271 + 65 + 88, 'and the three look-aheads add up to one number the caller can trust',
-    String(full.latency) + ' samples (271 de-clip + 65 de-click + 88 limiter)');
+  H.ok(full.latency === 1330 + 65 + 88, 'and the three look-aheads add up to one number the caller can trust',
+    String(full.latency) + ' samples (1330 de-clip + 65 de-click + 88 limiter)');
   H.ok(RSDSP.measure([full.out[0]], SR).ispDb <= -2 + 0.15, 'the chain as a whole still lands under the ceiling',
     RSDSP.measure([full.out[0]], SR).ispDb.toFixed(2) + ' dBTP');
 }
@@ -1729,6 +1729,209 @@ H.section('engine · stereo integrity');
   const cOut = RSDSP.stereoCorrelation(out);
   H.ok(Math.abs(cIn - cOut) < 0.25, 'stereo image is preserved', cIn.toFixed(2) + ' → ' + cOut.toFixed(2));
   H.ok(!hasBad(out[0]) && !hasBad(out[1]), 'both channels stay finite');
+}
+
+H.section('engine · stereo azimuth correction');
+{
+  // A tilted tape head reads the two tracks a few microseconds apart — a pure
+  // sub-sample *delay* between channels, not a polarity or level fault — and
+  // the fixture needs that same property: not an independent pan, but one
+  // channel being the other, shifted. Linear interpolation is an adequate
+  // ground truth here (the test only needs a few samples of skew on
+  // broadband content, not a reference-grade resampler).
+  const fracDelay = (sig, d) => {
+    const n = sig.length, out = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const src = i - d;
+      const i0 = Math.floor(src), f = src - i0;
+      const x0 = i0 >= 0 && i0 < n ? sig[i0] : 0;
+      const x1 = (i0 + 1) >= 0 && (i0 + 1) < n ? sig[i0 + 1] : 0;
+      out[i] = x0 * (1 - f) + x1 * f;
+    }
+    return out;
+  };
+  // HF-only mono-sum loss, in dB: how much energy a comb filter destroyed
+  // when the pair was summed, relative to what two independent channels
+  // would have preserved on average — this is the statistic a real off-
+  // azimuth cassette transfer is complained about by, and the one the repair
+  // exists to close.
+  const hfMonoLoss = (a, b, from) => {
+    const c = 1 - Math.exp(-2 * Math.PI * 3000 / SR);
+    let za = 0, zb = 0, zm = 0, eA = 0, eB = 0, eM = 0;
+    for (let i = from; i < a.length; i++) {
+      za += (a[i] - za) * c; zb += (b[i] - zb) * c;
+      const m = (a[i] + b[i]) * 0.5;
+      zm += (m - zm) * c;
+      const ha = a[i] - za, hb = b[i] - zb, hm = m - zm;
+      eA += ha * ha; eB += hb * hb; eM += hm * hm;
+    }
+    return 10 * Math.log10((eM + 1e-30) / ((eA + eB) / 2 + 1e-30));
+  };
+  const SEC = 3;
+  const src = H.mix([H.pink(SR, SEC, 0.5, 71), H.tone(4500, SR, SEC, 0.12), H.tone(7200, SR, SEC, 0.1)]);
+  const L = src, R = fracDelay(src, 1.6);
+  const AZ = (p) => Object.assign({}, H.DEFAULT_PARAMS, { power: 1, autoLevel: 1, width: 0, bassMono: 0, azimuth: p });
+  const off = H.render(Processor, [L, R], AZ(0));
+  const on = H.render(Processor, [L, R], AZ(1));
+  const lossOff = hfMonoLoss(off[0], off[1], SR >> 1);
+  const lossOn = hfMonoLoss(on[0], on[1], SR >> 1);
+  H.ok(lossOn > lossOff + 1.5,
+    'a 1.6-sample inter-channel skew (simulated tape-head tilt) loses less energy when the pair is summed to mono once corrected',
+    lossOff.toFixed(2) + ' dB uncorrected → ' + lossOn.toFixed(2) + ' dB corrected');
+  H.ok(!hasBad(on[0]) && !hasBad(on[1]), 'the correction stays finite throughout');
+
+  // An already-aligned pair (and a pair that is merely panned, not skewed —
+  // the azimuth corrector's own confidence gate is what has to tell those
+  // apart from a transport defect) must come back essentially untouched.
+  const R2 = L.slice();
+  const aligned = H.render(Processor, [L, R2], AZ(1));
+  let maxDelta = 0;
+  for (let i = SR; i < aligned[1].length; i++) maxDelta = Math.max(maxDelta, Math.abs(aligned[1][i] - aligned[0][i]));
+  H.ok(maxDelta < 0.01, 'an already-aligned pair is not pulled apart by the corrector', maxDelta.toFixed(5));
+
+  const panned = H.mix([H.pink(SR, SEC, 0.5, 73)]);
+  const silence = new Float32Array(panned.length);
+  const hardPanOn = H.render(Processor, [panned, silence], AZ(1));
+  H.ok(!hasBad(hardPanOn[0]) && !hasBad(hardPanOn[1]), 'a hard-panned (silent-opposite-channel) signal stays finite with the corrector engaged');
+
+  H.ok(off.length === 2 && off[0].length === L.length, 'azimuth 0 still processes stereo without re-ordering channels');
+}
+
+H.section('engine · adaptive PLL hum tracker');
+{
+  // A worn belt or a tired capstan does not hold 50.0 Hz for the length of a
+  // side — the motor slows (or speeds up) by a hertz or more over a minute,
+  // which is already wider than the notch's own ~3 Hz skirt (HUM_BW_HZ). A
+  // notch frozen at the frequency measured once, at t = 0, loses the line the
+  // moment the drift walks past its own width; this fixture is built to prove
+  // that out, with a linear ramp chosen deliberately larger than the notch's
+  // skirt so "the static notch kept up anyway" cannot be the result.
+  const driftFixture = (seconds, f0, f1) => {
+    const n = Math.round(SR * seconds);
+    const sig = new Float32Array(n);
+    let seed = 11, phi = 0, noise = 0;
+    const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return (seed / 0x7fffffff) * 2 - 1; };
+    for (let i = 0; i < n; i++) {
+      const t = i / SR;
+      const f = f0 + (f1 - f0) * (t / seconds);
+      phi += 2 * Math.PI * f / SR;
+      const hum = 0.1 * Math.sin(phi) + 0.035 * Math.sin(2 * phi) + 0.02 * Math.sin(3 * phi);
+      noise += (rnd() * 0.25 - noise) * 0.15;
+      sig[i] = hum + noise * 0.3 + 0.15 * Math.sin(2 * Math.PI * 220 * t) + 0.08 * Math.sin(2 * Math.PI * 880 * t);
+    }
+    return sig;
+  };
+  // How much of the *drifting* hum survives: demodulate against the known
+  // instantaneous ground-truth frequency (not a fixed bin) and low-pass —
+  // the honest answer to "is the line still there", independent of wherever
+  // any particular notch law chose to sit.
+  const residualAgainstTruth = (sig, seconds, f0, f1) => {
+    const n = sig.length;
+    const accI = [0, 0, 0], accQ = [0, 0, 0];
+    const alpha = 1 - Math.exp((-2 * Math.PI * 3) / SR);
+    let energy = 0, phi = 0;
+    for (let i = 0; i < n; i++) {
+      const t = i / SR;
+      const f = f0 + (f1 - f0) * (t / seconds);
+      phi += 2 * Math.PI * f / SR;
+      for (let h = 0; h < 3; h++) {
+        const th = phi * (h + 1);
+        const I = sig[i] * Math.cos(th), Q = sig[i] * Math.sin(th);
+        accI[h] += (I - accI[h]) * alpha; accQ[h] += (Q - accQ[h]) * alpha;
+        const mag = Math.sqrt(accI[h] * accI[h] + accQ[h] * accQ[h]);
+        energy += mag * mag;
+      }
+    }
+    return Math.sqrt(energy / n);
+  };
+  const db = (x) => 20 * Math.log10(Math.max(x, 1e-12));
+
+  const SEC = 20, F0 = 50.0, F1 = 48.0;
+  const drifting = driftFixture(SEC, F0, F1);
+  const humParams = { hum: 1, hum2: 1, hum3: 1, humHz: 50 };
+  // The frequency-frozen control: same code, loop gains zeroed, so the notch
+  // sits exactly on humHz for the whole file — this is deliverable #3's "do
+  // nothing differently" baseline, built from the real engine rather than a
+  // hand-rolled stand-in, so the comparison is apples to apples.
+  const ProcFrozen = H.loadProcessorEdited([
+    ['this.kp = 2 * HUM_PLL_ZETA * wn;', 'this.kp = 0;'],
+    ['this.ki = wn * wn;', 'this.ki = 0;'],
+  ], SR);
+  const outTracked = H.render(Processor, [drifting], humParams)[0];
+  const outFrozen = H.render(ProcFrozen, [drifting], humParams)[0];
+
+  const resDry = residualAgainstTruth(drifting, SEC, F0, F1);
+  const resFrozen = residualAgainstTruth(outFrozen, SEC, F0, F1);
+  const resTracked = residualAgainstTruth(outTracked, SEC, F0, F1);
+  H.ok(db(resTracked) < db(resFrozen) - 2,
+    'a PLL-tracked notch holds on to a 2 Hz motor-speed drift that a frequency-frozen notch loses',
+    db(resFrozen).toFixed(2) + ' dB (frozen) → ' + db(resTracked).toFixed(2) + ' dB (tracked), dry ' + db(resDry).toFixed(2) + ' dB');
+  H.ok(!hasBad(outTracked), 'the tracked output stays finite through a sustained drift');
+
+  // A steady line (no drift at all) must not regress: the loop should settle
+  // onto it and hold, not hunt away from the correct answer the way the
+  // inverted-quadrature bug (documented at HumPLL) did.
+  const steady = driftFixture(6, 50, 50);
+  const outSteady = H.render(Processor, [steady], humParams)[0];
+  const resSteadyDry = residualAgainstTruth(steady, 6, 50, 50);
+  const resSteadyOn = residualAgainstTruth(outSteady, 6, 50, 50);
+  H.ok(db(resSteadyOn) < db(resSteadyDry) - 15,
+    'a steady, driftless 50 Hz line is still notched hard once the loop has settled',
+    db(resSteadyDry).toFixed(2) + ' → ' + db(resSteadyOn).toFixed(2) + ' dB');
+
+  // 60 Hz grid, plus a faster flutter component layered on top (wow and
+  // flutter both exist on a worn transport) — the tracker has to hold the
+  // whole 45–65 Hz range the task specifies, not just the 50 Hz side of it.
+  const flutterFixture = (seconds, nominal) => {
+    const n = Math.round(SR * seconds);
+    const sig = new Float32Array(n);
+    let seed = 7, phi = 0, noise = 0;
+    const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return (seed / 0x7fffffff) * 2 - 1; };
+    for (let i = 0; i < n; i++) {
+      const t = i / SR;
+      const f = nominal + 0.15 * Math.sin(2 * Math.PI * 4 * t);
+      phi += 2 * Math.PI * f / SR;
+      const hum = 0.1 * Math.sin(phi) + 0.035 * Math.sin(2 * phi);
+      noise += (rnd() * 0.25 - noise) * 0.15;
+      sig[i] = hum + noise * 0.3 + 0.12 * Math.sin(2 * Math.PI * 330 * t);
+    }
+    return sig;
+  };
+  const flutter = flutterFixture(5, 60);
+  const outFlutter = H.render(Processor, [flutter], { hum: 1, hum2: 1, hum3: 0, humHz: 60 })[0];
+  H.ok(!hasBad(outFlutter), '60 Hz nominal with 4 Hz flutter stays finite and locked within range');
+  H.ok(peak(outFlutter) < peak(flutter) + 0.05, 'the tracker does not add level while chasing flutter');
+
+  // Hum-free material at zero dose: the whole stage (PLL included) must stay
+  // out of the signal path entirely, exactly like the static notch it
+  // replaces — a PLL that free-runs on pure programme material when there is
+  // no hum to lock onto would be a regression even if it never audibly
+  // notches anything, since the call site only *runs* tick() when a dose is
+  // non-zero (see the p.hum>0.0001 gate), so this is really a check that the
+  // gate itself still works unchanged.
+  // At zero dose the notch gains are 0 dB regardless of whether the PLL ran
+  // (HUM_DB_PER_DOSE * 0 = 0), so a sample-exact comparison cannot actually
+  // tell "the call site's p.hum>0.0001 gate skipped tick() entirely" apart
+  // from "tick() ran and did nothing" — both look the same in the output.
+  // What this *does* still guard is the gate's own threshold logic: feeding a
+  // dose just under it must track a dose of exactly zero, which it would not
+  // if the gate's comparison were accidentally inverted or off by a sign.
+  const music = H.mix([H.tone(220, SR, 2, 0.2), H.tone(330, SR, 2, 0.1)]);
+  const bareParams = Object.assign({}, H.DEFAULT_PARAMS, { hum: 0, hum2: 0, hum3: 0, humHz: 50 });
+  const outZero = H.render(Processor, [music], bareParams)[0];
+  const outBelowGate = H.render(Processor, [music], Object.assign({}, bareParams, { hum: 0.00005, hum2: 0.00005, hum3: 0.00005 }))[0];
+  let maxDelta = 0;
+  for (let i = 0; i < music.length; i++) maxDelta = Math.max(maxDelta, Math.abs(outBelowGate[i] - outZero[i]));
+  H.ok(maxDelta < 1e-9, 'a dose under the call-site gate threshold behaves exactly like zero dose',
+    maxDelta.toExponential(2));
+
+  // Strong musical content sitting right on the mains grid, with a non-zero
+  // dose (a false-positive hum measurement): the loop must not diverge or
+  // destabilise even though there is no real periodic line for it to lock to.
+  const falsePositive = H.mix([H.tone(50, SR, 3, 0.3), H.tone(100, SR, 3, 0.15), H.pink(SR, 3, 0.2, 91)]);
+  const outFalsePositive = H.render(Processor, [falsePositive], { hum: 0.5, hum2: 0.3, hum3: 0.2, humHz: 50 })[0];
+  H.ok(!hasBad(outFalsePositive), 'strong musical content at the mains frequency does not destabilise the tracker');
+  H.ok(peak(outFalsePositive) < peak(falsePositive) * 1.2 + 0.05, 'and does not blow up the level while gated on', peak(falsePositive).toFixed(3) + ' → ' + peak(outFalsePositive).toFixed(3));
 }
 
 /* ==================================================== analysis / diagnosis */

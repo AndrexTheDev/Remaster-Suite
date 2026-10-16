@@ -6,6 +6,134 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Round 26 — hum: the mains notch is now tracked by a software PLL, not fixed at t = 0
+
+**The three mains-hum notches no longer sit at whatever frequency the file measured as, once, before
+rendering started.** A turntable belt or a tape transport's capstan does not hold 50.0/60.0 Hz for the
+length of a side — motor load, belt age and mains-side wow move it by a hertz or more, which is already
+wider than the notch's own three-hertz skirt (see row 12 of the engine table). A notch frozen at t = 0
+loses the line the moment the drift walks past that skirt. `HumPLL` (new, in
+`assets/worklets/remaster-processor.js`, one instance per channel inside `HumNotch`) is a software
+phase-locked loop seeded from the measured nominal (50 or 60 Hz) that tracks the real mains frequency
+continuously, clamped to the task's stated 45–65 Hz capture range, and retunes the three existing notch
+biquads from its live estimate instead of the static value. The dose/gain law the notches apply is
+unchanged — this closes the "at what frequency" question, not the "how much" one, which stays
+presets.js's job.
+
+The loop is a standard lock-in detector: a self-tracking bandpass (Q ≈ 6, recut only when the estimate
+has moved more than 0.1 Hz, so the expensive trig is throttled without slowing the loop itself) isolates
+the fundamental's neighbourhood; the bandpassed signal is quadrature-mixed against a local oscillator and
+each arm low-passed at 6 Hz, which leaves the two mix outputs converging on (A/2)·sin(φ−θ) and
+(A/2)·cos(φ−θ) for a true phase error φ−θ — so `atan2(mixI, mixQ)` is the signed phase error directly,
+zero at lock and independent of the hum's own loudness; a critically damped PI loop filter
+(Kp = 2ζωₙ, Ki = ωₙ², ζ = 1, natural frequency 0.3 Hz — fast enough to settle in about a second,
+slow enough not to start answering to the programme) steers the oscillator's own frequency, anti-windup
+clamped so an unlocked loop (silence, or a false hum measurement on hum-free material) cannot wind the
+integrator far past what the frequency clamp allows.
+
+Measured against a known ground truth (a synthetic 50 → 48 Hz linear drift over 20 s — a realistic
+worst-case worn-belt scenario, deliberately built wider than the notch's own skirt so "the static notch
+happened to be wide enough" cannot be the result, demodulated against the drift's own instantaneous
+frequency rather than a fixed bin): the line that survives a frequency-frozen notch at −19.3 dB comes
+down to −22.9 dB once the PLL tracks it, 3.6 dB of extra attenuation on top of what the existing notch
+width already bought; a steady, driftless 50 Hz line is still taken down to −47.9 dB once the loop has
+settled, i.e. no regression on the case the old notch already handled; a 60 Hz nominal with 4 Hz flutter
+layered on top stays locked and finite; and strong musical content sitting on the mains grid with a
+non-zero (false-positive) dose does not destabilise the loop or add level (`tests/dsp.test.js`).
+
+Two bugs were caught by this measurement before either reached the shipped worklet. First, a sign
+convention: the first implementation built the phase detector as `atan2(mixQ, mixI)` with the quadrature
+arm as `xb·(−sin θ)` — mathematically adjacent to the correct form but wrong, since it puts the
+detector's zero at a quarter-cycle phase error rather than true lock, so even a perfectly steady 50 Hz
+tone never actually settled: the estimate walked monotonically away from 50 Hz (49.99 Hz at 0.5 s down
+to 49.73 Hz at 9.5 s, still falling with no sign of stopping) regardless of how far the loop gains were
+turned down — the same class of A/B sign inversion Round 25's azimuth corrector shipped with, caught the
+same way, by asserting what the right answer has to look like and finding the code did not produce it.
+Second, a loop-filter structure bug: an early version summed each sample's `Kp·err + ∫Ki·err` *into* the
+running frequency estimate rather than computing the frequency fresh from a fixed centre each sample,
+which quietly turns a standard two-pole (type-II) PI loop into an uncontrolled type-III one with an
+extra integrator — it never settled at any gain, only oscillated or drifted regardless of tuning. Fixed
+by keeping the loop's centre frequency fixed between re-seeds (set once from `humHz`, the file's own
+measurement, and reset on a profile/file change) and computing
+`freq = clamp(fCenter + Kp·err + integ, 45, 65)` outright every sample.
+
+### Round 25 — stereo: sub-sample tape-azimuth correction ahead of the M/S stage
+
+**A tilted tape head is now its own repair, not a side-effect of the width/mono-bass stage it used
+to be invisible to.** A worn cassette or reel transport whose head gap is not exactly perpendicular
+to the tape reads the two tracks a few hundred microseconds apart — a pure channel-to-channel timing
+offset, not a level or polarity fault. The bottom end stays correlated (a bass wavelength dwarfs the
+skew) while the top turns into a comb filter the instant the pair is summed to mono, which is the
+actual complaint an off-azimuth transfer produces. `AzimuthCorrector` (new, in
+`assets/worklets/remaster-processor.js`) runs a sliding cross-correlation between the high-passed
+(above 3 kHz) channels over a 12 ms window, refines the integer peak to a fraction of a sample with a
+parabolic fit through its two neighbours, re-estimates every 20 ms (azimuth drift is a transport
+property, not something to chase sample by sample), and delays whichever channel is lagging to meet
+the other through a first-order Thiran fractional-allpass — phase-only, no added look-ahead, because
+a filter needs no future samples the way a buffered repair does. The correction carries its own guard:
+`confidence` is how much the estimated lag's correlation actually improves on doing nothing, so a
+hard-panned mix or a double-tracked part that only resembles a timing defect is left alone, and so is
+an already-aligned pair or silence.
+
+Measured against a known ground truth (a broadband signal and a copy of it delayed by a known
+sub-sample amount): the mono-sum high-band energy lost to the comb filter goes from −1.0…−3.8 dB at
+1.2–2.7 samples of simulated skew down to −0.05…−0.09 dB once corrected; independent, uncorrelated
+left/right material keeps a confidence at or below 0.1 (no audible correction applied); and an
+already-aligned pair comes back unchanged. One bug was caught by this measurement before it shipped:
+the first implementation delayed the *leading* channel's own lateness further instead of delaying it
+to meet the lagging one, which made every correction measurably worse than doing nothing at all (the
+regression test that would have caught it in production, `tests/dsp.test.js`, is what caught it here).
+
+The repair is wired into the measurement-driven auto-tuning the rest of the per-song stages already
+use: a new three-band-correlation signature — the top reading worse than the middle while the middle
+stays as correlated as a hard-panned mix would not — arms a new `azimuth` worklet parameter exactly
+the way `bassMono` is armed by an out-of-phase bottom, so the stage is reachable from the existing
+auto / per-file pipeline, not a parameter nothing ever sets. `tests/audit.test.js`'s existing
+"every declared parameter is driven by the law" and "…and actually read by the worklet" checks cover
+it like every other repair.
+
+### Round 24 — de-clip: an autoregressive model picks up where the length ceiling used to stop
+
+**The de-clip stage no longer gives up on a plateau once it outgrows the old 269-sample (5.6 ms)
+ceiling.** That ceiling was never a property of clipping — it was the length a single Hermite cubic
+or period-solved cosine arc can be trusted to stand in for — and a slow, heavily overloaded bass note
+from a worn motor or a hot analogue transfer can sit flat for much longer than that. Three models now
+share the stage, each handed a run only when the shorter ones would be guessing: the existing
+Hermite/period solve for a short run (unchanged, ≤ 269 samples); the *same* length-solves-for-the-peak
+formula generalised to any length for a longer but still periodic run (a sine of amplitude A clipped
+at T stays at or above T for exactly T/A ≤ cos(ω·len/2) — true for any run up to half its own period,
+which is also the hard ceiling on how long a same-sign run can ever be, so the formula never runs out
+of validity the way a single bounded cubic does); and, only when no reliable period can be measured
+(broadband overload, clipped noise — material with no waveform to solve for), **CBAR** — Constrained
+Blind Amplitude Reconstruction — fits an order-16 autoregressive model separately to the 128 samples
+of real audio immediately before and after the run (Levinson–Durbin), runs each forward as a zero-input
+filter across the gap, cross-fades the two extrapolations with a raised-cosine weight, and constrains
+the result to never cross back below the measured clip rail, so a run nothing can be inferred about
+settles honestly at the flat top it started at instead of at a guess.
+
+Two bugs surfaced and were fixed while raising the length ceiling, both in the run-continuation check
+that decides when a plateau has ended: a step-to-step tolerance (±0.25 %) cut a genuine long plateau
+into dozens of one-sample fragments on a slow signal, because a low-frequency crest's entry and exit
+ramps change by less than that from one sample to the next; and even after that was replaced with a
+floor relative to the run's own peak, the branch order let the floor's own failure re-arm as a brand
+new one-sample run instead of closing the real one out first, discarding hundreds of samples of
+accumulated run length on every exit ramp. Both are measured on a 25 Hz tone clipped at 0.9: the
+true 679-sample plateau used to be reported and repaired as fifty one-sample runs: the floor-relative
+check with the corrected branch order reports the one true run.
+
+Measured against the known original: a 25 Hz tone at twice the clip level (70 % of each half-cycle
+flat, 679 samples — far beyond anything the old ceiling could reach at all) goes from −13.9 dB of
+shape error unrepaired to −33.7 dB repaired by the periodic model; a milder 30 Hz/456-sample case goes
+from −18.0 to −43.7 dB. A clipped noise burst with no period to find produces zero non-finite samples
+and never reads worse than the flat top it replaced — CBAR's constraint is a floor, not a promise of a
+shape that is not there. Every short-run fixture the stage already passed (the 997 Hz Hermite/period
+cases, the "stays out of the way" fixtures) is unaffected: the stage's reported look-ahead is now 1330
+samples (27.7 ms: 1200 the longest run it will ever track open-ended, plus 128 samples of trailing
+context for CBAR's backward fit, plus a few samples of margin) regardless of which of the three models
+a given run actually takes, so the chain stays one fixed, sample-aligned number the caller can trust.
+`tests/dsp.test.js` and `tests/audit.test.js` were updated for the new latency constant; no other
+stage's behaviour changed.
+
 ### Round 23 — infrastructure: cross-origin isolation, and batch exports that stream instead of buffer
 
 **Cross-origin isolation, opportunistically.** [`coi-serviceworker.js`](coi-serviceworker.js) registers itself as a

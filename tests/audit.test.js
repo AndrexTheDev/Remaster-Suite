@@ -678,7 +678,7 @@ section('audit · presets and parameters');
   // peak (`refDb`), which the stages that are *not* an absolute target read to
   // place their thresholds relative to this recording (see `refLin` in the
   // worklet and the level-invariance section in tests/dsp.test.js).
-  ok(declared.length === 58, 'the processor declares the whole per-song parameter set', String(declared.length));
+  ok(declared.length === 59, 'the processor declares the whole per-song parameter set', String(declared.length));
   // A mains line that is not a pure sine. Real hum arrives with its harmonics,
   // and a recording with a 100 Hz buzz has to be notched there *because that was
   // measured* — this is the fixture that proves the harmonic notches are wired to
@@ -2545,7 +2545,7 @@ section('audit · documentation matches the product');
     'the README documents the de-clicker look-ahead and its 1.35 ms');
   // …and the two stages that were added since: the latency paragraph is the
   // contract every caller reads, so each of its three numbers has to be there
-  ok(/5\.6 ms/.test(readme) && /271 samples/.test(readme), 'the README documents the de-clipper\'s look-ahead');
+  ok(/27\.7 ms/.test(readme) && /1330 samples/.test(readme), 'the README documents the de-clipper\'s look-ahead');
   // (the README uses a typographic minus, as it does everywhere else)
   ok(/\u22121 dBTP/.test(readme) && /\u22122 dBTP/.test(readme) && /\u221214 LUFS/.test(readme),
     'the README states the true-peak ceilings and when the tighter one applies');
