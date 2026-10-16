@@ -78,8 +78,6 @@ function smoothstep(e0, e1, x) {
   return t * t * (3 - 2 * t);
 }
 
-function db2lin(db) { return Math.pow(10, db / 20); }
-
 /* -------------------------------------------------------------------------- */
 /* biquad (transposed direct form II, RBJ cookbook)                            */
 /* -------------------------------------------------------------------------- */
@@ -644,7 +642,6 @@ class SubSynth {
 /* De-esser: dynamic sibilance control (see the class below)                    */
 /* -------------------------------------------------------------------------- */
 
-const DEESS_DECIM = 4;
 /**
  * How long a detected sibilant stays corrected, in milliseconds.
  *

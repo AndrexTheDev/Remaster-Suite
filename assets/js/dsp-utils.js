@@ -2549,28 +2549,11 @@
   }
 
   /**
-   * Highest bin level inside ±tol Hz of `f`.
-   * @param {RSDSP.Spectrum} spec - the spectrum to read.
-   * @param {number} f - the frequency to look around, in Hz.
-   * @param {number} tol - the window half-width in Hz.
-   * @returns {number} the highest level found in dB, or −200 when the window
-   *   holds no bins.
-   */
-  function spectrumPeak(spec, f, tol) {
-    let v = -140;
-    for (let k = 0; k < spec.n; k++) {
-      if (spec.db[k] > v && Math.abs(spec.freq[k] - f) <= tol) v = spec.db[k];
-    }
-    return v;
-  }
-
-  /**
    * The strongest narrow resonances in the low mids — a boxy room, a honky
    * cabinet, a resonant pressing. Broad rises are what the fixed EQ bank is for;
    * this finds the *narrow* offenders so they can be notched precisely instead of
    * pulling a whole octave down with them.
    *
-   * @returns {{hz:number, excessDb:number, q:number}[]} strongest first, max 2
    * @param {RSDSP.Spectrum} spec - the spectrum to scan.
    * @returns {{hz:number, excessDb:number, q:number}[]} the strongest narrow
    *   resonances, strongest first, at most two.

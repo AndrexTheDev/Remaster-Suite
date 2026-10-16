@@ -6,6 +6,48 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Round 31b — the documentation is checked now, so the code gets the same treatment
+
+**Round 31 made the README answerable for what it claims about the tree. Nothing answered for the
+JavaScript itself: a function can be declared, documented, called by nobody, read a name that was never
+declared, or be written twice into the same object literal — and all eleven suites still pass, because
+none of them ever executes that path.**
+
+**1 — `scripts/analyze-code.js`, an acorn pass over the shipped source.** It parses the thirteen
+`assets/js` modules, the AudioWorklet processor and `coi-serviceworker.js` (15 files, 20 553 lines), builds a
+real scope chain and reports what a syntax check cannot see: reads of names that resolve to nothing (the
+runtime `ReferenceError`, which `node --check` accepts happily), assignments that quietly create a
+global, the same key written twice in one object literal (the later one silently wins), and module-level
+declarations that nothing references. `--dead` promotes the last group from a note to a failure, `--json`
+for machines; exit 0 clean, 1 on a defect, 2 when acorn is absent. acorn is the second devDependency
+alongside jsdom, and `npm run analyze:code` / `analyze:code:dead` expose it. The first run reported 635
+findings; 635 of them were bugs in the analyzer (it bound only the first declarator of `const a = 1, b = 2;`
+and did not know `registerProcessor`), which is why the tool now states its own file and defect counts —
+the second run found five real ones, below — two defects a user could hit and three declarations nothing referenced.
+
+**2 — the pass found a shipped bug: `seek()` never worked.** Every seek — a click on the waveform, the
+seek strip, the left/right arrow keys — ended in `this.position = Math.min(Math.max(0, seconds), dur)`,
+and `dur` was declared nowhere in `engine.js`. A seek therefore threw `ReferenceError: dur is not
+defined` before it moved the transport: the click handler ran, the playhead stayed where it was, and the
+one thing a waveform display is for did not happen. It is fixed (`const total = this.buffer ?
+this.buffer.duration : 0;`, so a seek with no buffer is a documented no-op rather than a crash), and
+`tests/mobile-ux.test.js` now carries five checks for it — a seek moves the transport, a seek past the
+end lands on the last sample, a seek before zero lands on zero, a seek with no buffer loaded does not
+throw. The new check reproduced the `ReferenceError` against the old source before the fix landed, so the
+regression is pinned by a test that failed for the right reason. mobile-ux 48 → 53 checks, the total
+1037 → **1042**.
+
+**3 — the rest of the findings.** A duplicate key in the object `RSPresets.analyse()` returns
+(`humNeed` was listed twice with the same value; the normalised-needs group keeps it, the copy is gone —
+behaviourally identical, since a duplicate shorthand key resolves to the same variable). Two dead
+declarations in the worklet (`db2lin()`, a helper nothing called since the gain computers were built, and
+`DEESS_DECIM`, a constant the de-esser replaced with its own frame counter) and one in `dsp-utils.js`
+(`spectrumPeak()`, documented but referenced by nothing — the resonance scanner builds its own local
+window), plus a duplicated `@returns` tag this pass had left on `resonanceScan()`. The JSDoc coverage the
+validator reports therefore reads **306 of 306 declarations** rather than 307: removing a documented
+function that nothing calls is the point of the exercise. `scripts/analyze-code.js` is named in the
+Repository layout, so the layout check in `validate-docs.js` covers it too.
+
 ### Round 31 — documentation audit, strict JSDoc and a docs validator
 
 **The tree and its description had drifted apart: the README still promised "seven dependency-free
@@ -53,7 +95,7 @@ spectrum reader, the sliceable steps (hum, crackle, dynamic range, inter-sample 
 split, the WAV envelope writers and the two Biquad setters — `renderChunked()`'s duplicated inline option object references the `ChunkedRenderOptions`
 typedef that already existed, one stale `@param` trio and one phantom parameter were removed, and
 `i18n.js`'s file overview no longer repeats its own header verbatim. No DSP and no runtime behaviour
-changed: the suites pass unchanged (**1037 checks**), and the documentation audit was run with them.
+changed: the suites pass unchanged (**1037 checks** at that point — the five checks Round 31b adds for `seek()` are new tests, not new behaviour), and the documentation audit was run with them.
 
 ### Round 30 — Mobile touch optimisation, the "AI Magic Fix" button, and a live A/B/C compare FAB
 

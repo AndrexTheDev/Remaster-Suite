@@ -1148,7 +1148,7 @@
     return {
       topDeficitDb, codecDeficitDb, airDeficitDb, subDeficitDb, subPresentDb, subHole, wallAboveSib,
       mudExcessDb, harshExcessDb, boxExcessDb,
-      hissNeed, crackleNeed, clipNeed, clipShare, clipImplied, humNeed, headroom, dense,
+      hissNeed, crackleNeed, clipNeed, clipShare, clipImplied, headroom, dense,
       // normalised needs (0..1) used by the doses
       needTop: clamp(topDeficitDb / 18, 0, 1),
       needAir: clamp(Math.max(airDeficitDb / 20, (m.brickwall || 0) * 0.9 * cliffPrices), 0, 1),

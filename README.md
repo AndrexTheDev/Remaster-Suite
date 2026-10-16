@@ -509,8 +509,9 @@ tests/
                                  onChunk triggers (50 checks)
   mobile-ux.test.js              the carousel effect rack, the gold "AI Magic Fix" button and
                                  the live A/B/C compare FAB: markup/CSS, navigator.vibrate
-                                 safety, switchBuffer() position preservation, the
-                                 desktop-arms vs phone-auto-processes split, tap/hold (48 checks)
+                                 safety, switchBuffer() position preservation, seek()
+                                 clamping and its no-buffer no-op, the desktop-arms vs
+                                 phone-auto-processes split, tap/hold (53 checks)
   coi.test.js                    runs the shipped coi-serviceworker.js in a Node vm as both
                                  a Service Worker (COOP/COEP header rewrite) and a page
                                  script (registration, the one-reload rule, and the guarantee
@@ -531,6 +532,13 @@ scripts/
                                  signatures, `{@link}` targets, @typedef structure; `--run`
                                  re-runs every suite and compares its own check count with
                                  the README
+  analyze-code.js                static analysis of the shipped JavaScript with acorn: parses
+                                 the thirteen assets/js modules, the AudioWorklet processor
+                                 and coi-serviceworker.js, then reports references to names
+                                 that are not declared (a runtime ReferenceError a syntax
+                                 check cannot see), accidental globals, duplicate keys in one
+                                 object literal, and module-level declarations nothing calls
+                                 (`--dead` fails on the last group too, `--json` for machines)
 tools/                           measurement probes, not part of the app — the evidence the
                                  restoration claims rest on (see util.js)
   util.js                        measurement toolkit: fixtures, renderers, spectrum meters
@@ -555,7 +563,7 @@ belong to the test suite.
 
 ## Tests
 
-**11 dependency-free suites · 1037 checks.** Every count below is the suite's own
+**11 dependency-free suites · 1042 checks.** Every count below is the suite's own
 (`ALL TESTS PASSED (n)`); `node scripts/validate-docs.js --run` re-runs them and
 fails if this file, `tests/` and `package.json` ever disagree.
 
@@ -571,13 +579,14 @@ fails if this file, `tests/` and `package.json` ever disagree.
 | Neural | `tests/neural.test.js` | 87 | the model path with no weights installed: the controller/worker contract, T-frame alignment, STFT round-trips, the capability probe, provider order, quantised-variant selection, the watchdog and the Stage-7 coupling |
 | Memory guard | `tests/memory-guard.test.js` | 21 | the heap watchdog on a host without `performance.memory`: the honest no-signal default, the one-way shrink ramp, a stop function that never leaks a timer |
 | Chunked render | `tests/chunked-render.test.js` | 50 | chunk boundaries and level-preserving crossfades, the streaming WAV/MP3 encoders, the mid-render shrink, the abort a failing onChunk triggers |
-| Mobile UX | `tests/mobile-ux.test.js` | 48 | the carousel effect rack, the gold "AI Magic Fix" button, the live A/B/C compare FAB, navigator.vibrate safety, switchBuffer() position preservation, tap/hold |
+| Mobile UX | `tests/mobile-ux.test.js` | 53 | the carousel effect rack, the gold "AI Magic Fix" button, the live A/B/C compare FAB, navigator.vibrate safety, switchBuffer() position preservation, seek() clamping and its no-buffer no-op, tap/hold |
 
 ```bash
-npm install          # only for the test suite (jsdom)
+npm install          # only for the test suite and the static analysis (jsdom, acorn)
 npm test             # runs all eleven dependency-free suites
 node scripts/validate-docs.js        # README ↔ tests/ ↔ package.json consistency
 node scripts/validate-docs.js --run  # the same, and re-counts every suite
+node scripts/analyze-code.js         # static analysis of the shipped JavaScript
 
 node tests/dsp.test.js             # engine: transparency … classification
 node tests/web.test.js             # static integrity, boot, the whole journey, resampling
@@ -589,7 +598,7 @@ node tests/coi.test.js             # the shipped cross-origin-isolation bootstra
 node tests/neural.test.js          # the neural path with no weights installed
 node tests/memory-guard.test.js    # the mobile heap watchdog, with no heap signal
 node tests/chunked-render.test.js  # the chunked/streamed offline render and its encoders
-node tests/mobile-ux.test.js       # carousel rack, Magic Fix button, A/B/C compare FAB
+node tests/mobile-ux.test.js       # carousel rack, Magic Fix button, A/B/C compare FAB, seek()
 
 node tests/beta/beta.js    # big beta: drives a real headless Chromium over the DevTools
                            # protocol — real clicks, real drops, real AudioWorklet, real

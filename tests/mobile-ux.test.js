@@ -121,6 +121,20 @@ async function engineChecks() {
   engine.setBuffer(bufA, { start: 0, end: bufA.duration });
   ok(engine.playing === false, 'setBuffer() stops playback — a different render of a different file is not "the same spot"');
   ok(engine.position === 0, 'setBuffer() resets the position to the window start', engine.position);
+
+  // seek(): the waveform click, the seek strip and the arrow keys all land
+  // here, and the position must be clamped to the file rather than trusted
+  engine.seek(1.25);
+  ok(Math.abs(engine.position - 1.25) < 0.02, 'seek() moves the transport', engine.position.toFixed(3) + ' s');
+  engine.seek(bufA.duration + 30);
+  ok(engine.position === bufA.duration, 'a seek past the end lands on the last sample, not beyond it', engine.position.toFixed(3) + ' s');
+  engine.seek(-4);
+  ok(engine.position === 0, 'a seek before the start lands on zero', engine.position);
+  const fresh = new EngineCtor();
+  let threw = null;
+  try { fresh.seek(5); } catch (e) { threw = e; }
+  ok(threw === null, 'seek() before a buffer exists is a no-op, never a crash', threw && threw.message);
+  ok(fresh.position === 0, 'and the position stays at zero', fresh.position);
 }
 
 /* --------------------------------------------------------------------- app */

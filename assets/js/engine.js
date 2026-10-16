@@ -443,11 +443,17 @@
     /**
      * Jump to a position, resuming playback there when something was playing
      * (the source node cannot be repositioned, so it is replaced).
-     * @param {number} seconds - target position, clamped to the file.
+     *
+     * The target is clamped to the loaded file, and a call before any buffer
+     * exists is a no-op — the waveform, the seek strip and the arrow keys all
+     * land here, including while a card is still being decoded.
+     * @param {number} seconds - target position in seconds, clamped to
+     *   `0…buffer.duration`.
      * @returns {void}
      */
     seek(seconds) {
-      const t = Math.max(0, Math.min(dur, seconds));
+      const total = this.buffer ? this.buffer.duration : 0;
+      const t = Math.max(0, Math.min(total, seconds));
       this.offset = t;
       if (this.playing) {
         this._stopSource();

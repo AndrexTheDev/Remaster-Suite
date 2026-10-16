@@ -19,10 +19,13 @@
     "serve": "python3 -m http.server 8080",
     "test:beta": "node tests/beta/beta.js",
     "validate:docs": "node scripts/validate-docs.js",
-    "validate:docs:run": "node scripts/validate-docs.js --run"
+    "validate:docs:run": "node scripts/validate-docs.js --run",
+    "analyze:code": "node scripts/analyze-code.js",
+    "analyze:code:dead": "node scripts/analyze-code.js --dead"
   },
   "devDependencies": {
-    "jsdom": "^22.1.0"
+    "jsdom": "^22.1.0",
+    "acorn": "^8.19.0"
   },
   "license": "MIT",
   "author": "AndrexTheDev <hippie.highho@gmail.com>",
