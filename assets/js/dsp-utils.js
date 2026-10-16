@@ -2951,21 +2951,22 @@
   /* ---------------------------------------------------------------- WAV I/O */
 
   /**
-   * Encode interleaved PCM WAV.
-   * @param {Float32Array[]} channels
+   * The 44-byte canonical RIFF/WAVE header on its own — split out of
+   * `encodeWav()` so a streaming writer (see `codecs.js#encodeWavStream`,
+   * used for large batch files) can emit it once and then append PCM in
+   * bounded chunks, instead of ever holding the whole file in one buffer.
+   * @param {number} nCh
    * @param {number} sr
-   * @param {16|24|32} bitDepth  (32 = 32-bit float WAV, 16/24 = integer PCM)
+   * @param {16|24|32} bitDepth
+   * @param {number} dataSize total PCM byte length that will follow
+   * @returns {ArrayBuffer} 44 bytes
    */
-  function encodeWav(channels, sr, bitDepth) {
-    const nCh = Math.min(2, channels.length);
-    const len = channels[0].length;
+  function wavHeader(nCh, sr, bitDepth, dataSize) {
     const isFloat = bitDepth === 32;
     const bytesPerSample = bitDepth / 8;
     const blockAlign = nCh * bytesPerSample;
-    const dataSize = len * blockAlign;
-    const buffer = new ArrayBuffer(44 + dataSize);
+    const buffer = new ArrayBuffer(44);
     const view = new DataView(buffer);
-
     const writeStr = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
     writeStr(0, 'RIFF');
     view.setUint32(4, 36 + dataSize, true);
@@ -2980,17 +2981,37 @@
     view.setUint16(34, bitDepth, true);
     writeStr(36, 'data');
     view.setUint32(40, dataSize, true);
+    return buffer;
+  }
 
-    let off = 44;
+  /**
+   * PCM bytes for the sample range `[from, to)` only — the counterpart to
+   * `wavHeader()`. Produces exactly the same bytes `encodeWav()` would put at
+   * the matching offset, so a file written header-then-chunks is byte-for-byte
+   * identical to one written in a single pass.
+   * @param {Float32Array[]} channels
+   * @param {16|24|32} bitDepth
+   * @param {number} from inclusive sample index
+   * @param {number} to exclusive sample index
+   */
+  function wavChunk(channels, bitDepth, from, to) {
+    const nCh = Math.min(2, channels.length);
+    const isFloat = bitDepth === 32;
+    const bytesPerSample = bitDepth / 8;
+    const blockAlign = nCh * bytesPerSample;
+    const n = Math.max(0, to - from);
+    const out = new Uint8Array(n * blockAlign);
+    const view = new DataView(out.buffer);
+    let off = 0;
     if (isFloat) {
-      for (let i = 0; i < len; i++) {
+      for (let i = from; i < to; i++) {
         for (let c = 0; c < nCh; c++) {
           view.setFloat32(off, clamp(channels[c][i], -1, 1), true);
           off += 4;
         }
       }
     } else if (bitDepth === 16) {
-      for (let i = 0; i < len; i++) {
+      for (let i = from; i < to; i++) {
         for (let c = 0; c < nCh; c++) {
           const v = clamp(channels[c][i], -1, 1);
           view.setInt16(off, Math.round(v * 0x7fff), true);
@@ -2998,17 +3019,39 @@
         }
       }
     } else { // 24 bit
-      for (let i = 0; i < len; i++) {
+      for (let i = from; i < to; i++) {
         for (let c = 0; c < nCh; c++) {
           const v = clamp(channels[c][i], -1, 1);
           const s = Math.round(v < 0 ? v * 0x800000 : v * 0x7fffff);
-          view.setUint8(off, s & 0xff);
-          view.setUint8(off + 1, (s >> 8) & 0xff);
-          view.setUint8(off + 2, (s >> 16) & 0xff);
+          out[off] = s & 0xff;
+          out[off + 1] = (s >> 8) & 0xff;
+          out[off + 2] = (s >> 16) & 0xff;
           off += 3;
         }
       }
     }
+    return out;
+  }
+
+  /**
+   * Encode interleaved PCM WAV in one shot (short previews, tests). For full
+   * batch files prefer the streaming pair above, which never allocates one
+   * buffer the size of the whole file.
+   * @param {Float32Array[]} channels
+   * @param {number} sr
+   * @param {16|24|32} bitDepth  (32 = 32-bit float WAV, 16/24 = integer PCM)
+   */
+  function encodeWav(channels, sr, bitDepth) {
+    const nCh = Math.min(2, channels.length);
+    const len = channels[0].length;
+    const bytesPerSample = bitDepth / 8;
+    const blockAlign = nCh * bytesPerSample;
+    const dataSize = len * blockAlign;
+    const header = wavHeader(nCh, sr, bitDepth, dataSize);
+    const pcm = wavChunk(channels, bitDepth, 0, len);
+    const buffer = new ArrayBuffer(44 + dataSize);
+    new Uint8Array(buffer, 0, 44).set(new Uint8Array(header));
+    new Uint8Array(buffer, 44).set(pcm);
     return buffer;
   }
 
@@ -3149,7 +3192,7 @@
     dynamicRange, clipRatio, humStep, resonanceScan, hfRaggedness, stereoCorrelation, measure, measureAsync,
     noiseAnalysis, crackleDetect,
     stereoBandsStep, ispStep, EQ_CENTERS,
-    detectSampleRate, encodeWav, decodeWav, peaks, rmsEnvelope, Biquad,
+    detectSampleRate, encodeWav, wavHeader, wavChunk, decodeWav, peaks, rmsEnvelope, Biquad,
     applyBiquad, biquadHP, qualityScore,
   };
 

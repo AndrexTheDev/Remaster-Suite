@@ -13,6 +13,7 @@
   const Presets = global.RSPresets;
   const Analyzer = global.RSAnalyzer;
   const Engine = global.RSEngine;
+  const OPFS = global.RSOPFS;
 
   const $ = UI.$;
   const $$ = UI.$$;
@@ -64,7 +65,40 @@
     powerTouched: false,
     touch: false,
     job: null,
+    // set once `RSOPFS.isSupported()` resolves (see `initStreaming()`); while
+    // it is still pending, batch rendering uses the safe in-memory path
+    opfsReady: false,
   };
+
+  /* ------------------------------------------------------- OPFS scratch I/O */
+
+  /**
+   * Detect the Origin Private File System once at boot and sweep any scratch
+   * files a previous, crashed tab might have left behind — OPFS persists
+   * across reloads, unlike a plain JS heap, so it needs this one bit of
+   * housekeeping that in-memory buffers never did.
+   */
+  async function initStreaming() {
+    if (!OPFS) return;
+    try {
+      State.opfsReady = await OPFS.isSupported();
+    } catch (e) {
+      State.opfsReady = false;
+    }
+    if (State.opfsReady) OPFS.resetScratch();
+  }
+
+  /** A fresh, collision-free OPFS scratch key for this card's next render. */
+  function renderKeyFor(card) {
+    card._renderSeq = (card._renderSeq || 0) + 1;
+    return 'render-' + card.id + '-' + card._renderSeq;
+  }
+
+  /** Drop a card's previous rendered file from OPFS before replacing it. */
+  async function forgetRender(card) {
+    if (!OPFS || !card.result || !card.result.opfsKey) return;
+    await OPFS.remove(card.result.opfsKey);
+  }
 
   /* ------------------------------------------------------------- formatting */
 
@@ -342,7 +376,10 @@
 
   function totalBytesOf(list) {
     let bytes = 0;
-    for (const c of list) if (c.result && c.result.bytes) bytes += c.result.bytes.length;
+    for (const c of list) {
+      if (!c.result) continue;
+      bytes += c.result.bytes ? c.result.bytes.length : (c.result.size || 0);
+    }
     return bytes;
   }
 
@@ -810,7 +847,7 @@
     const params = P.params(card);
     if (!params) throw new Error('not analysed');
     const signature = P.signature(card);
-    if (card.result && card.result.signature === signature && card.result.bytes && !o.force) {
+    if (card.result && card.result.signature === signature && (card.result.bytes || card.result.file) && !o.force) {
       return card.result;
     }
 
@@ -830,22 +867,48 @@
     });
 
     setNote(card, State.format === 'mp3' ? t('toast.mp3Slow') : t('status.export'));
-    let bytes;
-    let name;
-    if (State.format === 'mp3') {
+    const name = Codecs.outputName(card.name, State.format === 'mp3' ? 'mp3' : 'wav');
+    const onEncodeProgress = (p) => setCardWork(card, 'encode', p, estimateLeft(card, p));
+
+    let result;
+    if (State.opfsReady && OPFS) {
+      // stream straight to disk-backed scratch storage: at no point does this
+      // card's whole output exist as one ArrayBuffer on the main thread, so a
+      // batch of large files never multiplies into the soft-memory ceiling
+      await forgetRender(card);
+      const key = renderKeyFor(card);
+      const sink = await OPFS.createWriter(key);
+      try {
+        card._workT0 = nowMs();
+        setCardWork(card, 'encode', 0);
+        if (State.format === 'mp3') {
+          await Codecs.encodeMp3(res.channels, res.sampleRate, State.mp3Rate, onEncodeProgress, sink);
+        } else {
+          await Codecs.encodeWavStream(res.channels, res.sampleRate, State.wavDepth, sink, onEncodeProgress);
+        }
+        const closed = await sink.close();
+        const file = await OPFS.getFile(key);
+        result = { file, size: closed.size, name, format: State.format, rate: res.sampleRate, signature, stale: false, opfsKey: key };
+      } catch (err) {
+        await sink.abort();
+        throw err;
+      }
+    } else {
       card._workT0 = nowMs();
       setCardWork(card, 'encode', 0);
-      const out = await Codecs.encodeMp3(res.channels, res.sampleRate, State.mp3Rate,
-        (p) => setCardWork(card, 'encode', p, estimateLeft(card, p)));
-      bytes = out.bytes;
-      name = Codecs.outputName(card.name, 'mp3');
-    } else {
-      setCardWork(card, 'encode', null);     // a WAV write is fast, but not instant
-      bytes = Codecs.encodeWav(res.channels, res.sampleRate, State.wavDepth);
-      name = Codecs.outputName(card.name, 'wav');
+      let bytes;
+      if (State.format === 'mp3') {
+        const out = await Codecs.encodeMp3(res.channels, res.sampleRate, State.mp3Rate, onEncodeProgress);
+        bytes = out.bytes;
+      } else {
+        setCardWork(card, 'encode', null); // a WAV write is fast, but not instant
+        bytes = Codecs.encodeWav(res.channels, res.sampleRate, State.wavDepth);
+      }
+      result = { bytes, name, format: State.format, rate: res.sampleRate, signature, stale: false };
     }
+
     clearCardWork(card);
-    card.result = { bytes, name, format: State.format, rate: res.sampleRate, signature, stale: false };
+    card.result = result;
     setStatus(card, 'done');
     setNote(card, t('note.done', { fmt: State.format.toUpperCase() }));
     refreshCardText(card);
@@ -859,7 +922,7 @@
     Job.start(1, card);
     try {
       const res = await renderCard(card);
-      Codecs.download(res.bytes, res.name);
+      Codecs.download(res.file || res.bytes, res.name);
       UI.toast(t('toast.saved', { name: res.name }), 'ok');
     } catch (err) {
       setStatus(card, 'error');
@@ -887,8 +950,8 @@
           ? secs * State.mp3Rate * 125
           : secs * rate * (c.analysis.channels > 1 ? 2 : 1) * (State.wavDepth / 8));
       }, 0);
-      if (projected > CONFIG.softMemoryMB * 1e6) {
-        UI.toast(t('toast.mp3Slow'), 'warn', 6000);
+      if (projected > CONFIG.softMemoryMB * 1e6 && !State.opfsReady) {
+        UI.toast(t('toast.bigBatchMemory'), 'warn', 6000);
       }
       Job.start(todo.length, todo[0]);
       for (let i = 0; i < todo.length; i++) {
@@ -916,11 +979,12 @@
     if (!ready.length) { UI.toast(t('toast.zipEmpty'), 'bad'); return; }
     State.busy = true;
     disableControls(true);
+    let zipKey = null;
     try {
       UI.toast(t('toast.zipStart'), null, 2200);
       const projected = totalBytesOf(ready);
-      if (projected > CONFIG.softMemoryMB * 1e6 && State.format === 'wav') {
-        UI.toast(t('toast.mp3Slow'), 'warn', 6000);
+      if (projected > CONFIG.softMemoryMB * 1e6 && State.format === 'wav' && !State.opfsReady) {
+        UI.toast(t('toast.bigBatchMemory'), 'warn', 6000);
       }
       const entries = [];
       Job.start(ready.length, ready[0]);
@@ -928,21 +992,50 @@
         const card = ready[i];
         Job.file(i, card.name, card);
         const res = await renderCard(card);
-        entries.push({ name: res.name, bytes: res.bytes });
+        entries.push(res.opfsKey
+          ? { name: res.name, key: res.opfsKey, size: res.size }
+          : { name: res.name, bytes: res.bytes });
       }
-      entries.readme = buildReadme(ready);
+      const readmeText = buildReadme(ready);
+      const readmeBytes = utf8Encode(readmeText);
       Job.file(Math.max(0, entries.length - 1), entries.length ? entries[entries.length - 1].name : '', null);
       Job.at(0.9, 'zip');
-      const blob = await Codecs.zip(entries, (p) => Job.at(0.9 + p * 0.1, 'zip'));
       const name = 'remaster-suite-' + new Date().toISOString().slice(0, 10) + '.zip';
-      Codecs.download(blob, name);
-      UI.toast(t('toast.zipDone', { n: entries.length }), 'ok');
+
+      let file;
+      if (State.opfsReady && OPFS && entries.every((e) => e.key)) {
+        // OPFS file → OPFS file, all the way through: the assembled archive
+        // never exists in the main thread's heap, only its final `{size}`
+        zipKey = 'zip-' + Date.now();
+        entries.push({ name: 'README.txt', bytes: readmeBytes });
+        await OPFS.packZip(entries, zipKey, (info) => {
+          const share = entries.length ? info.index / entries.length : 1;
+          Job.at(0.9 + share * 0.1, 'zip');
+        });
+        file = await OPFS.getFile(zipKey);
+      } else {
+        entries.readme = readmeText;
+        file = await Codecs.zip(entries, (p) => Job.at(0.9 + p * 0.1, 'zip'));
+      }
+      Codecs.download(file, name);
+      UI.toast(t('toast.zipDone', { n: ready.length }), 'ok');
     } catch (err) {
       UI.toast(t('toast.zipFail') + ' ' + (err && err.message ? err.message : ''), 'bad', 6000);
     }
+    if (zipKey) global.setTimeout(() => OPFS.remove(zipKey), 5000);
     Job.end();
     disableControls(false);
     State.busy = false;
+  }
+
+  /** UTF-8 bytes of a string — used for the small README.txt entry that goes
+   * straight into an OPFS-assembled ZIP (never needs a real file on disk). */
+  function utf8Encode(str) {
+    if (typeof global.TextEncoder !== 'undefined') return new global.TextEncoder().encode(str);
+    const esc = unescape(encodeURIComponent(str));
+    const out = new Uint8Array(esc.length);
+    for (let i = 0; i < esc.length; i++) out[i] = esc.charCodeAt(i);
+    return out;
   }
 
   /** A short note inside the ZIP: what was done and by whom. */
@@ -979,6 +1072,7 @@
     if (State.current === card) { Engine.stop(); State.current = null; }
     clearTimeout(card._previewTimer);
     if (card.wave && card.wave.destroy) card.wave.destroy();
+    forgetRender(card);
     const i = State.cards.indexOf(card);
     if (i >= 0) State.cards.splice(i, 1);
     card.el.card.remove();
@@ -997,6 +1091,7 @@
     for (const c of State.cards) {
       clearTimeout(c._previewTimer);
       if (c.wave && c.wave.destroy) c.wave.destroy();
+      forgetRender(c);
       c.el.card.remove();
     }
     State.cards = [];
@@ -1265,6 +1360,24 @@
     bindFooter();
     setAB('restored');           // a first listen should be the restored version
     refreshAllText();
+    initStreaming();
+    initCOI();
+  }
+
+  /**
+   * Hook into `coi-serviceworker.js`'s registration result (see root-level
+   * file): if a one-time reload is still needed to actually pick up the
+   * cross-origin isolation headers, say so for a moment before it happens —
+   * a page that silently reloads itself looks broken, not helpful.
+   */
+  function initCOI() {
+    const coi = global.RSCOI;
+    if (!coi || !coi.ready || typeof coi.ready.then !== 'function') return;
+    coi.ready.then((info) => {
+      if (!info || !info.needsReload || typeof info.confirmReload !== 'function') return;
+      UI.toast(t('coi.reloading'), null, 1400);
+      global.setTimeout(() => info.confirmReload(), 650);
+    }).catch(() => { /* isolation is an optional speed-up, never required */ });
   }
 
   if (global.document) {
@@ -1276,6 +1389,7 @@
     State, CONFIG, Job, boot, addFiles, prepareCard, renderCard, processAll, downloadZip,
     adoptRecommendedPower, setCardWork, revealCard, isTouchDevice, refreshAllText,
     setAB, ensurePlaying, clearAll, removeCard, refreshPreview, P,
+    initStreaming, initCOI,
   };
   global.RSApp = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;

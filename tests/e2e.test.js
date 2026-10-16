@@ -60,7 +60,7 @@ function boot() {
   win.URL.revokeObjectURL = () => {};
   Object.defineProperty(win.navigator, 'clipboard', { value: { writeText: async () => {} }, configurable: true });
   win.eval(fs.readFileSync(path.join(ROOT, 'assets/vendor/lame.min.js'), 'utf8'));
-  for (const f of ['dsp-utils.js', 'presets.js', 'i18n.js', 'library-loader.js', 'codecs.js', 'analyzer.js', 'engine.js', 'ui.js', 'app.js']) {
+  for (const f of ['dsp-utils.js', 'presets.js', 'i18n.js', 'library-loader.js', 'opfs-manager.js', 'codecs.js', 'analyzer.js', 'engine.js', 'ui.js', 'app.js']) {
     win.eval(fs.readFileSync(path.join(ROOT, 'assets/js', f), 'utf8'));
   }
   return win;

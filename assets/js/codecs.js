@@ -222,6 +222,41 @@
     return new Uint8Array(ab);
   }
 
+  /**
+   * Stream a WAV file into any sink that offers `write(chunk)` / `close()`
+   * (an `RSOPFS` writer, or the same shape in memory) — the header and every
+   * PCM slice are produced and written one at a time, so a 20-minute 24-bit
+   * stereo master (≈350 MB) never exists as a single `ArrayBuffer` on the
+   * main thread the way `encodeWav()` above would build it.
+   * @param {Float32Array[]} channels
+   * @param {number} sr
+   * @param {16|24|32} bitDepth
+   * @param {{write:(chunk:Uint8Array)=>Promise<void>}} sink
+   * @param {(p:number)=>void} [onProgress] 0..1
+   */
+  async function encodeWavStream(channels, sr, bitDepth, sink, onProgress) {
+    const nCh = Math.min(2, channels.length);
+    const len = channels[0].length;
+    const bytesPerSample = (bitDepth || 16) / 8;
+    const blockAlign = nCh * bytesPerSample;
+    const dataSize = len * blockAlign;
+
+    await sink.write(new Uint8Array(DSP.wavHeader(nCh, sr, bitDepth || 16, dataSize)));
+
+    // ~4 MB per chunk: large enough to amortise the per-chunk overhead of a
+    // worker round-trip, small enough to keep peak memory bounded regardless
+    // of the file's total length
+    const samplesPerChunk = Math.max(4096, Math.floor((4 * 1024 * 1024) / Math.max(1, blockAlign)));
+    for (let off = 0; off < len; off += samplesPerChunk) {
+      const end = Math.min(len, off + samplesPerChunk);
+      const chunk = DSP.wavChunk(channels, bitDepth || 16, off, end);
+      await sink.write(chunk);
+      if (onProgress) onProgress(end / len);
+      if (end < len) await tick();
+    }
+    return { sampleRate: sr, samples: len, bytesWritten: 44 + dataSize };
+  }
+
   /** Wrap bytes in a Blob for downloading. */
   function blobOf(bytes, mime) {
     return new Blob([bytes], { type: mime || 'application/octet-stream' });
@@ -317,13 +352,32 @@
   }
 
   /**
+   * A tiny accumulator with the same `write()` shape as an OPFS/memory sink —
+   * lets `encodeMp3`/`encodeMp3MainThread` always stream their output through
+   * one code path, whether or not the caller handed them a real sink.
+   */
+  function collectingSink() {
+    const parts = [];
+    let length = 0;
+    return {
+      parts,
+      async write(chunk) { if (chunk && chunk.length) { parts.push(chunk); length += chunk.length; } },
+      get length() { return length; },
+    };
+  }
+
+  /**
    * Encode channels to MP3.
    * @param {Float32Array[]} channels 1 or 2 channels
    * @param {number} sr
    * @param {number} kbps
    * @param {(p:number)=>void} [onProgress] 0..1
+   * @param {{write:(chunk:Uint8Array)=>Promise<void>}} [sink] stream the MP3
+   *        straight into this sink (e.g. an `RSOPFS` writer) instead of
+   *        returning it as one `Uint8Array` — the only way a long batch file
+   *        does not sit fully encoded in the main thread's heap.
    */
-  async function encodeMp3(channels, sr, kbps, onProgress) {
+  async function encodeMp3(channels, sr, kbps, onProgress, sink) {
     const nCh = Math.min(2, channels.length);
     const len = channels[0].length;
     const rate = MP3_RATES.indexOf(sr) === -1 ? mp3RateFor(sr) : sr;
@@ -352,9 +406,11 @@
       }
     }
 
-    if (!worker) return encodeMp3MainThread(channels, rate, kbps, onProgress);
+    if (!worker) return encodeMp3MainThread(channels, rate, kbps, onProgress, sink);
 
-    const parts = [];
+    const out = sink || collectingSink();
+    let firstChunk = null;
+    let bytesWritten = 0;
     const once = () => new Promise((resolve, reject) => {
       worker.onmessage = (e) => (e.data && e.data.ok ? resolve(e.data.data) : reject(new Error('mp3 chunk failed')));
     });
@@ -368,38 +424,55 @@
       const transfer = r ? [l.buffer, r.buffer] : [l.buffer];
       worker.postMessage({ cmd: 'chunk', left: l, right: r, last }, transfer);
       const data = await once();
-      if (data && data.byteLength) parts.push(new Uint8Array(data));
+      if (data && data.byteLength) {
+        const bytes = new Uint8Array(data);
+        if (!firstChunk) firstChunk = bytes;
+        bytesWritten += bytes.length;
+        await out.write(bytes);
+      }
       if (onProgress) onProgress(end / len);
       if (!last) await tick();
     }
     worker.terminate();
-    return finishMp3(concat(parts), rate, len);
+    return finishMp3Stream(out, firstChunk, bytesWritten, rate, len, sink);
   }
 
   /** Same thing without a worker (rare browsers / blocked blob workers). */
-  async function encodeMp3MainThread(channels, rate, kbps, onProgress) {
+  async function encodeMp3MainThread(channels, rate, kbps, onProgress, sink) {
     const lamejs = await Libs.lame();
     const nCh = Math.min(2, channels.length);
     const enc = new lamejs.Mp3Encoder(nCh, rate, kbps);
     const len = channels[0].length;
     const left = channels[0];
     const right = nCh > 1 ? channels[1] : null;
-    const parts = [];
+    const out = sink || collectingSink();
+    let firstChunk = null;
+    let bytesWritten = 0;
     const CHUNK = Math.max(1152 * 4, Math.floor(rate * 1.5));
     for (let off = 0; off < len; off += CHUNK) {
       const end = Math.min(len, off + CHUNK);
       const l = toInt16(left, off, end);
       const r = right ? toInt16(right, off, end) : null;
       const mb = enc.encodeBuffer(l, r);
-      if (mb.length) parts.push(new Uint8Array(mb));
+      if (mb.length) {
+        const bytes = new Uint8Array(mb);
+        if (!firstChunk) firstChunk = bytes;
+        bytesWritten += bytes.length;
+        await out.write(bytes);
+      }
       if (end >= len) {
         const f = enc.flush();
-        if (f.length) parts.push(new Uint8Array(f));
+        if (f.length) {
+          const bytes = new Uint8Array(f);
+          if (!firstChunk) firstChunk = bytes;
+          bytesWritten += bytes.length;
+          await out.write(bytes);
+        }
       }
       if (onProgress) onProgress(end / len);
       await tick();
     }
-    return finishMp3(concat(parts), rate, len);
+    return finishMp3Stream(out, firstChunk, bytesWritten, rate, len, sink);
   }
 
   /**
@@ -412,6 +485,24 @@
     if (!bytes || bytes.length < 128) throw new Error('mp3-empty');
     if (!looksLikeMp3(bytes)) throw new Error('mp3-invalid');
     return { bytes, sampleRate: rate, samples };
+  }
+
+  /**
+   * Same gate as `finishMp3()`, for the streaming encoders: when no external
+   * sink was supplied the internal `collectingSink()` is concatenated and
+   * validated exactly as before (full backward compatibility); when the
+   * caller streamed into their own sink, only the first produced chunk is
+   * inspected — the full stream never needs reassembling in the heap just to
+   * be validated.
+   */
+  function finishMp3Stream(out, firstChunk, bytesWritten, rate, samples, externalSink) {
+    if (!firstChunk) throw new Error('mp3-empty');
+    if (!looksLikeMp3(firstChunk)) throw new Error('mp3-invalid');
+    if (externalSink) {
+      if (bytesWritten < 128) throw new Error('mp3-empty');
+      return { sampleRate: rate, samples, bytesWritten };
+    }
+    return finishMp3(concat(out.parts), rate, samples);
   }
 
   /** Join the MP3 fragments into one contiguous block. */
@@ -481,7 +572,7 @@
   const API = {
     MP3_RATES, mp3RateFor, toInt16, looksLikeMp3,
     decodeArrayBuffer, decodeFile, decodeWithFFmpeg,
-    encodeWav, encodeMp3, makeBuffer, readBlob, blobOf, mimeFor,
+    encodeWav, encodeWavStream, encodeMp3, makeBuffer, readBlob, blobOf, mimeFor,
     zip, download,
     outputName, formatBytes, formatDuration, formatRate, formatDb,
   };

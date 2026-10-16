@@ -79,7 +79,8 @@ The suite is built to be used in a phone browser:
   keep clear of the gesture area.
 * **Smaller memory budget** (420 MB instead of 900 MB estimated output) so a ZIP full of WAVs
   cannot blow up a mobile browser, and a **screen wake lock** keeps the tab alive during a long
-  render.
+  render. When the browser offers the [Origin Private File System](#streaming-batch-exports-opfs),
+  that budget stops being a hard ceiling at all — see below.
 * Verified in a real browser at 320, 360, 390, 414 and 768 px wide — no horizontal scrolling
   anywhere, in `tests/beta/beta.js` and the screenshot matrix in [`docs/beta/`](docs/beta).
 
@@ -203,6 +204,30 @@ Drop as many files as you like. They are processed **one after another** (memory
 the browser stays responsive), every file gets its own card, and *Download ZIP* bundles all
 finished results — with a `README.txt` describing what was done.
 
+#### Streaming batch exports (OPFS)
+
+A dozen 24-bit WAV masters held as plain `ArrayBuffer`s would blow past a tab's soft memory
+budget (420 MB on a phone, 900 MB on a desktop — see [On a phone](#on-a-phone)) long before the
+ZIP is even built. When the browser supports the **Origin Private File System**, the suite avoids
+that entirely instead of just warning about it:
+
+* `assets/js/opfs-manager.js` (`RSOPFS`) opens a `FileSystemSyncAccessHandle` **inside a
+  dedicated Worker** — the one place the spec allows it — and every rendered WAV/MP3 is written
+  there in ~4 MB chunks as it is encoded, never assembled as one in-memory buffer first.
+* *Download ZIP* then assembles the archive **OPFS file → OPFS file**, entirely inside that same
+  worker: a hand-written, streamed ZIP writer (STORE method, CRC-32 computed on the fly, sizes
+  recorded in a trailing data descriptor) copies each source file a chunk at a time straight into
+  the output file. The main thread only ever sees the final `{size}` — never the archive's bytes.
+* The finished file is handed to the browser as a native `File`/`Blob`, so even the download step
+  never duplicates it into the JS heap.
+* Browsers without OPFS (or without `FileSystemSyncAccessHandle` — Safari < 16.4, Firefox < 111,
+  very old Chromium) fall back to the original in-memory path automatically; the UI only shows the
+  soft-memory warning when that fallback is the one actually in use.
+
+`tests/opfs.test.js` runs the *exact worker source* `opfs-manager.js` ships to the browser inside
+a Node `vm` context against a small OPFS simulator, including a multi-megabyte streamed ZIP that
+is cross-checked with both the bundled JSZip and the system `unzip`.
+
 ### Honest A/B
 
 The **Original / Restored / A/B** switch cross-fades between dry and wet *inside* the processor
@@ -290,8 +315,11 @@ parsed to find it), then encodes:
   −1…1 float mix would be written out as a silent file), and the stream is checked for a frame
   header and a plausible length before the download starts
 
-A ZIP containing hundreds of megabytes of WAVs would blow up browser memory, so the app keeps an
-eye on the projected size and warns before you pack.
+A ZIP containing hundreds of megabytes of WAVs would blow up browser memory if it were built from
+plain in-memory buffers — so, where the browser allows it, it isn't: see
+[Streaming batch exports (OPFS)](#streaming-batch-exports-opfs). Where it can't (no OPFS support),
+the app falls back to the original in-memory path and keeps an eye on the projected size, warning
+before you pack.
 
 ---
 
@@ -317,6 +345,9 @@ Full text: *Privacy* in the footer of the app.
 
 ```
 index.html                       the whole interface (markup, templates, dialogs)
+coi-serviceworker.js             cross-origin isolation bootstrap: registers itself as a
+                                 Service Worker that adds COOP/COEP response headers on
+                                 plain static hosting (see Cross-origin isolation, below)
 assets/
   css/app.css                    dark Jamaican-flag theme, responsive, no webfonts
   js/
@@ -325,7 +356,10 @@ assets/
     presets.js                   the six profiles, auto-classification, adaptive tuning (RSPresets)
     i18n.js                      every German and English string, including the legal texts (RSi18n)
     library-loader.js            bundled copies ⇄ free CDNs, optional FFmpeg.wasm (RSLibs)
-    codecs.js                    decode, WAV/MP3 encode, ZIP, download (RSCodecs)
+    opfs-manager.js            Origin Private File System scratch storage: streaming
+                                 WAV/MP3 writers and a streamed ZIP packer, both backed by
+                                 FileSystemSyncAccessHandle in a Worker (RSOPFS)
+    codecs.js                    decode, WAV/MP3 encode (in memory or streamed), ZIP, download (RSCodecs)
     analyzer.js                  file → measurements, diagnosis, waveform envelopes (RSAnalyzer)
     engine.js                    AudioContext + AudioWorklet, live monitor and offline render (RSEngine)
     ui.js                        DOM helpers, toasts, dialogs, interactive waveform (RSUI)
@@ -359,6 +393,14 @@ tests/
   e2e.test.js                    realistic journeys: five problem recordings, slider sweep,
                                  profile overrides, 10-file batch → ZIP, mono/32 k/96 k,
                                  hostile input (108 checks)
+  opfs.test.js                   runs the actual shipped OPFS worker source in a Node vm
+                                 against a simulated Origin Private File System: streaming
+                                 writes, a multi-megabyte streamed ZIP cross-checked with
+                                 JSZip and unzip(1), and the in-memory fallback (28 checks)
+  coi.test.js                    runs the shipped coi-serviceworker.js in a Node vm as both
+                                 a Service Worker (COOP/COEP header rewrite) and a page
+                                 script (registration, the one-reload rule, no reload loop;
+                                 19 checks)
   webaudio-stub.js               miniature Web Audio implementation for Node
   beta/
     beta.js                      the real-browser suite: every control on the page,
@@ -378,7 +420,7 @@ belong to the test suite.
 
 ```bash
 npm install          # only for the test suite (jsdom)
-npm test             # runs all five suites
+npm test             # runs all seven dependency-free suites
 node tests/dsp.test.js     # engine: transparency, sub, air, exciter, de-hiss, de-click,
                            # de-resonator, level match, power scaling, WAV/MP3/ZIP, classification
 node tests/web.test.js     # static integrity, bilingual coverage, boot, drop → analyse → render
@@ -390,6 +432,12 @@ node tests/e2e.test.js     # realistic journeys: five problem recordings, slider
                            # overrides, 10-file batch → ZIP, mono/32 k/96 k, hostile input
 node tests/tuning.test.js  # the tuning contract: octave bands, loudness, the level match, the
                            # soft-clip guard, level-normalised synthesis, honest extremes
+node tests/opfs.test.js    # the shipped OPFS worker source against a simulated file system:
+                           # streaming writes, a streamed ZIP cross-checked with JSZip and
+                           # unzip(1), the oversized-batch guard, the in-memory fallback
+node tests/coi.test.js     # the shipped coi-serviceworker.js as both a Service Worker
+                           # (COOP/COEP header rewrite) and a page script (the one-reload
+                           # rule, never a reload loop)
 node tests/beta/beta.js    # big beta: drives a real headless Chromium over the DevTools
                            # protocol — real clicks, real drops, real AudioWorklet, real
                            # dialogs and downloads, phone emulation at 390 and 320 px with
@@ -426,6 +474,25 @@ engine, not a mock.
 
 Decoding uses the browser's own codecs — MP3, WAV, FLAC, OGG/Vorbis and M4A/AAC all work
 wherever the browser supports them. Anything the browser refuses is handed to FFmpeg.wasm.
+
+### Cross-origin isolation
+
+`SharedArrayBuffer` — which a future multi-threaded FFmpeg.wasm rescue decoder could use — only
+exists on a page that is `crossOriginIsolated`, which in turn needs two response headers
+(`Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Embedder-Policy: require-corp`) that
+plain static hosting such as GitHub Pages cannot send. [`coi-serviceworker.js`](coi-serviceworker.js)
+works around that: loaded as a normal `<script>`, it registers *itself* as a Service Worker (one
+file plays both roles, switching on whether `window` exists), which then rewrites every same-origin
+response to carry those two headers.
+
+A Service Worker only controls pages that load *after* it is active, so turning on isolation for
+an already-open tab needs exactly one reload. The suite only performs that reload after it has
+registered the worker and confirmed one is actually needed (an already-isolated page, a page
+served without TLS, or a browser with no Service Worker support never reloads at all), and shows a
+short, translated toast — *"Hochleistungsmodus wird aktiviert …" / "Turning on the high-performance
+mode …"* — in the moment before it does. `tests/coi.test.js` runs the exact shipped file inside a
+Node `vm`, standing in for both a `ServiceWorkerGlobalScope` and a page `window`, to check the
+header rewrite and every branch of that one-reload logic (including that it never loops).
 
 ---
 

@@ -6,6 +6,30 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Round 23 — infrastructure: cross-origin isolation, and batch exports that stream instead of buffer
+
+**Cross-origin isolation, opportunistically.** [`coi-serviceworker.js`](coi-serviceworker.js) registers itself as a
+Service Worker from a plain `<script>` tag — one file plays both roles, switching on whether `window` exists — and
+that worker rewrites every same-origin response to carry `Cross-Origin-Opener-Policy: same-origin` and
+`Cross-Origin-Embedder-Policy: require-corp`, the two headers plain static hosting (GitHub Pages included) cannot
+send on its own. A Service Worker only controls pages loaded *after* it activates, so the suite performs exactly one
+reload when — and only when — it is actually needed (never on an already-isolated page, a page without TLS, a
+browser without Service Worker support, or a second attempt in the same tab session), and shows a short, translated
+toast in the moment before it does. `tests/coi.test.js` (19 checks) runs the shipped file in a Node `vm`, standing in
+for both a `ServiceWorkerGlobalScope` and a page `window`.
+
+**Batch exports now stream through the Origin Private File System instead of buffering in the heap.** A new
+[`assets/js/opfs-manager.js`](assets/js/opfs-manager.js) (`RSOPFS`) opens a `FileSystemSyncAccessHandle` inside a
+dedicated Worker — the one place the spec allows it — and `codecs.js` gained streaming WAV/MP3 encoders
+(`encodeWavStream`, and a `sink` parameter on `encodeMp3`) that write their output there in ~4 MB chunks as it is
+produced. *Download ZIP* goes a step further: it assembles the archive **OPFS file → OPFS file**, entirely inside
+that worker, with a hand-written streamed ZIP writer (STORE method, CRC-32 computed on the fly, a trailing data
+descriptor instead of a pre-pass) — the main thread never sees more than the final `{size}`. Browsers without OPFS
+fall back to the original in-memory path automatically, and the soft-memory warning now only fires when that
+fallback is the one actually in use. `tests/opfs.test.js` (28 checks) runs the *exact worker source* `opfs-manager.js`
+ships to the browser against a simulated OPFS, including a multi-megabyte streamed ZIP cross-checked with both the
+bundled JSZip and the system `unzip`.
+
 ### Round 22 — the beta suite, complete: every control, the whole journey, and two rows that were the suite's own fault
 
 **The beta is now a full pass over the interface, not a tour of it.** It grew from 63 to **94 checks**, and the two
