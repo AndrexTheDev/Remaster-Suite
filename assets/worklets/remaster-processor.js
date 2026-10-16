@@ -78,8 +78,6 @@ function smoothstep(e0, e1, x) {
   return t * t * (3 - 2 * t);
 }
 
-function db2lin(db) { return Math.pow(10, db / 20); }
-
 /* -------------------------------------------------------------------------- */
 /* biquad (transposed direct form II, RBJ cookbook)                            */
 /* -------------------------------------------------------------------------- */
@@ -112,6 +110,18 @@ class Biquad {
     const w = TWO_PI * clamp(f, 5, sr * 0.49) / sr;
     const c = Math.cos(w), s = Math.sin(w), al = s / (2 * q);
     this._norm(1 + al * A, -2 * c, 1 - al * A, 1 + al / A, -2 * c, 1 - al / A);
+  }
+  /** RBJ notch: exact zero at f, unity gain away from it */
+  setNotch(sr, f, q) {
+    const w = TWO_PI * clamp(f, 5, sr * 0.49) / sr;
+    const c = Math.cos(w), s = Math.sin(w), al = s / (2 * q);
+    this._norm(1, -2 * c, 1, 1 + al, -2 * c, 1 - al);
+  }
+  /** RBJ allpass: unity magnitude at every frequency, phase turns through f */
+  setAllpass(sr, f, q) {
+    const w = TWO_PI * clamp(f, 5, sr * 0.49) / sr;
+    const c = Math.cos(w), s = Math.sin(w), al = s / (2 * q);
+    this._norm(1 - al, -2 * c, 1 + al, 1 + al, -2 * c, 1 - al);
   }
   setLowShelf(sr, f, q, gainDb) {
     const A = Math.pow(10, gainDb / 40);
@@ -280,6 +290,147 @@ class ResoBand {
     this.ramp.set(G);
     this.g = this.ramp.tick();
     return this.g;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* room-drone notch field (200–800 Hz) — adaptive                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Five true notches across 200–800 Hz, about a third of an octave apart. Each
+ * one is mixed in by its *depth*:  y = y − d·(y − N(y)).  At d = 0 the output is
+ * the input itself, and d moves continuously, so no coefficient is changed while
+ * the field is working.
+ *
+ * What opens a notch is a narrow peak, not a loud band. The energy the notch
+ * removes (its own band, Q 4.5) is set against the energy of the octave around
+ * it. A steady room drone stands out of its octave; broadband programme or noise
+ * does not (for white noise the ratio is about 0.63, for a tone in noise it
+ * approaches 1), and a melodic note moves on before the field has settled on it.
+ *
+ * `roomScore` is the analysis's roomResonanceScore (0…1). The gate opens from
+ * 0.2 and is fully open at 0.6. The depth is capped at 0.8 (about −14 dB at a
+ * centre), so a notch can never carve a hole in the programme.
+ */
+const ROOM_NOTCH_HZ = [230, 320, 440, 600, 780];
+const ROOM_NOTCH_Q = 4.5;
+const ROOM_NOTCH_MAX = 0.8;
+const ROOM_DECIM = 16;
+/* the sixth band follows the measured mode (`roomHz`) inside the same field */
+const ROOM_DYN = ROOM_NOTCH_HZ.length;
+const ROOM_NOTCH_LO = 230, ROOM_NOTCH_HI = 780;
+const ROOM_GATE_LO = 0.2, ROOM_GATE_HI = 0.6;
+
+class RoomNotchField {
+  constructor(sr) {
+    this.sr = sr;
+    this.centre = [...ROOM_NOTCH_HZ, 500];
+    this.notch = this.centre.map((f) => { const b = new Biquad(); b.setNotch(sr, f, ROOM_NOTCH_Q); return b; });
+    this.wide = this.centre.map((f) => { const b = new Biquad(); b.setBandpass(sr, f, 1.2); return b; });
+    this.envN = this.centre.map(() => new EnvFollower(sr, 0.006, 0.090, ROOM_DECIM));
+    this.envW = this.centre.map(() => new EnvFollower(sr, 0.006, 0.090, ROOM_DECIM));
+    this.ramp = this.centre.map(() => new Ramp(ROOM_DECIM, 0));
+    this.scale = 0;
+    this.dynScale = 0;
+    this.reset();
+  }
+  reset() {
+    for (let i = 0; i < this.centre.length; i++) {
+      this.notch[i].reset(); this.wide[i].reset();
+      this.envN[i].v = 0; this.envW[i].v = 0;
+      this.ramp[i].reset(0);
+    }
+  }
+  /**
+   * per block: `amount` 0…1 from the profile, `score` = roomResonanceScore,
+   * `hz` = the strongest measured mode in 230–780 Hz (0 = none). The gate is
+   * one smooth curve (no hard edge), and the dynamic band is re-tuned to `hz`
+   * only when the measured frequency moves by more than 1 Hz.
+   */
+  setGain(amount, score, hz) {
+    const gate = smoothstep(ROOM_GATE_LO, ROOM_GATE_HI, score);
+    const base = clamp(amount, 0, 1) * gate * ROOM_NOTCH_MAX;
+    this.scale = base;
+    const inField = hz >= ROOM_NOTCH_LO && hz <= ROOM_NOTCH_HI;
+    this.dynScale = inField ? base : 0;
+    if (inField && Math.abs(hz - this.centre[ROOM_DYN]) > 1) {
+      this.centre[ROOM_DYN] = hz;
+      this.notch[ROOM_DYN].setNotch(this.sr, hz, ROOM_NOTCH_Q);
+      this.wide[ROOM_DYN].setBandpass(this.sr, hz, 1.2);
+    }
+  }
+  tick(x) {
+    let y = x;
+    for (let i = 0; i < this.centre.length; i++) {
+      const sc = i === ROOM_DYN ? this.dynScale : this.scale;
+      const yi = y;
+      const nOut = this.notch[i].process(yi);
+      const band = yi - nOut;
+      const bw = this.wide[i].process(yi);
+      const eN = this.envN[i].tick(band < 0 ? -band : band);
+      const eW = this.envW[i].tick(bw < 0 ? -bw : bw);
+      // narrow share of the octave: 0 for noise, → 1 for a stationary tone
+      const r = eN / (eW + 1e-9);
+      const onset = clamp((r - 0.7) * 4, 0, 1);
+      this.ramp[i].set(onset * sc);
+      const d = this.ramp[i].tick();
+      y = yi - d * (yi - nOut);
+    }
+    return y;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* phase-coherent allpass stereo synthesis (mono input only)                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A mono recording has no side signal, and every width stage in the chain
+ * works on the side. This one makes one: S(t) = AP-chain(HP200(M)), the mid
+ * high-passed at 200 Hz and run through four second-order allpass sections at
+ * 420, 900, 1.9 k and 4.2 kHz. An allpass has unity magnitude, so the *spectrum*
+ * of the mid is not coloured by it — only its phase is turned, frequency by
+ * frequency. That is what makes the image decorrelated without a comb or a
+ * tonal colouring.
+ *
+ *     L = l + g·S        R = r − g·S        ⇒  L + R = l + r  exactly
+ *
+ * so the sum (mono compatibility) is preserved to the last bit below the soft-clip
+ * knee, and the bass below 200 Hz gets almost no side: an eighth-order high-pass
+ * is the only way into it (the 200 Hz edge itself is −6 dB, as in any crossover).
+ * The amount `g` = 0.5·monoSpread·monoWeight. `monoWeight` is 1 when the block's
+ * side is at least 40 dB under its mid (a mono file, or one folded to two
+ * identical channels), 0 at 30 dB and above (a real stereo mix), and is
+ * smoothed over about 50 ms. A genuine stereo signal therefore gets g = 0 and
+ * passes through unchanged. The synthesis is not fed back into its own
+ * detector: the decision is taken on the chain's output, before this stage
+ * touches it.
+ */
+const SPREAD_AP_HZ = [420, 900, 1900, 4200];
+
+class AllpassSpread {
+  constructor(sr) {
+    this.sr = sr;
+    // eighth-order Butterworth high-pass at 200 Hz (four sections): the side is
+    // −20 dB at 150 Hz and −40 dB by 110 Hz, so the bass stays centred
+    this.hp = [0.5412, 1.3066, 0.5412, 1.3066].map((q) => { const b = new Biquad(); b.setHighpass(sr, 200, q); return b; });
+    this.ap = SPREAD_AP_HZ.map((f) => { const b = new Biquad(); b.setAllpass(sr, f, 0.7); return b; });
+    this.monoW = 0;
+    this.gain = 0;
+    this.reset();
+  }
+  reset() {
+    for (const b of this.hp) b.reset();
+    for (const b of this.ap) b.reset();
+    this.gain = 0;
+  }
+  /** the side signal that goes with mid sample m */
+  side(m) {
+    let s = m;
+    for (let i = 0; i < this.hp.length; i++) s = this.hp[i].process(s);
+    for (let i = 0; i < this.ap.length; i++) s = this.ap[i].process(s);
+    return s;
   }
 }
 
@@ -565,7 +716,6 @@ class SubSynth {
 /* De-esser: dynamic sibilance control (see the class below)                    */
 /* -------------------------------------------------------------------------- */
 
-const DEESS_DECIM = 4;
 /**
  * How long a detected sibilant stays corrected, in milliseconds.
  *
@@ -1375,9 +1525,20 @@ class DeClipper {
   }
   tick(x, amount, level) {
     if (amount <= 0.0001 || level <= 0.02) {
-      this.th = 1;                                       // dormant: a run can never match
+      // dormant: a run can never match. The stage still delays by `look` — the
+      // same structure as when engaged — so switching it on or off mid-stream
+      // does not move the waveform by `look` samples (measured as a 212x click)
+      this.th = 1;
       this.armed = false;
-      return x;
+      const L = this.ring.length;
+      this.ring[this.w] = x;
+      this.mark[this.w] = 0;
+      const out = this.ring[(this.w - this.look + L) % L];
+      this.marked = false;
+      this.prev = x;
+      this.w = (this.w + 1) % L;
+      this.pos++;
+      return out;
     }
     // ── 1 · track the local period from the zero crossings ─────────────────
     if ((x > 0 && this.prev <= 0) || (x < 0 && this.prev >= 0)) {
@@ -1523,6 +1684,9 @@ class DeClipper {
  * measured bound rather than a claim, pinned by the audit's `dropouts` section
  * and by the acceptance matrix's `dropouts` rows.
  */
+/** Decay time constants (ms) that fitTail() tries; a module constant so the fit allocates nothing. */
+const FIT_TAU_MS = [0.4, 0.6, 1.0, 1.5, 2.5, 4];
+
 class DeClicker {
   constructor(sr) {
     this.sr = sr;
@@ -1702,9 +1866,11 @@ class DeClicker {
     let yy = 0;
     for (let k = 2; k <= tail; k++) { const y = this.at(pos + k); yy += y * y; }
     if (!(yy > 1e-12)) return null;
-    const dec = new Float64Array(tail + 1);
+    // reused: every entry is written below before it is read, and a detection must not allocate
+    if (!this._dec || this._dec.length !== tail + 1) this._dec = new Float64Array(tail + 1);
+    const dec = this._dec;
     let best = null;
-    for (const tauMs of [0.4, 0.6, 1.0, 1.5, 2.5, 4]) {
+    for (const tauMs of FIT_TAU_MS) {
       const tauS = sr * tauMs * 1e-3, d = Math.exp(-1 / tauS);
       let w2 = 0, e = 1;
       for (let k = 0; k <= tail; k++) { dec[k] = e; if (k >= 2) w2 += e * e; e *= d; }
@@ -1729,16 +1895,20 @@ class DeClicker {
   }
   tick(x, amount, reconstructed, clipLevel) {
     if (amount <= 0.0001) {
-      this.inp = x; this.dryOut = x;
+      this.inp = x;
       this.prevIn2 = this.prevIn; this.prevIn = x;
       this.plateauPrev = false; this.reconPrev = false;
       /* The delay line stays current while the stage is bypassed — engaging it
        * mid-file must not fit a window of stale samples — and whatever the tail
-       * stage was holding is dropped. */
+       * stage was holding is dropped. The output is the `look`-old sample, the
+       * same structure as when engaged, so toggling does not shift the signal. */
+      const L = this.ring.length;
       this.ring[this.w] = x; this.plan[this.w] = 0; this.mark[this.w] = 0;
-      this.w = (this.w + 1) % this.ring.length; this.n++;
+      const out = this.ring[(this.w - this.look + L) % L];
+      this.dryOut = out;
+      this.w = (this.w + 1) % L; this.n++;
       this.ev.length = 0; this.rings.length = 0;
-      return x;
+      return out;
     }
     // ── 1 · the detector, on the sample that just arrived ──────────────────
     const pd = this.dp2.process(this.dp1.process(x));
@@ -2137,6 +2307,12 @@ class GlueComp {
   }
 }
 
+/* the continuity check's clock: statistics every HUM_TRACK_D samples          */
+const HUM_TRACK_D = 32;
+const HUM_TRACK_K = 75;           // frequency baseline: 75 × 32 / 48 kHz ≈ 50 ms
+const HUM_TRACK_LEVEL = 1e-4;     // below this the line is absent: nothing to protect
+const HUM_TRACK_COH = 0.8;        // below this the line is noise, not a tone: no relaxing
+
 /**
  * Mains hum: a narrow notch at 50/60 Hz plus its 2nd and 3rd harmonic.
  *
@@ -2150,19 +2326,136 @@ class GlueComp {
  * 50.25 Hz — and a razor-thin notch would leave the shoulder behind while
  * removing a slice of the bass.
  */
+/**
+ * Hum notch with a continuity check.
+ *
+ * A mains line is *stationary*: its amplitude is steady and its frequency sits
+ * still, give or take a fraction of a hertz of mains drift. A musical tone near
+ * 50 or 60 Hz is not — it vibrates, glides, swells and stops. A notch set to the
+ * line cannot tell the two apart and takes the note out with the hum.
+ *
+ * So the line is tracked. The input is multiplied by a reference at the mains
+ * frequency, which gives the complex amplitude z(t) of the line. z is averaged
+ * over exactly one period of the second harmonic (a boxcar of sr / 2f0 samples,
+ * 480 at 50 Hz, 400 at 60 Hz): its zeros sit on 2f0 and every multiple of it, so
+ * the 100 Hz ripple of the product is gone while a 5 Hz vibrato passes almost
+ * untouched. The frequency of z over the last 50 ms gives σf, the deviation about
+ * its mean, and the magnitude of z gives the amplitude modulation index AM. Both
+ * are averaged over about half a second.
+ *
+ * The continuity factor is 1 for a stationary line (σf ≤ 0.15 Hz and AM ≤ 0.10)
+ * and falls to 0 at σf ≥ 0.45 Hz or AM ≥ 0.35. The notch depths are multiplied
+ * by it, so the notch relaxes on a modulated tone and returns to full depth when
+ * the line is steady again. A 0.5 % mains drift is not a modulation: it is a
+ * constant offset, and only its variation counts.
+ */
 class HumNotch {
   constructor(sr) {
     this.sr = sr;
     this.cut = [new Biquad(), new Biquad(), new Biquad()];
     this.lastHz = 0;
     this.last = [2, 2, 2];         // impossible values → the first prepare() sets up
+    this.decB = 1 - Math.exp(-HUM_TRACK_D / (sr * 0.5));    // half-second statistics
+    this.contB = 1 - Math.exp(-HUM_TRACK_D / (sr * 0.3));   // factor smoothing
+    this.cohB = 1 - Math.exp(-HUM_TRACK_D / (sr * 0.05));   // coherence: 50 ms
+    this.ezr = 0; this.ezi = 0; this.coh = 0;
+    this.hist = new Float64Array(2 * HUM_TRACK_K);
+    this._setLine(50);
+    this.resetTrack();
+  }
+  _setLine(f0) {
+    const w = TWO_PI * f0 / this.sr;
+    this.rc = Math.cos(w); this.rs = Math.sin(w);
+    this.L = Math.max(2, Math.round(this.sr / (2 * f0)));
+    this.bufR = new Float64Array(this.L);
+    this.bufI = new Float64Array(this.L);
   }
   set(f0) {
     if (f0 === this.lastHz) return;
     this.lastHz = f0;
+    this._setLine(f0);
+    this.resetTrack();
     this.last = [2, 2, 2];         // force the next prepare() to recompute
   }
-  reset() { for (const b of this.cut) b.reset(); }
+  resetTrack() {
+    this.oc = 1; this.os = 0;      // reference e^{−jωt}
+    this.bufR.fill(0); this.bufI.fill(0);
+    this.bufIdx = 0; this.sumR = 0; this.sumI = 0;
+    this.zr = 0; this.zi = 0;
+    this.hist.fill(0); this.hIdx = 0; this.nHist = 0;
+    this.warm = HUM_TRACK_K + Math.ceil(this.L / HUM_TRACK_D) + 1;
+    this.n = 0;
+    this.mu = 0; this.vf = 0;      // frequency mean and variance (Hz²)
+    this.mm = 0; this.vm = 0;      // magnitude mean and variance
+    this.started = false;          // the means start at the first real measurement
+    this.cont = 1;                 // continuity factor, 1 = stationary
+  }
+  reset() {
+    for (const b of this.cut) b.reset();
+    this.resetTrack();
+  }
+  /** per sample, before the notch: follows the mains line */
+  track(x) {
+    const oc = this.oc, os = this.os;
+    const aR = x * oc, aI = x * os;          // x · e^{−jωt}
+    const k = this.bufIdx;
+    this.sumR += aR - this.bufR[k];
+    this.sumI += aI - this.bufI[k];
+    this.bufR[k] = aR; this.bufI[k] = aI;
+    this.bufIdx = k + 1 === this.L ? 0 : k + 1;
+    this.zr = this.sumR / this.L;
+    this.zi = this.sumI / this.L;
+    // advance the reference: (oc + j·os)·(rc − j·rs)
+    this.oc = oc * this.rc + os * this.rs;
+    this.os = os * this.rc - oc * this.rs;
+    if (++this.n < HUM_TRACK_D) return;
+    this.n = 0;
+    const on = Math.sqrt(this.oc * this.oc + this.os * this.os) || 1;
+    this.oc /= on; this.os /= on;            // keep the reference on the unit circle
+    this._stats(this.zr, this.zi);
+  }
+  _stats(zr, zi) {
+    // ring of the last K values: the slot about to be overwritten holds z of K steps ago
+    const K = HUM_TRACK_K, h = this.hist, j = this.hIdx;
+    const oR = h[2 * j], oI = h[2 * j + 1];
+    h[2 * j] = zr; h[2 * j + 1] = zi;
+    this.hIdx = j + 1 === K ? 0 : j + 1;
+    // hold the statistics until the boxcar is full and the baseline holds real
+    // values only (the first K + one period of decimated steps are start-up)
+    // until a line is actually present, the warm-up is not counted: a tone that
+    // starts late (after the delay lines' zeros, or after silence) needs its full
+    // window of its own before the statistics mean anything — counting the
+    // silence in front of it made the first real samples read as a transient
+    if (!this.started && Math.sqrt(zr * zr + zi * zi) <= HUM_TRACK_LEVEL) { this.nHist = 0; return; }
+    if (this.nHist < this.warm) { this.nHist++; return; }
+    // frequency over the baseline: arg(z · conj(z_then)) / (2π · T)
+    const T = K * HUM_TRACK_D / this.sr;
+    const df = Math.atan2(zi * oR - zr * oI, zr * oR + zi * oI) / (TWO_PI * T);
+    const mag = Math.sqrt(zr * zr + zi * zi);
+    // start the means at the first measurement: a mean that rises from zero
+    // reads its own rise as modulation and would hold the notch back for seconds
+    if (!this.started) { this.started = true; this.mu = df; this.mm = mag; }
+    // coherence: how much of the line's amplitude adds up coherently over
+    // 50 ms. A tone, steady or vibrating, is coherent; a bass line buried in
+    // programme is a random phasor, and nothing in it can be called a tone
+    this.ezr += (zr - this.ezr) * this.cohB;
+    this.ezi += (zi - this.ezi) * this.cohB;
+    this.coh = Math.hypot(this.ezr, this.ezi) / (mag + 1e-12);
+    const b = this.decB;
+    this.mu += (df - this.mu) * b;
+    const dev = df - this.mu;
+    this.vf += (dev * dev - this.vf) * b;
+    this.mm += (mag - this.mm) * b;
+    const dm = mag - this.mm;
+    this.vm += (dm * dm - this.vm) * b;
+    let target = 1;
+    if (this.mm > HUM_TRACK_LEVEL && this.coh > HUM_TRACK_COH) {
+      const sf = Math.sqrt(this.vf);
+      const am = Math.sqrt(this.vm) / (this.mm + 1e-12);
+      target = clamp((0.45 - sf) / 0.30, 0, 1) * clamp((0.35 - am) / 0.25, 0, 1);
+    }
+    this.cont += (target - this.cont) * this.contB;
+  }
   prepare(d1, d2, d3, f0) {
     if (d1 === this.last[0] && d2 === this.last[1] && d3 === this.last[2]) return;
     this.last = [d1, d2, d3];
@@ -2293,7 +2586,10 @@ class TruePeakLimiter {
     // sixteen samples the interpolator needs to see *past* the interval it
     // judges (ISP_TAPS/2; the kernel is symmetric, so half of it is future)
     const look = Math.max(8, Math.round(sr * 0.0015));
-    const delay = on ? look + ISP_TAPS / 2 : 0;
+    // the delay is the same whether or not the ceiling is on: a limiter that is
+    // off still passes the signal through its ring, so switching it does not
+    // move the waveform (or the latency the engine has to match)
+    const delay = look + ISP_TAPS / 2;
     const len = delay + ISP_TAPS + 8;
     if (delay !== this.delay || this.ring.length !== nCh) {
       this.ring = [];
@@ -2348,8 +2644,21 @@ class TruePeakLimiter {
    * down with it and the stereo image stays put.
    */
   processBlock(dst, nCh, frames) {
-    if (!this.on) return;
     const len = this.len, D = this.delay, lim = this.lim, cap = this.dqG.length;
+    if (!this.on) {
+      // off: a pure delay through the same ring — no gain, no peak search
+      const nOff = Math.min(nCh, this.ring.length);
+      for (let i = 0; i < frames; i++) {
+        const w = this.w;
+        for (let c = 0; c < nOff; c++) {
+          this.ring[c][w] = dst[c][i];
+          dst[c][i] = this.ring[c][(w - D + len) % len];
+        }
+        this.w = w + 1 === len ? 0 : w + 1;
+      }
+      this.pos += frames;
+      return;
+    }
     const n = Math.min(nCh, this.ring.length);
     for (let i = 0; i < frames; i++) {
       const w = this.w;
@@ -2492,6 +2801,8 @@ class ChannelChain {
     // between two probes; the low mids get slightly tighter filters
     this.reso = [[220, 2.4], [380, 2.3], [660, 2.2], [1150, 2.1], [1900, 2.0], [3100, 1.8]]
       .map((b) => new ResoBand(sr, b[0], b[1]));
+    // adaptive room-drone notches, 200–800 Hz (opened by roomScore; see RoomNotchField)
+    this.roomNotch = new RoomNotchField(sr);
 
     // harmonic exciter — three bands generate the octave above their input
     this.exc = [
@@ -2586,6 +2897,7 @@ class ChannelChain {
     for (const e of this.ceq) { e.bq.reset(); e.last = 1e9; }
     this.deess.reset();
     for (const r of this.reso) r.reset();
+    this.roomNotch.reset();
     for (const e of this.exc) e.reset();
     this.air.reset(); this.sub.reset(); this.hiss.reset();
     this.declip.reset();
@@ -2651,7 +2963,11 @@ class ChannelChain {
       this.humHz = p.humHz;
       this.humNotch.set(p.humHz);
     }
-    this.humNotch.prepare(this.humDepth, this.humDepth2, this.humDepth3, this.humHz);
+    // the continuity factor relaxes the notch on a modulated tone (see HumNotch)
+    const hc = this.humNotch.cont;
+    this.humNotch.prepare(this.humDepth * hc, this.humDepth2 * hc, this.humDepth3 * hc, this.humHz);
+
+    this.roomNotch.setGain(p.roomNotch, p.roomScore, p.roomHz);
 
     // the two strongest measured resonances, notched precisely
     const boxDefs = [[p.boxF1, p.boxQ1, p.boxG1], [p.boxF2, p.boxQ2, p.boxG2]];
@@ -2757,6 +3073,11 @@ class ChannelChain {
       }
     }
 
+    // 2a ── adaptive room-drone notches, 200–800 Hz (only on a measured room score)
+    // (the field's own gate is smooth from roomScore 0.2 to 0.6, so this
+    // check only skips the work when the field can add nothing)
+    if (p.roomNotch > 0.0001 && p.roomScore > 0.2) y = this.roomNotch.tick(y);
+
     // 3 ── noise repair, most impulsive first. The de-clicker *has* to see the
     // pop's own shape: a pop is broadband, so any stage in front of it that
     // works on the top end eats part of it and leaves a remainder too small for
@@ -2795,7 +3116,15 @@ class ChannelChain {
     if (p.air > 0.0001 && drive > 0.001) {
       const ds = this.air.control(y);
       const h = this.air.tick(y, 2.6 * drive, this.airRoom);
-      y += h * p.air * ds * this.air.prog * drive * AIR_MIX;
+      // The level of the synthesised band (codec loss: +2.5 dB). Its harmonics
+      // come from the 4.6–7.5 kHz band by squaring and cubing, so a sibilant
+      // burst in that band lands its products in 9–15 kHz: the harsh top end.
+      // The de-esser's gain `ds` is 1 on normal material and falls on a hot
+      // sibilant; the extra level follows it squared, so the boost is withdrawn
+      // exactly where those products would be added. Intermodulation guard.
+      const boost = p.airGainDb ? Math.pow(10, p.airGainDb / 20) : 1;
+      const airG = 1 + (boost - 1) * ds * ds;
+      y += h * p.air * ds * this.air.prog * drive * AIR_MIX * airG;
     }
 
     // 6 ── sub-harmonic synthesis (30–60 Hz)
@@ -2842,7 +3171,10 @@ class ChannelChain {
     // hum and then let the chain put part of it back (10 dB of notch measured as
     // 3 dB of repair). Placed last, the notch has the final word, and it is
     // still three biquads, bypassed completely when nothing was measured.
-    if (p.hum > 0.0001 || p.hum2 > 0.0001 || p.hum3 > 0.0001) y = this.humNotch.tick(y);
+    if (p.hum > 0.0001 || p.hum2 > 0.0001 || p.hum3 > 0.0001) {
+      this.humNotch.track(y);
+      y = this.humNotch.tick(y);
+    }
     return y;
   }
 }
@@ -2895,7 +3227,12 @@ class RemasterProcessor extends AudioWorkletProcessor {
       k('boxF2', 400, 80, 2000),        // measured resonance 2 · frequency
       k('boxQ2', 3, 1, 10),             // measured resonance 2 · sharpness
       k('width', 0),                    // stereo width restoration (M/S, above 200 Hz)
+      k('roomScore', 0),                // measured roomResonanceScore 0…1 (opens the room notches)
+      k('roomNotch', 0),                // room-drone notch field 200–800 Hz · depth 0…1
+      k('roomHz', 0, 0, 1000),          // strongest measured mode in the field (0 = none); the dynamic band follows it
+      k('monoSpread', 0),               // allpass stereo synthesis for mono input · 0…1
       k('airRoom', 0.5, 0.3, 1.2),      // ceiling of the synthesised band vs its source
+      k('airGainDb', 0, 0, 6),          // level of the synthesised band, dB (codec loss: +2)
       k('airF', 6000, 2000, 8000),      // where the missing top end is derived from
       k('noiseFloor', -70, -100, -20),  // measured broadband noise floor (dBFS)
       k('hissFloor', -80, -110, -20),   // measured high-frequency noise floor (dBFS)
@@ -2947,7 +3284,8 @@ class RemasterProcessor extends AudioWorkletProcessor {
       power: 0, bypass: 1, sub: 0, subRatio: 0.5, exciter: 0, air: 0, dehiss: 0,
       declip: 0, declipLevel: -0.1, declick: 0, reso: 0, glue: 0, warmth: 0, tilt: 0,
       hum: 0, hum2: 0, hum3: 0, humHz: 50, boxF1: 200, boxQ1: 3, boxG1: 0, boxF2: 400, boxQ2: 3, boxG2: 0,
-      width: 0, airRoom: 0.5, airF: 6000, hissTilt: 0, hissMax: 0, refDb: 0, refLin: 1,
+      width: 0, airRoom: 0.5, airGainDb: 0, airF: 6000, hissTilt: 0, hissMax: 0, refDb: 0, refLin: 1,
+      roomScore: 0, roomNotch: 0, roomHz: 0, monoSpread: 0,
       bands: [0, 0, 0, 0, 0, 0], noiseLin: 1e-4, hfNoiseLin: 1e-5, autoLevel: 1,
       infraHP: 0, deess: 0, bassMono: 0, glueTime: 0.5, hissF: 3200,
       ceq: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -2956,6 +3294,8 @@ class RemasterProcessor extends AudioWorkletProcessor {
     // where it was (and a mono file has nothing to widen in the first place)
     this.sideHP = new Biquad();
     this.sideHP.setHighpass(this.sr, 200, 0.707);
+    // mono → stereo: phase-coherent allpass side (see AllpassSpread)
+    this.spread = new AllpassSpread(sampleRate);
     // The mono-maker's low-pass: the side signal's bottom is what an out-of-phase
     // bass lives in, and folding it into the centre is the repair (a mono bass
     // cannot cancel itself in a mono playback). It is the *same* one-pole the
@@ -2976,6 +3316,7 @@ class RemasterProcessor extends AudioWorkletProcessor {
     this.powerSm = 0;
     this.powerInit = false;      // the first block adopts the target (see process)
     this.forceBypass = !!opts.bypass;
+    this._latencySent = -1;
     this._ensureChannels(opts.channels || 2);
     this.port.onmessage = (ev) => {
       const d = ev.data || {};
@@ -3031,7 +3372,12 @@ class RemasterProcessor extends AudioWorkletProcessor {
     pr.boxG1 = g('boxG1', 0); pr.boxF1 = g('boxF1', 200); pr.boxQ1 = g('boxQ1', 3);
     pr.boxG2 = g('boxG2', 0); pr.boxF2 = g('boxF2', 400); pr.boxQ2 = g('boxQ2', 3);
     pr.width = g('width', 0);
+    pr.roomScore = g('roomScore', 0);
+    pr.roomNotch = g('roomNotch', 0);
+    pr.roomHz = g('roomHz', 0);
+    pr.monoSpread = g('monoSpread', 0);
     pr.airRoom = g('airRoom', 0.5);
+    pr.airGainDb = g('airGainDb', 0);
     pr.airF = g('airF', 6000);
     pr.hissTilt = g('hissTilt', 0);
     pr.hissMax = g('hissMax', 0);
@@ -3066,19 +3412,27 @@ class RemasterProcessor extends AudioWorkletProcessor {
     this._ensureChannels(nCh);
     for (let c = 0; c < nCh; c++) this.chains[c].prepare(pr);
 
-    // Three stages hold their output back — the de-clipper while it is armed,
-    // the de-clicker for its half millisecond and the true-peak limiter for its
-    // look-ahead — so the chain delays whatever follows by that much. This is the number any caller comparing output with
-    // input has to line the two up by, or it measures the delay instead of the
+    // Three stages hold their output back — the de-clipper (its look-ahead, 271
+    // samples at 48 kHz), the de-clicker (65) and the true-peak limiter (88) — so
+    // the chain delays whatever follows by their sum: 424 samples at 48 kHz, the
+    // measured total. This is the number any caller comparing output with input
+    // has to line the two up by, or it measures the delay instead of the
     // processing; `H.renderEx` in the test harness hands it to the suites.
     const bypassedNow = this.forceBypass || pr.bypass > 0.5 || pr.power < 1e-4;
     this.tp.set(this.sr, nCh, pr.tpCeil);
+    // Constant while the chain is running: each look-ahead stage holds its
+    // output back whether it is engaged or not, so the number does not depend
+    // on the declip / declick toggles (switching them moved the waveform).
     const delay = bypassedNow ? 0
-      : (pr.declip > 0.0001 && pr.declipLevel > -60 ? this.chains[0].declip.look : 0)
-        + (pr.declick > 0.0001 ? this.chains[0].click.look : 0)
-        + this.tp.delay;
+      : this.chains[0].declip.look + this.chains[0].click.look + this.tp.delay;
     for (let c = 0; c < nCh; c++) this.chains[c].delay = delay;
     this.latency = delay;
+    // the engine delays its dry monitor path by exactly this many samples, so it
+    // is reported whenever it changes (and once, at the first block)
+    if (delay !== this._latencySent) {
+      this._latencySent = delay;
+      this.port.postMessage({ type: 'latency', samples: delay });
+    }
 
     const inCh = input && input.length ? input.length : 0;
     const frames = output[0].length;
@@ -3267,6 +3621,40 @@ class RemasterProcessor extends AudioWorkletProcessor {
           chain.alGain += (clamp(target, 0.25, 2.5) - chain.alGain) * 0.12;
         }
       }
+    }
+
+      // ── phase-coherent stereo synthesis for mono input ─────────────────────
+    // Runs before the width stage and only when asked for. The decision is made
+    // on the chain's own output, so the synthesis cannot switch itself off.
+    // L + R stays equal to l + r by construction.
+    if (nCh >= 2 && !bypassed && pr.monoSpread > 0.0001) {
+      const L = output[0], R = output[1];
+      const sp = this.spread;
+      let sE = 0, mE = 0;
+      for (let i = 0; i < frames; i++) {
+        const m = (L[i] + R[i]) * 0.5, sd = (L[i] - R[i]) * 0.5;
+        mE += m * m; sE += sd * sd;
+      }
+      const dbSM = 10 * Math.log10((sE + 1e-20) / (mE + 1e-20));
+      // ≤ −40 dB side → mono (1); ≥ −30 dB → stereo (0)
+      const monoT = clamp((-30 - dbSM) / 10, 0, 1);
+      sp.monoW += (monoT - sp.monoW) * (1 - Math.exp(-frames / (this.sr * 0.05)));
+      const gEnd = 0.5 * clamp(pr.monoSpread, 0, 1) * sp.monoW;
+      const gStart = sp.gain;
+      const kn = knee, kr = krng;
+      // off on both ends of the block: the samples are not touched at all, so a
+      // stereo mix stays bit-exact (the guard below is not applied twice)
+      if (gStart > 0 || gEnd > 0) for (let i = 0; i < frames; i++) {
+        const l = L[i], r = R[i];
+        const m = (l + r) * 0.5;
+        const g = gStart + (gEnd - gStart) * ((i + 1) / frames);
+        const S = sp.side(m);
+        let lo = l + g * S, ro = r - g * S;
+        if (lo > kn) lo = kn + kr * ftanh((lo - kn) / kr);
+        if (ro > kn) ro = kn + kr * ftanh((ro - kn) / kr);
+        L[i] = lo; R[i] = ro;
+      }
+      sp.gain = gEnd;
     }
 
       // ── stereo width restoration ────────────────────────────────────────────

@@ -228,6 +228,102 @@
     };
   }
 
+  /**
+   * Where the restoration changed the audio, per horizontal bucket of a preview
+   * window — the highlights the waveform draws over the two halves.
+   *
+   *   clicks  a spike was taken out: the bucket's crest factor (peak over RMS)
+   *           fell by more than 4 dB, and the spike was well above the music
+   *           (crest > 14 dB before). A click is a crest, not a level change.
+   *   bright  the top end (above 8 kHz) took a larger share of the bucket's
+   *           energy: its energy ratio (band above 8 kHz over the full band)
+   *           rose by more than 3 dB, and the band has real content (its level
+   *           is above −60 dBFS). A ratio, not a level: a louder bucket with the
+   *           same tilt is not "bright", and a rise in the band the source
+   *           already had is the sheen a codec-cut master gets back (or a fake
+   *           one, which is what the bandwidth-extension rows in
+   *           tools/acceptance.js check against). The previous metric was the
+   *           RMS of the first difference, which is not band-limited and moved
+   *           with any level change.
+   *
+   * Column resolution: a bucket is ~28 ms on a 40 s window, so the 2–9 ms the
+   * chain's look-ahead adds does not move a highlight off its bucket.
+   *
+   * @param {Float32Array[]} before the original's window channels
+   * @param {Float32Array[]} after  the rendered window channels
+   * @param {number} buckets
+   * @param {number} [sr=48000]     sample rate, for the 8 kHz split
+   * @returns {{clicks:Uint8Array, bright:Uint8Array}}
+   */
+  /* Click thresholds, calibrated on synthetic platter clicks (2 ms damped 2.5 kHz
+   * bursts over a pink bed) at the app's real resolution (40 s in 1400 buckets,
+   * ~28 ms each), against a limiter that trims sharp 80 Hz kick transients by up
+   * to 3 dB. Crest gate 14 → 10 dB: ×6-bed clicks 30 → 48 of 120, ×8 95 → 104 of
+   * 120, limiter false positives 0 at either setting. Below 6 dB nothing changes.
+   * ×4-bed clicks stay mostly undetected (8 of 120): at that level the click
+   * barely clears the bed's own crest, so this metric cannot separate them. The
+   * drop gate stays at 4 dB (3 dB gave false positives on the limiter). Real
+   * platter recordings were not available to calibrate against. */
+  const CLICK_MIN_CREST_DB = 10, CLICK_MIN_DROP_DB = 4;
+  function correctionMap(before, after, buckets, sr) {
+    const n = Math.min(before[0].length, after[0].length);
+    const clicks = new Uint8Array(buckets), bright = new Uint8Array(buckets);
+    const hpB = topBandPerChannel(before, sr || 48000, n);
+    const hpA = topBandPerChannel(after, sr || 48000, n);
+    const stat = (chs, hp, s, e) => {
+      let peak = 0, sq = 0, eAll = 0, eHf = 0, cnt = 0;
+      for (let c = 0; c < Math.min(chs.length, hp.length); c++) {
+        const x = chs[c], h = hp[c];
+        for (let i = s; i < e; i++) {
+          const v = x[i], a = v < 0 ? -v : v;
+          if (a > peak) peak = a;
+          sq += v * v;
+          eAll += v * v;
+          eHf += h[i] * h[i];
+          cnt++;
+        }
+      }
+      const rms = Math.sqrt(sq / Math.max(1, cnt));
+      return {
+        crest: peak > 1e-9 && rms > 1e-9 ? 20 * Math.log10(peak / rms) : 0,
+        peak,
+        share: eAll > 1e-18 ? eHf / eAll : 0,
+        hfDb: 10 * Math.log10(eHf / Math.max(1, cnt) + 1e-18),   // 20·log10 of the band's RMS
+      };
+    };
+    for (let k = 0; k < buckets; k++) {
+      const s = Math.floor((k * n) / buckets), e = Math.floor(((k + 1) * n) / buckets);
+      if (e <= s) continue;
+      const b = stat(before, hpB, s, e), a = stat(after, hpA, s, e);
+      if (b.crest - a.crest > CLICK_MIN_DROP_DB && b.crest > CLICK_MIN_CREST_DB && b.peak > 0.02) clicks[k] = 1;
+      const ratioDb = 10 * Math.log10((a.share + 1e-12) / (b.share + 1e-12));
+      if (ratioDb > 3 && a.hfDb > -60) bright[k] = 1;
+    }
+    return { clicks, bright };
+  }
+
+  /**
+   * The energy above 8 kHz of each channel: a 2nd-order Butterworth high-pass
+   * (RBJ, Q 0.707) run once over the window. Returns one Float32Array per channel.
+   */
+  function topBandPerChannel(chs, sr, n) {
+    const w0 = 2 * Math.PI * 8000 / sr, cw = Math.cos(w0), sw = Math.sin(w0);
+    const alpha = sw / (2 * Math.SQRT1_2);
+    const a0 = 1 + alpha;
+    const b0 = (1 + cw) / 2 / a0, b1 = -(1 + cw) / a0, b2 = b0;
+    const a1 = -2 * cw / a0, a2 = (1 - alpha) / a0;
+    return chs.map((x) => {
+      const y = new Float32Array(n);
+      let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+      for (let i = 0; i < n; i++) {
+        const v = x[i];
+        const o = b0 * v + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+        y[i] = o; x2 = x1; x1 = v; y2 = y1; y1 = o;
+      }
+      return y;
+    });
+  }
+
   /** Re-measure a processed channel set (used for the Before/After read-out). */
   function analyzeChannels(channels, sr) {
     const metrics = DSP.measure(channels, sr);
@@ -270,7 +366,7 @@
   }
 
   const API = {
-    analyze, analyzeAsync, analyzeChannels, envelope, envelopeStep, pickPreviewWindow, chipsFrom,
+    analyze, analyzeAsync, analyzeChannels, envelope, envelopeStep, pickPreviewWindow, chipsFrom, correctionMap,
     mixdown, loudnessProfile,
   };
   global.RSAnalyzer = API;

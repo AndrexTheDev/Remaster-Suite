@@ -175,6 +175,13 @@ function ffmpegPath() {
   if (fs.existsSync(local)) return local;
   return 'ffmpeg';
 }
+/** true when a working ffmpeg is reachable (env, ~/.toolkit, or PATH) */
+function hasFfmpeg() {
+  try {
+    const r = cp.spawnSync(ffmpegPath(), ['-version'], { encoding: 'utf8' });
+    return !r.error && r.status === 0;
+  } catch (e) { return false; }
+}
 function ffmpeg(args, opts) {
   const r = cp.spawnSync(ffmpegPath(), ['-hide_banner', '-nostdin', '-y'].concat(args),
     { encoding: 'utf8', maxBuffer: 1 << 28, ...(opts || {}) });
@@ -183,8 +190,22 @@ function ffmpeg(args, opts) {
   return r;
 }
 
-/** decode any file ffmpeg reads → Float32Array per channel at its own rate */
+/**
+ * Raised when a step needs a codec this sandbox does not have. The acceptance
+ * run catches it per section and reports that section as SKIPPED, with the
+ * reason, instead of aborting the whole matrix.
+ */
+class NoDecoder extends Error {
+  constructor(msg) { super(msg); this.name = 'NoDecoder'; }
+}
+
+/** decode any file ffmpeg reads → Float32Array per channel at its own rate.
+ * Without ffmpeg only WAV decodes (in memory, pure JS); an MP3 is refused. */
 function dec(file) {
+  if (!hasFfmpeg()) {
+    if (/\.wav$/i.test(file)) return wavRead(file).chans;
+    throw new NoDecoder('MP3 decode needs ffmpeg (' + path.basename(file) + '); lamejs only encodes');
+  }
   const out = file.replace(/\.[^./]+$/, '') + '.dec.wav';
   ffmpeg(['-i', file, '-c:a', 'pcm_f32le', out]);
   const r = wavRead(out);
@@ -200,6 +221,12 @@ function enc(chans, kbps, file, sr) {
   const rate = sr || SR;
   // quantise first: lamejs is fed Int16 and the app's export is 16-bit
   const q = chans.map((c) => { const o = new Float32Array(c.length); for (let i = 0; i < c.length; i++) o[i] = Math.max(-1, Math.min(1, c[i])); return o; });
+  if (!hasFfmpeg()) {
+    // no ffmpeg: the app's own encoder path (lamejs, 16-bit, app chunking) writes
+    // the MP3; reading it back needs a decoder, which the sandbox does not have
+    appMp3(q, kbps, file, rate);
+    throw new NoDecoder('MP3 re-decode needs ffmpeg; lamejs wrote ' + path.basename(file));
+  }
   const wav = wavWrite(WORK + '/enc-in.wav', q, rate);
   ffmpeg(['-i', wav, '-c:a', 'libmp3lame', '-b:a', kbps + 'k', '-ar', String(rate), file]);
   return dec(file);
@@ -207,6 +234,7 @@ function enc(chans, kbps, file, sr) {
 /** the inverse: a file in, a 16-bit WAV out (the shape the app's importer sees) */
 function encWav(chans, kbps, file, sr) {
   const rate = sr || SR;
+  if (!hasFfmpeg()) { appMp3(chans, kbps, file, rate); return file; }
   const wav = wavWrite(WORK + '/enc-in.wav', chans, rate);
   ffmpeg(['-i', wav, '-c:a', 'libmp3lame', '-b:a', kbps + 'k', '-ar', String(rate), file]);
   return file;
@@ -302,7 +330,7 @@ function loadProcessorEdited(patches, sr) {
 }
 
 module.exports = {
-  ROOT, H, RSDSP, SR, WORK, fs, ffmpeg, ffmpegPath,
+  ROOT, H, RSDSP, SR, WORK, fs, ffmpeg, ffmpegPath, hasFfmpeg, NoDecoder,
   db, lin, lufs, truePeak, truePeakDb,
   wavWrite, wavRead, enc, encWav, dec, appMp3, lamejs,
   loadProcessor, loadProcessorEdited,

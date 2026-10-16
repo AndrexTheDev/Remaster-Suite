@@ -1,0 +1,59 @@
+# Continuous integration: the whole test suite, including the acceptance matrix
+# with real MP3 round-trips through ffmpeg. Nothing in the matrix may be SKIPPED:
+# RS_REQUIRE_FFMPEG=1 turns a missing encoder into a failure, and tools/acceptance.js
+# fails the gate on any skipped section.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: npm test (acceptance matrix, real MP3 round-trips)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      RS_REQUIRE_FFMPEG: "1"
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install ffmpeg (MP3 encoder libmp3lame and decoder)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          ffmpeg -hide_banner -version | head -1
+          ffmpeg -hide_banner -encoders | grep -q libmp3lame
+          ffmpeg -hide_banner -decoders | grep -q " mp3 "
+          echo "FFMPEG=$(command -v ffmpeg)" >> "$GITHUB_ENV"
+
+      # package-lock.json is not committed (see .gitignore), so there is nothing to cache by lockfile
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Run the full suite
+        run: npm test
+
+      - name: Keep the acceptance log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-log
+          path: tools/work/logs/
+          if-no-files-found: ignore
+          retention-days: 14

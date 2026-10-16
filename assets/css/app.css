@@ -384,6 +384,11 @@ input[type="range"]::-moz-range-thumb {
 .lg i { width: 14px; height: 4px; border-radius: 2px; display: inline-block; }
 .lg-orig i { background: var(--ink-mute); }
 .lg-rest i { background: linear-gradient(90deg, var(--green), var(--gold)); }
+/* colour-blind safe: the two highlights differ in texture as well as hue — gold is
+   a diagonal hatch, cyan a dot grid — so they stay apart without colour */
+.lg-click i { background: repeating-linear-gradient(135deg, rgba(255,200,40,.95) 0 2px, rgba(255,200,40,.28) 2px 4px); outline: 1px solid rgba(255,200,40,.85); }
+.lg-bright i { background: radial-gradient(circle, rgba(64,200,255,1) 1.1px, transparent 1.6px) 0 0 / 4px 4px, rgba(64,200,255,.22); outline: 1px solid rgba(64,200,255,.85); }
+.preview-note { font-size: .74rem; color: var(--ink-mute); margin: 6px 12px 0; }
 .lg-preview { margin-left: auto; }
 .wave-empty {
   position: absolute; inset: 0; display: grid; place-items: center; color: var(--ink-mute); font-size: .86rem;
@@ -549,10 +554,16 @@ dialog.dialog:not([open]) { display: none; }
   .job-text { font-size: .8rem; }
   /* keep the toasts clear of the docked bar, and the footer clear of the gesture area */
   .toasts { bottom: calc(86px + env(safe-area-inset-bottom)); }
+  /* the last card can be scrolled clear of the docked bar (the bar is ~70 px tall) */
+  .file-list { padding-bottom: calc(96px + env(safe-area-inset-bottom)); }
   .footer { padding-bottom: calc(34px + env(safe-area-inset-bottom)); }
   .dialog { padding: 20px 18px 14px; max-height: 86vh; }
 }
 @media (max-width: 480px) {
+  /* the four legend entries fit on one or two lines, so the card keeps the
+     height it had before the highlight legend existed */
+  .wave-legend { gap: 4px 10px; font-size: .66rem; padding: 4px 8px 6px; }
+  .lg i { width: 10px; }
   .card-grid { grid-template-columns: 1fr; }
   .player { flex-wrap: wrap; }
   .seek { order: 3; flex-basis: 100%; }

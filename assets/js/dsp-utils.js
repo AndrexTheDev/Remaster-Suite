@@ -423,7 +423,7 @@
 
   function peakStep(channels) {
     return scanStep('peak', channels, 1.5, () => ({ p: 0 }),
-      (st, c, ch, i) => { const a = ch[i] < 0 ? -ch[i] : ch[i]; if (a > st.p) st.p = a; },
+      (st, _c, ch, i) => { const a = ch[i] < 0 ? -ch[i] : ch[i]; if (a > st.p) st.p = a; },
       (st) => db(st.p));
   }
 
@@ -1563,7 +1563,7 @@
     // sliding sum over the same 2048-sample window the frames are cut with gives
     // the identical number with no storage at all.
     const stepHf = scanStep('noise-hf', channels, 22, () => ({}),
-      (st, c, ch, i) => {
+      (_st, c, ch, i) => {
         const f = filters[c], r = rings[c];
         const v = ch[i];
         const hf = f.b.process(f.a.process(v));
@@ -1908,7 +1908,6 @@
     const win = Math.max(256, Math.round(sr * 0.05));
     const nCh = channels.length, len = nCh && channels[0] ? channels[0].length : 0;
     if (!nCh || !len) return { step: stepRange('dynamic-range', 0, 0, () => {}), value: () => 20 };
-    const count = len >= win ? Math.floor(len / win) + 1 : 0;
     const vals = [];
     let ms = 0;
     const step = stepRange('dynamic-range', len, len * 0.6, (from, to) => {
@@ -2165,7 +2164,7 @@
          * *median* rather than by a least-squares fit: the medians of the two
          * ends are what the ear hears as the drop, and leakage that rides on the
          * programme cannot move a median the line itself dominates */
-        const order = s2.prog.map((v, i) => i).sort((x, y) => s2.prog[x] - s2.prog[y]);
+        const order = s2.prog.map((_v, i) => i).sort((x, y) => s2.prog[x] - s2.prog[y]);
         const q = Math.max(2, Math.floor(nn / 4));
         const med = (arr) => { const c = arr.slice().sort((a, b) => a - b); return c[Math.floor(c.length / 2)]; };
         const quietIdx = order.slice(0, q), loudIdx = order.slice(nn - q);
@@ -2250,15 +2249,6 @@
     return out;
   }
 
-  /** Highest bin level inside ±tol Hz of `f`. */
-  function spectrumPeak(spec, f, tol) {
-    let v = -140;
-    for (let k = 0; k < spec.n; k++) {
-      if (spec.db[k] > v && Math.abs(spec.freq[k] - f) <= tol) v = spec.db[k];
-    }
-    return v;
-  }
-
   /**
    * The strongest narrow resonances in the low mids — a boxy room, a honky
    * cabinet, a resonant pressing. Broad rises are what the fixed EQ bank is for;
@@ -2309,6 +2299,350 @@
       if (picked.length === 2) break;
     }
     return picked;
+  }
+
+  /* ─────────────────────────────────────── codec, room and comb measurements ──
+   * Four specific defects the suite's older checks cannot quantify:
+   *
+   *   mp3Brickwall   — a 128 kbit/s encoder removes everything above its low-pass
+   *                    (≈15–17 kHz) with a near-vertical wall. Measured as the
+   *                    steepest fall on the 8192-point spectrum, in dB per octave.
+   *   spectralHoles  — the encoder also zeroes whole bands it judges inaudible,
+   *                    leaving empty bins below the wall. Counted on granule-scale
+   *                    frames against the bins around them, and weighed against the
+   *                    energy those bins would carry.
+   *   roomResonance  — a boxy room or cabinet rings at narrow frequencies. A ring is
+   *                    *phase-stable* over time (a note is too; noise is not): the
+   *                    phase advance of each candidate peak is followed across
+   *                    consecutive hops in several places in the file.
+   *   combFilter     — a tube/reflection comb is periodic in frequency. The
+   *                    autocorrelation of the spectrum's first difference (in dB)
+   *                    finds its notch spacing.
+   * ------------------------------------------------------------------------ */
+
+  /** Index of the spectrum bin nearest to f (clamped). */
+  function binAt(spec, f) {
+    const k = Math.round(f / spec.binHz);
+    return k < 0 ? 0 : (k >= spec.n ? spec.n - 1 : k);
+  }
+
+  /** Mono sum of the channels at sample i (no bounds surprises at the edges). */
+  function monoAt(channels, i) {
+    let v = 0;
+    for (let c = 0; c < channels.length; c++) v += channels[c][i] || 0;
+    return v / channels.length;
+  }
+
+  /**
+   * Granule-scale power spectra (2048 points, hop 2048) for the hole count.
+   * Codec holes are zeroed per granule, so a 170 ms window averages them away;
+   * at this size they stand out. Up to 200 frames, spread over the file.
+   */
+  function holeFrameStep(channels, sr) {
+    const n = 2048, half = n / 2;
+    const len = channels[0].length;
+    const win = hann(n);
+    const total = Math.max(0, Math.floor((len - n) / n) + 1);
+    const step = Math.max(1, Math.floor(total / 200));
+    const offsets = [];
+    for (let f = 0; f < total; f += step) offsets.push(f * n);
+    const frames = new Array(offsets.length);
+    const bufRe = new Float32Array(n), bufIm = new Float32Array(n);
+    const st = stepRange('holes', offsets.length, offsets.length * 60000, (from, to) => {
+      for (let idx = from; idx < to && idx < offsets.length; idx++) {
+        const off = offsets[idx];
+        for (let i = 0; i < n; i++) { bufRe[i] = monoAt(channels, off + i) * win[i]; bufIm[i] = 0; }
+        fft(bufRe, bufIm);
+        const pow = new Float32Array(half + 1);
+        for (let k = 0; k <= half; k++) pow[k] = bufRe[k] * bufRe[k] + bufIm[k] * bufIm[k];
+        frames[idx] = { pow };
+      }
+    });
+    return {
+      step: st,
+      value() { return { frames: frames.filter(Boolean), n, half, sr }; },
+    };
+  }
+
+  /**
+   * Complex frames for phase tracking: 2048 points, hop 512, below 1 kHz only.
+   * The room test needs a short window: a longer one (8192 points at 75 %
+   * overlap) shares most of its signal between neighbouring frames, so it reads
+   * a phase-scrambled tone as coherent. Four places in the file, 16 consecutive
+   * hops each, so the phase is followed across several time windows.
+   */
+  function phaseFrameStep(channels, sr) {
+    const n = 2048, hop = 512, perWin = 16, wins = 4;
+    const cplxBins = Math.min(n / 2 + 1, Math.ceil(1000 / (sr / n)) + 1);
+    const len = channels[0].length;
+    const win = hann(n);
+    const span = Math.max(0, len - n - (perWin - 1) * hop);
+    const fits = len >= n + (perWin - 1) * hop;
+    const starts = [];
+    for (let w = 0; fits && w < wins; w++) starts.push(Math.floor(((w + 0.5) / wins) * span));
+    const total = starts.length * perWin;
+    const frames = new Array(total);
+    const bufRe = new Float32Array(n), bufIm = new Float32Array(n);
+    const st = stepRange('phase', total, total * 40000, (from, to) => {
+      for (let idx = from; idx < to && idx < total; idx++) {
+        const w = Math.floor(idx / perWin), t = idx % perWin;
+        const off = starts[w] + t * hop;
+        for (let i = 0; i < n; i++) { bufRe[i] = monoAt(channels, off + i) * win[i]; bufIm[i] = 0; }
+        fft(bufRe, bufIm);
+        frames[idx] = {
+          t,
+          re: Float32Array.from(bufRe.subarray(0, cplxBins)),
+          im: Float32Array.from(bufIm.subarray(0, cplxBins)),
+        };
+      }
+    });
+    return {
+      step: st,
+      value() { return { frames: frames.filter(Boolean), n, hop, sr, cplxBins }; },
+    };
+  }
+
+  /**
+   * MP3 brickwall: the steepest fall on the 8192-point spectrum, in dB/octave,
+   * measured over half an octave centred on each frequency. Two conditions make
+   * it a *wall* rather than a slope:
+   *   · it is sharp — at least 60 % of that half-octave fall happens inside one
+   *     eighth of an octave (a codec's cut is near-vertical: 90 % measured; a
+   *     filter's slope is spread evenly over the octave: 26 % measured for a
+   *     12 kHz biquad, 26 % for a 14 kHz 4th-order low-pass);
+   *   · it ends — everything from the edge up to Nyquist sits at least 20 dB
+   *     lower (a comb's peaks rise again above its notches; a codec stays empty).
+   * @param {object} spec  spectrum() result (averaged, 8192-point)
+   * A 128 kbit/s encode cuts between 15.5 and 19.3 kHz (measured: 19.31 kHz on
+   * the acceptance fixture, 62.6 dB deep, sharpness 0.61). The search therefore
+   * runs up to 19.3 kHz. A steep wall (> 30 dB/oct) is classed by its cut:
+   * ≤ 15.5 kHz → `codecWall64k`, 15.5 < f_c ≤ 18.0 kHz → `codecWall128k`
+   * (see wall128kHiHz / wall128kMinSlope). The 19.2–19.5 kHz edge is shared with 320 kbit/s encodes
+   * (measured 19.14 kHz, 62.5 dB, sharpness 0.62 on the same fixture), so the
+   * location alone is not a verdict: the flag is a finding for the caller to
+   * weigh with the rest of the measurement, not a bitrate.
+   * @returns {{detected:boolean, hz:number, slopeDbPerOct:number, dropDb:number, sharpness:number, codecWall64k:boolean, codecWall128k:boolean}}
+   */
+  function detectMp3Brickwall(spec, opts) {
+    const o = Object.assign({
+      minSlopeDbPerOct: 36, lowHz: 8000, highHz: 19300, spanOct: 0.5, minSharpness: 0.6,
+      // codecWall128k needs both: a cut at or below 18.0 kHz AND a fall steeper
+      // than 30 dB/oct. A 320 kbit/s cut sits at ~19.1 kHz or higher, and a
+      // gentle top end is not a codec wall at any bitrate.
+      // Bitrate classes by cut frequency (both need the steep wall above):
+      //   64 kbit/s   f_c ≤ 15.5 kHz           → codecWall64k
+      //   128 kbit/s  15.5 kHz < f_c ≤ 18.0 kHz → codecWall128k
+      wall64kHiHz: 15500, wall128kHiHz: 18000, wall128kMinSlope: 30,
+    }, opts || {});
+    const sm = smoothSpec(spec, 1);
+    const r = Math.pow(2, o.spanOct / 2);
+    const r8 = Math.pow(2, o.spanOct / 8);
+    const best = { slope: 0, drop: 0, sharp: 0, kA: -1, kB: -1 };
+    for (let k = 1; k < spec.n; k++) {
+      const f = spec.freq[k];
+      if (f < o.lowHz || f > o.highHz) continue;
+      const kA = binAt(spec, f / r), kB = binAt(spec, f * r);
+      const drop = sm[kA] - sm[kB];
+      const slope = drop / o.spanOct;
+      if (slope <= best.slope) continue;
+      const sharp = drop > 0 ? (sm[binAt(spec, f / r8)] - sm[binAt(spec, f * r8)]) / drop : 0;
+      if (sharp < o.minSharpness) continue;           // a slope, not a wall
+      // the 'it ends' window starts an octave-fraction above the edge. For an
+      // edge above ~17 kHz that is past Nyquist, so the window starts at 1.1 f
+      // instead (still well above the wall's own 19.1–19.5 kHz fall)
+      const nyq = spec.freq[spec.n - 1];
+      const kC = binAt(spec, f * Math.SQRT2 <= 0.9 * nyq ? f * Math.SQRT2 : f * 1.1);
+      const kTop = binAt(spec, Math.min(nyq, f * 2.8));
+      let above = -Infinity;
+      for (let kk = kC; kk <= kTop; kk++) if (sm[kk] > above) above = sm[kk];
+      if (kTop <= kC || sm[kA] - above < 20) continue; // the wall has to end
+      best.slope = slope; best.drop = drop; best.sharp = sharp; best.kA = kA; best.kB = kB;
+    }
+    const detected = best.kA >= 0 && best.slope >= o.minSlopeDbPerOct;
+    let hz = 0;
+    if (detected) {
+      // the cut is where the level crosses half way down the steep window
+      const mid = (sm[best.kA] + sm[best.kB]) / 2;
+      let kc = best.kA;
+      while (kc < best.kB && sm[kc] > mid) kc++;
+      hz = spec.freq[kc];
+    }
+    const steep = detected && best.slope > o.wall128kMinSlope;
+    const codecWall64k = steep && hz <= o.wall64kHiHz;
+    const codecWall128k = steep && hz > o.wall64kHiHz && hz <= o.wall128kHiHz;
+    return {
+      detected, hz, slopeDbPerOct: best.slope, dropDb: best.drop, sharpness: best.sharp,
+      codecWall64k, codecWall128k,
+    };
+  }
+
+  /**
+   * Spectral holes below the codec cut: bins that sit `depthDb` under the median
+   * of their neighbours in the same frame. Returns the share of such bins
+   * (`density`, per bin) and the share of the expected energy they are missing
+   * (`energyRatio`: Σ(median − bin) over the holes ÷ Σ median over all bins).
+   * At 25 dB the chance rate for noise is about 0.2 %; band-wise codec holes
+   * measured about 3 % (see tests/tuning.test.js).
+   */
+  function detectSpectralHoles(fd, fcHz, opts) {
+    const o = Object.assign({ depthDb: 25, neighbours: 8, lowHz: 200 }, opts || {});
+    const out = { density: 0, energyRatio: 0, bins: 0, holes: 0, frames: 0 };
+    if (!fd || !fd.frames.length || !(fcHz > 0)) return out;
+    const binHz = fd.sr / fd.n;
+    const kLo = Math.max(1, Math.ceil(o.lowHz / binHz));
+    const kHi = Math.min(fd.half - o.neighbours - 1, Math.floor((fcHz * 0.98) / binHz));
+    const m = 2 * o.neighbours;
+    const vals = new Float64Array(m);
+    const depth = Math.pow(10, -o.depthDb / 10);
+    let missing = 0, expected = 0;
+    for (const fr of fd.frames) {
+      out.frames++;
+      for (let k = kLo; k <= kHi; k++) {
+        let c = 0;
+        for (let j = -o.neighbours; j <= o.neighbours; j++) if (j !== 0) vals[c++] = fr.pow[k + j];
+        vals.sort();
+        const med = (vals[m / 2 - 1] + vals[m / 2]) / 2;
+        const p = fr.pow[k];
+        out.bins++;
+        expected += med;
+        if (med > 0 && p < med * depth) { out.holes++; missing += med - p; }
+      }
+    }
+    out.density = out.bins ? out.holes / out.bins : 0;
+    out.energyRatio = expected > 0 ? missing / expected : 0;
+    return out;
+  }
+
+  /**
+   * Narrow peaks of the averaged spectrum in [lo, hi] Hz: local maxima that sit
+   * a few dB above their trend and fall off on both sides (a broad rise is the
+   * fixed EQ's business, not a resonance).
+   */
+  function narrowPeakCandidates(spec, lo, hi, minExcessDb) {
+    const binHz = spec.binHz;
+    const cand = [];
+    // The reference is the MEDIAN of a narrow neighbourhood (±8 bins, ≈ ±47 Hz at
+    // 318 Hz), not the mean of a wide one. A room's axial modes sit ~63 Hz apart:
+    // a mean over ±100 Hz is lifted by the neighbouring modes and buried a real
+    // 318 Hz peak under 3 dB; a median is the floor between them.
+    const R = 8;
+    const win = new Float64Array(2 * R);
+    for (let k = 3; k < spec.n - 3; k++) {
+      const f = spec.freq[k];
+      if (f < lo || f > hi) continue;
+      if (spec.db[k] < spec.db[k - 1] || spec.db[k] < spec.db[k + 1]) continue;
+      let cnt = 0;
+      for (let j = k - R; j <= k + R; j++) {
+        if (j < 0 || j >= spec.n || j === k) continue;
+        win[cnt++] = spec.db[j];
+      }
+      if (cnt < 4) continue;
+      const vals = Array.from(win.subarray(0, cnt)).sort((a, b) => a - b);
+      const med = cnt % 2 ? vals[(cnt - 1) >> 1] : (vals[cnt / 2 - 1] + vals[cnt / 2]) / 2;
+      const ex = spec.db[k] - med;
+      if (ex < minExcessDb || ex > 24) continue;
+      // isolated: the peak falls off on both sides within ±1/8 of its frequency
+      const off = Math.max(2, Math.round(f * 0.125 / binHz));
+      const drop = spec.db[k] - Math.max(spec.db[Math.min(spec.n - 1, k + off)], spec.db[Math.max(0, k - off)]);
+      if (drop < ex * 0.45) continue;
+      cand.push({ hz: f, excessDb: ex });
+    }
+    return cand;
+  }
+
+  /**
+   * Room resonances: narrow peaks in 200–800 Hz whose phase advances
+   * consistently from one hop to the next. The candidates come from the averaged
+   * 8192-point spectrum; their phase is followed on the short phase frames. For
+   * each candidate bin the phase difference between consecutive frames, minus the
+   * advance a bin-centred sinusoid would make, is averaged as unit phasors over
+   * every frame pair in every window. A steady ring keeps that residue constant
+   * (coherence → 1); noise scatters it (coherence ≈ 1/√pairs).
+   * @param {object} spec  spectrum() result (8192-point)
+   * @param {object} ph    phaseFrameStep().value()
+   * @returns {{score:number, peaks:{hz:number, excessDb:number, coherence:number}[]}}
+   *   score ∈ [0,1]: coherence (0.5 → 0.9) times how far the peak stands out (3 → 6 dB)
+   */
+  function detectRoomResonances(spec, ph, opts) {
+    const o = Object.assign({ lowHz: 200, highHz: 800, minExcessDb: 1.5, minPairs: 6 }, opts || {});
+    const out = { score: 0, peaks: [] };
+    if (!spec || !ph || ph.frames.length < 2) return out;
+    const cand = narrowPeakCandidates(spec, o.lowHz, o.highHz, o.minExcessDb);
+    const frames = ph.frames;
+    for (const c of cand) {
+      const k = Math.round((c.hz * ph.n) / ph.sr);   // the same peak on the phase grid
+      if (k < 1 || k >= ph.cplxBins) continue;
+      let sr = 0, si = 0, pairs = 0;
+      const expect = (2 * Math.PI * k * ph.hop) / ph.n;
+      for (let idx = 1; idx < frames.length; idx++) {
+        const cur = frames[idx], prev = frames[idx - 1];
+        if (cur.t === 0) continue;                  // a new place in the file
+        const cr = cur.re[k], ci = cur.im[k], pr = prev.re[k], pi = prev.im[k];
+        // cur · conj(prev)
+        const zr = cr * pr + ci * pi, zi = ci * pr - cr * pi;
+        const ph2 = Math.atan2(zi, zr) - expect;
+        sr += Math.cos(ph2); si += Math.sin(ph2);
+        pairs++;
+      }
+      if (pairs < o.minPairs) continue;
+      const coherence = Math.hypot(sr, si) / pairs;
+      // steady ring: coherence 0.4 (noise scatters to ~0.06 over these pairs) → 0.75.
+      // Excess trapezoid: a room mode stands 1.5–10 dB above its floor (rising to
+      // full at 4 dB, fading out by 14 dB). A sustained musical partial stands
+      // 12–18 dB above, and a chord must not read as a room (it scored 1.00 before).
+      const coh = clamp((coherence - 0.4) / 0.35, 0, 1);
+      const exw = clamp((c.excessDb - 1.5) / 2.5, 0, 1) * clamp((14 - c.excessDb) / 4, 0, 1);
+      const weight = coh * exw;
+      out.peaks.push({ hz: c.hz, excessDb: c.excessDb, coherence, weight });
+    }
+    out.peaks.sort((a, b) => b.weight - a.weight);
+    out.score = out.peaks.length ? clamp(out.peaks[0].weight, 0, 1) : 0;
+    out.peaks = out.peaks.slice(0, 3).map((p) => ({ hz: p.hz, excessDb: p.excessDb, coherence: p.coherence }));
+    return out;
+  }
+
+  /**
+   * Comb filter: notches spaced evenly in frequency (a tube's or a room's
+   * reflection) make the dB spectrum periodic. Its first difference removes the
+   * slow spectral slope and keeps the ripple; the autocorrelation of that peaks
+   * at the spacing. The smallest lag within 85 % of the best one is taken, so a
+   * multiple of the period does not win.
+   * @returns {{detected:boolean, periodHz:number, strength:number}}
+   */
+  function detectCombFilter(spec, opts) {
+    const o = Object.assign({ lowHz: 300, highHz: 8000, minPeriodHz: 120, maxPeriodHz: 1500, threshold: 0.4 }, opts || {});
+    const out = { detected: false, periodHz: 0, strength: 0 };
+    const binHz = spec.binHz;
+    const k0 = Math.ceil(o.lowHz / binHz), k1 = Math.min(spec.n - 1, Math.floor(o.highHz / binHz));
+    const len = k1 - k0;
+    if (len < 64) return out;
+    const d = new Float64Array(len);
+    for (let i = 0; i < len; i++) d[i] = spec.db[k0 + i + 1] - spec.db[k0 + i];
+    let v0 = 0;
+    for (let i = 0; i < len; i++) v0 += d[i] * d[i];
+    if (v0 < 1e-9) return out;
+    const L0 = Math.max(2, Math.ceil(o.minPeriodHz / binHz));
+    const L1 = Math.min(len - 16, Math.floor(o.maxPeriodHz / binHz));
+    if (L1 <= L0) return out;
+    const R = new Float64Array(L1 + 2);
+    let bestR = 0;
+    for (let L = L0; L <= L1; L++) {
+      let s = 0;
+      const m = len - L;
+      for (let i = 0; i < m; i++) s += d[i] * d[i + L];
+      R[L] = (s / m) / (v0 / len);
+      if (R[L] > bestR) bestR = R[L];
+    }
+    let bestL = 0;
+    for (let L = L0 + 1; L < L1; L++) {
+      if (R[L] >= 0.85 * bestR && R[L] >= R[L - 1] && R[L] >= R[L + 1]) { bestL = L; break; }
+    }
+    out.strength = bestR;
+    if (bestR >= o.threshold && bestL) {
+      out.detected = true;
+      out.periodHz = bestL * binHz;
+    }
+    return out;
   }
 
   /** Pearson correlation between the first two channels (mono-compat check). */
@@ -2552,6 +2886,10 @@
     const sb = stereoBandsStep(channels, sr);
     const sib = sibStep(channels, sr);
     const isp = ispStep(channels);
+    // per-frame passes: granule-scale power for the codec holes, short complex
+    // frames for the phase continuity of room resonances
+    const hfr = holeFrameStep(channels, sr);
+    const phf = phaseFrameStep(channels, sr);
     // the crest reference is a strided walk over the same file: it rides in the
     // final step instead of costing a pass of its own
     let crestMs = 0, crestN = 0;
@@ -2565,7 +2903,7 @@
     const steps = [
       core.step, sp.step, cor.step, crk.step, flatTop.step, sb.step, sib.step,
       core.steps[0], core.steps[1], core.steps[2], core.steps[3],
-      nt.steps[0], nt.steps[1], nt.steps[2], nt.steps[3], humExact, isp.step, fin,
+      nt.steps[0], nt.steps[1], nt.steps[2], nt.steps[3], humExact, isp.step, hfr.step, phf.step, fin,
     ];
 
     function result() {
@@ -2794,6 +3132,21 @@
       m.vinylAmount = clamp(0.55 * m.crackleIndex + 0.25 * clamp(m.humScore, 0, 1)
         + 0.20 * clamp((m.snrDb < 45 ? (45 - m.snrDb) / 35 : 0), 0, 1), 0, 1);
       m.tapeAmount = clamp(0.75 * m.hissAmount + 0.25 * clamp((16000 - (m.hfCutoff || 0)) / 9000, 0, 1), 0, 1);
+      // codec, room and comb measurements (see the block above phaseFrameStep)
+      const brick = detectMp3Brickwall(spec);
+      const holes = detectSpectralHoles(hfr.value(), brick.hz);
+      const room = detectRoomResonances(spec, phf.value());
+      const comb = detectCombFilter(spec);
+      m.mp3BrickwallHz = brick.hz;               // 0 when no wall is found
+      m.mp3Brickwall = brick;
+      m.codecWall128k = brick.codecWall128k;
+      m.codecWall64k = brick.codecWall64k;       // a cut ≤ 15.5 kHz: the 64 kbit/s finding     // a 15.5–19.3 kHz wall: the 128 kbit/s finding
+      m.spectralHoleDensity = holes.density;     // empty bins below the wall, per bin
+      m.spectralHoles = holes;
+      m.roomResonanceScore = room.score;         // 0…1, phase-stable narrow peaks
+      m.roomResonances = room.peaks;
+      m.combFilterPeriod = comb.periodHz;        // notch spacing in Hz, 0 when none
+      m.combFilter = comb;
       m.score = qualityScore(m);
       return m;
     }
@@ -3068,12 +3421,11 @@
     for (let b = 0; b < buckets; b++) {
       const s = Math.floor(b * per);
       const e = Math.min(n, Math.max(s + 1, Math.floor((b + 1) * per)));
-      let mn = 1e9, mx = -1e9, sum = 0;
+      let mn = 1e9, mx = -1e9;
       for (let i = s; i < e; i++) {
         const v = signal[i];
         if (v < mn) mn = v;
         if (v > mx) mx = v;
-        sum += v * v;
       }
       out[b] = mn;
       out[b + buckets] = mx;
@@ -3149,6 +3501,7 @@
     dynamicRange, clipRatio, humStep, resonanceScan, hfRaggedness, stereoCorrelation, measure, measureAsync,
     noiseAnalysis, crackleDetect,
     stereoBandsStep, ispStep, EQ_CENTERS,
+    detectMp3Brickwall, detectSpectralHoles, detectRoomResonances, detectCombFilter,
     detectSampleRate, encodeWav, decodeWav, peaks, rmsEnvelope, Biquad,
     applyBiquad, biquadHP, qualityScore,
   };

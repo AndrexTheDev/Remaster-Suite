@@ -8,7 +8,7 @@
  * Needs:   npm i            (jsdom for the other suites + optional @sparticuz/chromium)
  *          the app served on http://127.0.0.1:8080 (started automatically)
  * Run:     node tests/beta/beta.js
- * Output:  docs/beta/*.png  ·  docs/BETA-REPORT.md
+ * Output:  test-results/beta/*.png (git-ignored)  ·  docs/BETA-REPORT.md
  * ========================================================================== */
 'use strict';
 
@@ -21,9 +21,10 @@ const beta = require('./chromium.js');
 const cdp = require('./cdp.js');
 
 const ROOT = path.join(__dirname, '..', '..');
-const SHOT_DIR = path.join(ROOT, 'docs', 'beta');
-const DL_DIR = '/tmp/rs-beta-downloads';
-const FILE_DIR = '/tmp/rs-beta-files';        // real files on disk, for the real file picker
+const SHOT_DIR = path.join(ROOT, 'test-results', 'beta');   // generated, git-ignored
+const SCRATCH = path.join(ROOT, 'scratch', 'beta');   // scratch, git-ignored: never /tmp
+const DL_DIR = path.join(SCRATCH, 'downloads');
+const FILE_DIR = path.join(SCRATCH, 'files');        // real files on disk, for the real file picker
 const PORT = 8080;
 const DBG = 9222;
 const FIX_PORT = 8099;                        // loopback server for the WAV fixtures
@@ -168,7 +169,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const r = await page.send('Page.captureScreenshot', Object.assign({ format: 'png' }, opts || {}));
     const file = path.join(SHOT_DIR, name + '.png');
     fs.writeFileSync(file, Buffer.from(r.data, 'base64'));
-    shots.push({ name, file: 'docs/beta/' + name + '.png', size: (fs.statSync(file).size / 1024).toFixed(0) + ' KB' });
+    shots.push({ name, file: 'test-results/beta/' + name + '.png', size: (fs.statSync(file).size / 1024).toFixed(0) + ' KB' });
     return file;
   };
   const viewport = async (w, h, mobile) => {
@@ -269,6 +270,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check('the browser diagnoses them garage / cassette / vinyl', diag === 'garage,cassette,vinyl', diag);
   check('every card paints a waveform', await evalJS(
     `RSApp.State.cards.every(c => c.el.canvas && c.el.canvas.width > 50)`));
+  check('every card shows the 40-second preview banner', await evalJS(`(() => {
+    const notes = [...document.querySelectorAll('.card .preview-note')];
+    return notes.length === RSApp.State.cards.length && notes.every((n) => {
+      const cs = getComputedStyle(n);
+      return n.getBoundingClientRect().height > 0 && cs.display !== 'none' &&
+        cs.visibility !== 'hidden' && /40/.test(n.textContent);
+    });
+  })()`), await evalJS(`document.querySelector('.card .preview-note').textContent.trim()`));
   check('the recommended power was adopted', await evalJS(`RSApp.State.power > 0.5`),
     await evalJS(`Math.round(RSApp.State.power * 100) + ' %'`));
   await evalJS(`document.querySelector('#fileList').scrollIntoView({ block: 'start', behavior: 'instant' })`);
@@ -298,6 +307,59 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   })();
   const doneInfo = await evalJS(`RSApp.State.cards.map(c => c.result.format + ':' + c.result.bytes.length).join(' ')`);
   check('all three render through the real worklet', (doneInfo.match(/wav:/g) || []).length === 3, doneInfo);
+  /* the correction textures on the waveform: gold hatch over clicks, cyan dots
+   * over brightened highs. Pixels are read back from the canvas. A texture
+   * pixel is one whose alpha sits between the tint (~66) and the opaque
+   * playhead (255); the playhead columns themselves are excluded. */
+  const texture = await evalJS(`(() => {
+    const card = RSApp.State.cards.find((c) => c.after && c.after.corrections && c.after.corrections.clicks.some(Boolean));
+    if (!card) return JSON.stringify({ none: true });
+    const cv = card.el.canvas, c = card.after.corrections;
+    const W = cv.width, n = c.clicks.length, px = W / n;
+    const d = cv.getContext('2d').getImageData(0, 0, W, cv.height).data;
+    const H = cv.height;
+    const playCol = new Uint8Array(W);
+    for (let x = 0; x < W; x++) for (let y = 0; y < H; y++) {
+      const k = (y * W + x) * 4;
+      if (d[k + 3] === 255 && d[k] > 240 && d[k + 1] > 200 && d[k + 1] < 230 && d[k + 2] < 30) { playCol[x] = 1; break; }
+    }
+    const near = (x) => { for (let j = Math.max(0, x - 4); j <= Math.min(W - 1, x + 4); j++) if (playCol[j]) return true; return false; };
+    const out = { hatchIn: 0, hatchOut: 0, dotIn: 0, dotOut: 0 };
+    const flaggedClick = new Set(), flaggedBright = new Set();
+    for (let i = 0; i < n; i++) { if (c.clicks[i]) flaggedClick.add(i); if (c.bright[i]) flaggedBright.add(i); }
+    for (let x = 0; x < W; x++) {
+      if (near(x)) continue;
+      const col = Math.min(n - 1, Math.floor(x / px));
+      // the drawer paints each flagged column as a 1 px rectangle at i·px, so
+      // anti-aliasing spills into the pixel beside it. A column that touches a
+      // flagged neighbour is an edge, not an outside hit: it is not counted.
+      const edgeH = [col - 1, col, col + 1].some((j) => j >= 0 && j < n && c.clicks[j]);
+      const edgeD = [col - 1, col, col + 1].some((j) => j >= 0 && j < n && c.bright[j]);
+      let hatch = 0, dot = 0;
+      for (let y = 0; y < H; y++) {
+        const k = (y * W + x) * 4, r = d[k], g = d[k + 1], b = d[k + 2], a = d[k + 3];
+        if (a >= 100 && a < 250 && r > 180 && g > 140 && b < 90) hatch++;
+        if (a >= 100 && r < 120 && g > 150 && b > 200) dot++;
+      }
+      if (hatch) {
+        if (flaggedClick.has(col)) out.hatchIn += hatch;
+        else if (!edgeH) out.hatchOut += hatch;
+      }
+      if (dot) {
+        if (flaggedBright.has(col)) out.dotIn += dot;
+        else if (!edgeD) out.dotOut += dot;
+      }
+    }
+    out.clickCols = flaggedClick.size; out.brightCols = flaggedBright.size;
+    return JSON.stringify(out);
+  })()`);
+  const tx = JSON.parse(texture);
+  check('the click corrections are hatched on the waveform, only where they happened',
+    !tx.none && tx.clickCols > 0 && tx.hatchIn > 0 && tx.hatchOut < 0.02 * tx.hatchIn,
+    tx.none ? 'no card with corrections' : tx.hatchIn + ' hatch px on ' + tx.clickCols + ' columns, ' + tx.hatchOut + ' outside (edges excluded)');
+  check('the brightened highs are dotted on the waveform, only where they happened',
+    !tx.none && tx.brightCols > 0 && tx.dotIn > 0 && tx.dotOut < 0.02 * tx.dotIn,
+    tx.none ? 'no card with corrections' : tx.dotIn + ' dot px on ' + tx.brightCols + ' columns, ' + tx.dotOut + ' outside (edges excluded)');
   check('exports keep the original length', await evalJS(
     `RSApp.State.cards.every(c => Math.abs(c.result.bytes.length - (44 * c.previewBuffer.duration * 4 + 1000)) < 200000 || true) && RSApp.State.cards.every(c => c.result.bytes.length > 900000)`),
     doneInfo);
@@ -801,10 +863,33 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     window.__mDone = true;
   })(); true`);
   let mobileShot = false;
+  // Reachability, not a snapshot: while the bar is up, the page is scrolled until
+  // the card's BOTTOM edge (its controls) sits just above the bar. A phone card can
+  // be taller than the screen, so the whole card cannot be above the bar at once;
+  // what must hold is that its end can be reached. Without room under the list the
+  // page cannot scroll that far and the edge stays under the bar. Taken mid-render.
+  let barClear = null;
+  const BAR_CLEAR = `(() => {
+      const card = document.querySelector('#fileList .card');
+      const bar = document.getElementById('globalProgress');
+      if (!card || !bar || bar.hidden) return { ok: false, why: 'bar hidden' };
+      const b0 = bar.getBoundingClientRect();
+      const r0 = card.getBoundingClientRect();
+      const over = r0.bottom - (b0.top - 8);
+      // instant: html has scroll-behavior: smooth, and the measure must follow the scroll
+      if (over > 0) window.scrollBy({ top: over, behavior: 'instant' });
+      const b = bar.getBoundingClientRect();
+      const r = card.getBoundingClientRect();
+      return { ok: b.height > 0 && r.bottom <= b.top + 1,
+        why: 'card bottom ' + Math.round(r.bottom) + ' · bar top ' + Math.round(b.top) + ' · card ' + Math.round(r.height) + ' px' };
+    })()`;
   for (let i = 0; i < 200; i++) {
     await sleep(200);
     const p = await evalJS(`(() => { const m = window.__m; return m.length ? m[m.length - 1].p : 0; })()`);
-    if (!mobileShot && p > 0.2) { await shot('19-mobile-de-progress'); mobileShot = true; }
+    if (!mobileShot && p > 0.2) {
+      await shot('19-mobile-de-progress'); mobileShot = true;
+      barClear = await evalJS(BAR_CLEAR);
+    }
     if (await evalJS(`window.__mDone`)) break;
   }
   const dock = await evalJS(`(() => {
@@ -839,11 +924,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check('the phone render was photographed mid-flight', mobileShot === true);
   check('no sideways scroll on the phone while the docked bar is up',
     await evalJS(`document.documentElement.scrollWidth <= window.innerWidth + 1`));
-  check('the docked bar does not swallow the card it belongs to',
-    await evalJS(`(() => { const card = document.querySelector('#fileList .card');
-      const bar = document.getElementById('globalProgress').getBoundingClientRect();
-      const r = card.getBoundingClientRect();
-      return r.bottom <= bar.top + 1 || r.top >= bar.bottom - 1 || r.bottom < window.innerHeight; })()`));
+  check('the docked bar does not swallow the card it belongs to: its end can be scrolled above the bar',
+    barClear && barClear.ok, barClear ? barClear.why : 'the bar was never up while a card was in view');
   await evalJS(`RSApp.State.format = 'wav'`);
   await evalJS(`RSApp.clearAll()`);
   await sleep(200);
@@ -998,11 +1080,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await clickSelector('.card [data-act="play"]');
   await sleep(800);
   const gPlayOn = await evalJS(`({ playing: RSEngine.playing, ctx: RSEngine.ctx && RSEngine.ctx.state })`);
-  const p1 = await evalJS(`RSEngine.position`);
-  await sleep(900);
-  const p2 = await evalJS(`RSEngine.position`);
+  // the clock has started once the position leaves zero; only then is p1 read.
+  // Both waits poll with a deadline (6 s), so a busy headless page delays the
+  // check instead of failing it. The threshold is the claim itself: 0.3 s.
+  let p1 = await evalJS(`RSEngine.position`);
+  for (let i = 0; i < 30 && !(p1 > 0.05); i++) { await sleep(200); p1 = await evalJS(`RSEngine.position`); }
+  let p2 = p1;
+  for (let i = 0; i < 30 && !(p2 >= p1 + 0.3); i++) { await sleep(200); p2 = await evalJS(`RSEngine.position`); }
   check('play starts the engine and the clock with it',
-    gPlayOn.playing === true && gPlayOn.ctx === 'running' && p2 > p1 + 0.3,
+    gPlayOn.playing === true && gPlayOn.ctx === 'running' && p2 >= p1 + 0.3,
     'AudioContext ' + gPlayOn.ctx + ' · ' + p1.toFixed(2) + ' s → ' + p2.toFixed(2) + ' s');
 
   await clickSelector('#abSwitch button[data-ab="compare"]');
@@ -1154,19 +1240,22 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await clickSelector('[data-dialog="dlgAbout"]');
   await sleep(300);
   const aboutOpen = await evalJS(`document.querySelector('#dlgAbout').open`);
-  const libBefore = await evalJS(`RSLibs.mode + '|' + document.querySelector('#btnLibMode').textContent.trim()`);
+  // the switch is the third-party opt-in: off (strict local) by default, and a click
+  // turns it on and back off. Off means no CDN host is contacted at all.
+  const libBefore = await evalJS(`RSLibs.online + '|' + document.querySelector('#btnLibMode').textContent.trim()`);
   await clickSelector('#btnLibMode');
   await sleep(300);
-  const libAfter = await evalJS(`RSLibs.mode + '|' + document.querySelector('#btnLibMode').textContent.trim()`);
+  const libAfter = await evalJS(`RSLibs.online + '|' + document.querySelector('#btnLibMode').textContent.trim()`);
   await clickSelector('#btnLibMode');
   await sleep(300);
-  const libBack = await evalJS(`RSLibs.mode`);
+  const libBack = await evalJS(`String(RSLibs.online)`);
+  const storedAfterOff = await evalJS(`(() => { try { return localStorage.getItem('rs.online'); } catch (e) { return 'n/a'; } })()`);
   await page.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
   await sleep(250);
-  check('the library switch in “Über & Quellen” changes mode and label, and changes back',
-    aboutOpen === true && /^local/.test(libBefore) && /^cdn/.test(libAfter)
-      && libBefore !== libAfter && libBack === 'local',
-    libBefore + ' → ' + libAfter + ' → ' + libBack);
+  check('the online switch in “Über & Quellen” starts off, turns on, and turns back off',
+    aboutOpen === true && /^false\|/.test(libBefore) && /^true\|/.test(libAfter)
+      && libBack === 'false' && storedAfterOff === null,
+    libBefore + ' → ' + libAfter + ' → ' + libBack + ' · stored: ' + storedAfterOff);
 
   await evalJS(`window.scrollTo(0, document.body.scrollHeight)`);
   await sleep(300);
@@ -1407,7 +1496,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   md += `| keyboard focus | \`12-desktop-de-focus.png\` | — |\n`;
   md += `| full page | \`17-desktop-de-fullpage.png\` | — |\n`;
   md += `| progress bar, mid-render | \`18-desktop-de-progress.png\` | \`19-mobile-de-progress.png\` |\n\n`;
-  md += `All screenshots live in \`docs/beta/\`. Captured sizes: ` + shots.map((s) => s.name + ' ' + s.size).join(' · ') + '.\n';
+  md += `All screenshots live in \`test-results/beta/\` (generated, git-ignored). Captured sizes: ` + shots.map((s) => s.name + ' ' + s.size).join(' · ') + '.\n';
   md += '\n## Harness notes\n\n' +
     '- The suite drives a packaged headless Chromium (`@sparticuz/chromium`, an optional\n' +
     '  dev dependency) over the raw DevTools protocol — no puppeteer needed.\n' +

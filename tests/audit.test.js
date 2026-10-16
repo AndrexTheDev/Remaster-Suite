@@ -29,12 +29,27 @@ function ok(cond, label, detail) {
 }
 function section(name) { console.log('\n▸ ' + name); }
 
-const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
-const APP_JS = ['dsp-utils', 'presets', 'i18n', 'library-loader', 'codecs', 'analyzer', 'engine', 'ui', 'app']
+// one read per file for the whole run: index.html, codecs.js, app.css and the
+// JS bundle are each needed several times below (memoised, read-only strings)
+const FILE_CACHE = new Map();
+const read = (rel) => {
+  if (!FILE_CACHE.has(rel)) FILE_CACHE.set(rel, fs.readFileSync(path.join(ROOT, rel), 'utf8'));
+  return FILE_CACHE.get(rel);
+};
+const APP_JS = ['dsp-utils', 'presets', 'i18n', 'library-loader', 'codecs', 'analyzer',
+  'ring-buffer', 'neural-dsp', 'engine', 'neural-worker', 'ui', 'app']
   .map((f) => 'assets/js/' + f + '.js');
 
 const html = read('index.html');
 const css = read('assets/css/app.css');
+/* Media queries are found by what they say, not by how they are typed: any
+ * spacing, a 720 or 720.0 px, `and`-joined or reordered conditions all match. A
+ * rewritten query therefore does not break the audit; a removed one still does. */
+const mediaAt = (src, feature) => {
+  const m = new RegExp('@media[^{]*' + feature + '[^{]*\\{', 'g').exec(src);
+  return m ? m.index : -1;
+};
+const maxWidth = (px) => 'max-width\\s*:\\s*' + px + '(?:\\.0+)?px';
 const appSrc = APP_JS.map(read).join('\n');
 const workletSrc = read('assets/worklets/remaster-processor.js');
 const readme = read('README.md');
@@ -53,12 +68,20 @@ section('audit · repository hygiene');
   const missing = required.filter((f) => !fs.existsSync(path.join(ROOT, f)));
   ok(missing.length === 0, 'every file the project promises exists', missing.join(', '));
 
-  // no orphaned source files: everything in assets/js and assets/css is used
+  // no orphaned source files: everything in assets/js and assets/css is used —
+  // referenced from the markup, or loaded/spawned from another source file
+  // (the ML worker is started with new Worker('assets/js/neural-worker.js'))
   const jsFiles = fs.readdirSync(path.join(ROOT, 'assets', 'js')).map((f) => 'assets/js/' + f);
   const referenced = new Set();
   const re = /(?:src|href)="([^"]+)"/g;
   let m;
   while ((m = re.exec(html))) referenced.add(m[1]);
+  const srcRe = /assets\/js\/[a-z0-9-]+\.js/g;
+  for (const f of APP_JS.concat(['assets/worklets/remaster-processor.js'])) {
+    const src = read(f);
+    let sm;
+    while ((sm = srcRe.exec(src))) referenced.add(sm[0]);
+  }
   const orphans = jsFiles.filter((f) => !referenced.has(f) && f.indexOf('dsp-utils') === -1);
   ok(orphans.length === 0, 'no orphaned JavaScript file', orphans.join(', '));
   ok(referenced.has('assets/css/app.css'), 'stylesheet is referenced');
@@ -153,7 +176,8 @@ section('audit · markup');
 
   // script order must match the dependency order of the modules
   const order = [...html.matchAll(/<script src="assets\/js\/([a-z0-9-]+)\.js">/g)].map((m) => m[1]);
-  const want = ['dsp-utils', 'presets', 'i18n', 'library-loader', 'codecs', 'analyzer', 'engine', 'ui', 'app'];
+  const want = ['dsp-utils', 'presets', 'i18n', 'library-loader', 'codecs', 'analyzer',
+    'ring-buffer', 'neural-dsp', 'engine', 'ui', 'app'];
   ok(JSON.stringify(order) === JSON.stringify(want), 'scripts load in dependency order', order.join(' → '));
 
   // wiring audit: every id / data hook the JavaScript looks for must exist
@@ -185,7 +209,7 @@ section('audit · stylesheet');
 
   ok(/prefers-reduced-motion/.test(css), 'reduced-motion is respected');
   ok(/:focus-visible/.test(css), 'keyboard focus is visible');
-  ok(/@media \(max-width: 720px\)/.test(css) && /@media \(max-width: 480px\)/.test(css), 'mobile breakpoints present');
+  ok(mediaAt(css, maxWidth(720)) >= 0 && mediaAt(css, maxWidth(480)) >= 0, 'mobile breakpoints present');
   ok(/dialog\.dialog\[open\]|position: fixed; inset: 0; margin: auto/.test(css), 'dialogs have a no-showModal fallback');
   const important = (css.match(/!important/g) || []).length;
   const importantLines = css.split('\n').filter((l) => /!important/.test(l)).map((l) => l.trim());
@@ -306,7 +330,7 @@ section('audit · the phone');
 
   // three sizes that make a phone usable: 44 px targets, 16 px fields, no
   // hover-only affordances, and a bottom bar that respects the home indicator
-  const mobile = css.slice(css.indexOf('@media (max-width: 720px)'), css.indexOf('@media (max-width: 480px)'));
+  const mobile = css.slice(mediaAt(css, maxWidth(720)), mediaAt(css, maxWidth(480)));
   ok(/\.btn \{ min-height: 44px/.test(mobile), 'buttons are at least 44 px tall on a phone');
   ok(/\.icon-btn \{ width: 44px; height: 44px/.test(mobile), 'icon buttons get the full 44 px square');
   ok(/\.seg button, \.seg-sm button \{ padding: 10px 14px; font-size: \.86rem; min-height: 44px/.test(mobile),
@@ -324,7 +348,7 @@ section('audit · the phone');
     'the docked bar and the page keep clear of the home indicator');
   const insets = (css.match(/env\(safe-area-inset-[a-z]+\)/g) || []).length;
   ok(insets >= 5, 'safe-area insets are used throughout, not patched in once', insets + ' uses');
-  ok(/@media \(hover: none\)/.test(css) && /transform: none/.test(css.slice(css.indexOf('@media (hover: none)'))),
+  ok(mediaAt(css, 'hover\\s*:\\s*none') >= 0 && /transform: none/.test(css.slice(mediaAt(css, 'hover\\s*:\\s*none'))),
     'hover styles cannot stick after a tap');
   ok(/-webkit-tap-highlight-color: transparent/.test(css), 'no grey tap flash on the brand buttons');
   ok(/touch-action: manipulation/.test(css), 'the 300 ms double-tap delay is removed from controls');
@@ -647,6 +671,22 @@ section('audit · several problems at once');
 }
 
 section('audit · presets and parameters');
+// measure() is a pure function of its channels: the same synthetic buffer gives
+// the same numbers every time. So a buffer is measured once and the result is
+// reused, keyed by the identity of its channel arrays (a fresh buffer always
+// misses). Only this section uses it; the buffers are never written after they
+// are made, which the cache relies on.
+const measureMemo = new WeakMap();
+const MEAS = (chs, sr) => {
+  const head = chs[0];
+  const list = measureMemo.get(head) || [];
+  const hit = list.find((e) => e.sr === sr && e.chs.length === chs.length && e.chs.every((c, i) => c === chs[i]));
+  if (hit) return hit.m;
+  const m = DSP.measure(chs, sr);
+  list.push({ chs: chs.slice(), sr, m });
+  measureMemo.set(head, list);
+  return m;
+};
 {
   const anchorKeys = ['bands', 'reso', 'sub', 'subRatio', 'exciter', 'air', 'dehiss', 'declick', 'glue', 'warmth', 'tilt'];
   const problems = [];
@@ -678,7 +718,8 @@ section('audit · presets and parameters');
   // peak (`refDb`), which the stages that are *not* an absolute target read to
   // place their thresholds relative to this recording (see `refLin` in the
   // worklet and the level-invariance section in tests/dsp.test.js).
-  ok(declared.length === 58, 'the processor declares the whole per-song parameter set', String(declared.length));
+  // 63 = the 62 above + `roomHz`, the measured room mode the dynamic notch band follows.
+  ok(declared.length === 63, 'the processor declares the whole per-song parameter set', String(declared.length));
   // A mains line that is not a pure sine. Real hum arrives with its harmonics,
   // and a recording with a 100 Hz buzz has to be notched there *because that was
   // measured* — this is the fixture that proves the harmonic notches are wired to
@@ -701,13 +742,22 @@ section('audit · presets and parameters');
     for (let i = 0; i < out.length; i++) out[i] += sib[i] * env[i];
     return H.normalize(out, 0.8);
   })();
-  const sims = { garage: H.garageSim(DSP, 48000, 6), humrich: humRich, cassette: H.cassetteSim(DSP, 48000, 6), vinyl: H.vinylSim(DSP, 48000, 6), lowbitrate: H.lowBitrateSim(DSP, 48000, 6), sibilant, clean: DSP.smoothSpec ? H.cassetteSim(DSP, 48000, 6) : null };
+  // A one-microphone room: an axial mode at 318 Hz as a +6 dB peaking boost of
+  // the programme (the same model as tools/acceptance.js). It is what moves
+  // `roomHz` and the room score, which no other probe does.
+  const roomy = (() => {
+    const bed = H.normalize(H.pink(48000, 6, 0.3, 77), 0.5);
+    const A = Math.pow(10, 6 / 40), w = 2 * Math.PI * 318 / 48000, c = Math.cos(w), al = Math.sin(w) / (2 * 40);
+    const a0 = 1 + al / A;
+    return H.normalize(DSP.applyBiquad(bed, [(1 + al * A) / a0, -2 * c / a0, (1 - al * A) / a0, -2 * c / a0, (1 - al / A) / a0]), 0.7);
+  })();
+  const sims = { roomy, garage: H.garageSim(DSP, 48000, 6), humrich: humRich, cassette: H.cassetteSim(DSP, 48000, 6), vinyl: H.vinylSim(DSP, 48000, 6), lowbitrate: H.lowBitrateSim(DSP, 48000, 6), sibilant, clean: DSP.smoothSpec ? H.cassetteSim(DSP, 48000, 6) : null };
   const outOfRange = [];
   const seen = new Map();                       // which parameters the law actually moves
   for (const key of Object.keys(sims)) {
     const s = sims[key];
     if (!s) continue;
-    const m = DSP.measure([s], 48000);
+    const m = MEAS([s], 48000);
     for (const p of [0, 0.25, 0.5, 0.75, 1]) {
       const params = Presets.buildParams('auto', m, p);
       const keys = Object.keys(params);
@@ -736,7 +786,7 @@ section('audit · presets and parameters');
     for (let i = 0; i < second.length; i++) second[i] += room[i];
     return [first, second];
   })();
-  const stereoM = DSP.measure(narrowPair, 48000);
+  const stereoM = MEAS(narrowPair, 48000);
   // …and the opposite defect: a bass that is *inverted* in one channel, so the
   // channels agree everywhere else and cancel below 200 Hz. This is the only
   // fixture that can ask for the mono-maker, and it is a real fault — a
@@ -748,7 +798,7 @@ section('audit · presets and parameters');
     for (let i = 0; i < a.length; i++) { a[i] += bass[i]; b[i] -= bass[i]; }
     return [H.normalize(a, 0.8), H.normalize(b, 0.8)];
   })();
-  const phaseM = DSP.measure(phasePair, 48000);
+  const phaseM = MEAS(phasePair, 48000);
   // …and the case that is *not* a fault: two channels that are simply different
   // are a wide image, and its low band reads near zero correlation — which is
   // where the old curve put full need, so the mono-maker folded the bottom of
@@ -761,7 +811,7 @@ section('audit · presets and parameters');
     H.normalize(H.pink(48000, 6, 0.3, 81), 0.9),
     H.normalize(H.mix([H.pink(48000, 6, 0.25, 82), H.tone(1000, 48000, 6, 0.05)]), 0.85),
   ];
-  const wideM = DSP.measure(widePair, 48000);
+  const wideM = MEAS(widePair, 48000);
   // …and a turntable's rumble: real programme with no content below 120 Hz, a
   // steady 20–40 Hz noise floor under it — the one defect a high-pass can fix
   // and the only fixture that can ask for it.
@@ -775,14 +825,14 @@ section('audit · presets and parameters');
     rumble = H.normalize(H.filter(DSP, rumble, 48000, 'lp', 42, 0.707), 0.06);
     return H.normalize(H.mix([music, rumble]), 0.75);
   })();
-  const rumbleM = DSP.measure([rumbly], 48000);
+  const rumbleM = MEAS([rumbly], 48000);
   ok(Presets.buildParams('auto', rumbleM, 0.8).infraHP > 15,
     'a rumbly recording asks for the sub-sonic guard', Presets.buildParams('auto', rumbleM, 0.8).infraHP.toFixed(1) + ' Hz');
   ok(Presets.buildParams('auto', rumbleM, 0.8).infraHP < 32,
     '…and the guard stays below the musical bass', Presets.buildParams('auto', rumbleM, 0.8).infraHP.toFixed(1) + ' Hz');
-  ok(Presets.buildParams('auto', DSP.measure([H.garageSim(DSP, 48000, 6)], 48000), 0.8).infraHP === 0,
+  ok(Presets.buildParams('auto', MEAS([H.garageSim(DSP, 48000, 6)], 48000), 0.8).infraHP === 0,
     'a recording with no rumble gets no high-pass');
-  ok(Presets.buildParams('auto', (() => { const q = DSP.measure([H.garageSim(DSP, 48000, 6)], 48000); return q; })(), 0.8).bassMono === 0,
+  ok(Presets.buildParams('auto', (() => { const q = MEAS([H.garageSim(DSP, 48000, 6)], 48000); return q; })(), 0.8).bassMono === 0,
     'a centred bass is left centred');
   ok(Presets.buildParams('auto', phaseM, 0.8).bassMono > 0.5,
     'an inverted bass asks for the mono-maker', Presets.buildParams('auto', phaseM, 0.8).bassMono.toFixed(2));
@@ -799,11 +849,11 @@ section('audit · presets and parameters');
     'a wide image is not called narrow', Presets.diagnose(wideM).issues.join(', ') || 'healthy');
   ok(Presets.diagnose(stereoM).issues.indexOf('narrow') >= 0,
     'a narrow image still is', Presets.diagnose(stereoM).issues.join(', '));
-  ok(Presets.buildParams('auto', DSP.measure([sibilant], 48000), 0.8).deess > 0.2,
+  ok(Presets.buildParams('auto', MEAS([sibilant], 48000), 0.8).deess > 0.2,
     'a sibilant recording asks for the de-esser',
-    Presets.buildParams('auto', DSP.measure([sibilant], 48000), 0.8).deess.toFixed(2));
-  ok(Presets.buildParams('auto', DSP.measure([sims.garage], 48000), 0.8).deess < 0.05,
-    'a recording with no sibilance does not', Presets.buildParams('auto', DSP.measure([sims.garage], 48000), 0.8).deess.toFixed(2));
+    Presets.buildParams('auto', MEAS([sibilant], 48000), 0.8).deess.toFixed(2));
+  ok(Presets.buildParams('auto', MEAS([sims.garage], 48000), 0.8).deess < 0.05,
+    'a recording with no sibilance does not', Presets.buildParams('auto', MEAS([sims.garage], 48000), 0.8).deess.toFixed(2));
   /* …and the *kind* of evidence matters, not just the amount. A steady tilt of
    * the 5–9 kHz band is invisible to the burst scan (which is a p95−p50 and
    * therefore blind to anything that raises the whole band) but very visible to
@@ -817,7 +867,7 @@ section('audit · presets and parameters');
     const a0 = 1 + al / A;
     const shelf = DSP.applyBiquad(flat, [(1 + al * A) / a0, -2 * c / a0, (1 - al * A) / a0, -2 * c / a0, (1 - al / A) / a0]);
     const tilted = H.normalize(shelf, 0.7);
-    const tm = DSP.measure([tilted], 48000);
+    const tm = MEAS([tilted], 48000);
     // measured across the sweep: excess −0.17/1.45/2.39/3.60/4.72 dB for a
     // 0/2.5/4/6/8 dB tilt, burst 0.94/0.91/0.89/0.86/0.83 dB — the scan is
     // blind to a tilt by construction
@@ -861,7 +911,7 @@ section('audit · presets and parameters');
       const qbed = H.normalize(H.filter(DSP, H.pink(48000, SEC3, 0.40, 31), 48000, 'lp', 9000, 0.60), 0.25);
       return H.normalize(H.mix([out, H.mul(qbed, 0.5)]), 0.72);
     })();
-    const om = DSP.measure([organ], 48000);
+    const om = MEAS([organ], 48000);
     ok((om.sibPeakDb || 0) < 0.5 && Presets.buildParams('auto', om, 0.7).deess < 0.05,
       'a phrased organ is not sibilance',
       'scan ' + (om.sibPeakDb || 0).toFixed(2) + ' dB (5.55 before this round), deess '
@@ -876,7 +926,7 @@ section('audit · presets and parameters');
       }
       return out;
     })();
-    const wm = DSP.measure([wash], 48000);
+    const wm = MEAS([wash], 48000);
     ok((wm.sibPeakDb || 0) < 0.5 && (wm.sibExcessDb || 0) > 2 && Presets.buildParams('auto', wm, 0.7).deess < 0.05,
       'a sustained cymbal balance is not sibilance either',
       'scan ' + (wm.sibPeakDb || 0).toFixed(2) + ' dB · excess ' + (wm.sibExcessDb || 0).toFixed(2)
@@ -889,7 +939,7 @@ section('audit · presets and parameters');
      * flag unlocks. Before this round: scan 1.98, excess 5.67, deess 0.706 —
      * after: 0.535, the same `sibilance` on the same card. The row is here so
      * that a future guard that rejects more material has to face this file. */
-    const sm = DSP.measure([sibilant], 48000);
+    const sm = MEAS([sibilant], 48000);
     ok((sm.sibPeakDb || 0) > 1.5 && sm.sibSustained === 1 && Presets.buildParams('auto', sm, 0.7).deess > 0.4,
       '…while the sibilant fixture still reads a sibilant (its own, sustained path)',
       'scan ' + (sm.sibPeakDb || 0).toFixed(2) + ' dB, sustained ' + sm.sibSustained + ', excess '
@@ -928,7 +978,7 @@ section('audit · presets and parameters');
       if (d > 0.25 && d > Math.abs(worn2[i - 1] - bed2[i - 1]) && d >= Math.abs(worn2[i + 1] - bed2[i + 1])) cand.push(i);
     }
     const popPos = cand.filter((p) => rel(worn2, p, 0) > 4);
-    const m2 = DSP.measure([worn2], 48000);
+    const m2 = MEAS([worn2], 48000);
     const p2 = Object.assign({}, H.DEFAULT_PARAMS, Presets.buildParams(Presets.classify(m2).id, m2, 0.7));
     const r2 = H.renderEx(H.loadProcessor(48000), [worn2], p2);
     const before = popPos.map((p) => rel(worn2, p, 0)).sort((a, b) => a - b);
@@ -947,7 +997,7 @@ section('audit · presets and parameters');
     const leftClear = clear.filter((p) => rel(r2.out[0], p, r2.latency) > 4);
     let loudest = -120;
     for (const p of popPos) loudest = Math.max(loudest, bandDb(r2.out[0], p, r2.latency));
-    const idxAfter = DSP.measure([r2.out[0].subarray(r2.latency)], 48000).crackleIndex;
+    const idxAfter = MEAS([r2.out[0].subarray(r2.latency)], 48000).crackleIndex;
     ok(popPos.length > 20, 'the worn fixture has pops to repair', popPos.length + ' pops');
     ok(medOf(after) < medOf(before) - 15,
       'the chain takes the pop level down by 15 dB or more',
@@ -1016,7 +1066,7 @@ section('audit · presets and parameters');
   }
   ok(Presets.buildParams('auto', stereoM, 0.8).width > 0.05,
     'a narrow stereo image asks for width', Presets.buildParams('auto', stereoM, 0.8).width.toFixed(2));
-  ok(Presets.buildParams('auto', DSP.measure([sims.garage, sims.garage], 48000), 0.8).width === 0,
+  ok(Presets.buildParams('auto', MEAS([sims.garage, sims.garage], 48000), 0.8).width === 0,
     '…and a mono master is left alone');
 
   // A clipped master — the fixture class the de-clipper exists for, and the one
@@ -1031,23 +1081,30 @@ section('audit · presets and parameters');
     x = H.filter(DSP, x, 48000, 'hp', 30, 0.707);
     x = H.filter(DSP, x, 48000, 'lp', 19000, 0.707);
     for (let i = 0; i < x.length; i++) x[i] = Math.tanh(x[i] * 1.8) * 0.99;
-    return DSP.measure([H.normalize(x, 0.999)], 48000);
+    return MEAS([H.normalize(x, 0.999)], 48000);
   })();
   ok(Presets.buildParams('auto', clippedM, 0.72).declip > 0.3,
     'a clipped master asks for the de-clipper',
     Presets.buildParams('auto', clippedM, 0.72).declip.toFixed(3) + ' (evidence ' + clippedM.clipEvidence.toFixed(3) + ')');
-  ok(Presets.buildParams('auto', DSP.measure([sims.vinyl], 48000), 0.72).declip === 0
-    && Presets.buildParams('auto', DSP.measure([sims.cassette], 48000), 0.72).declip === 0,
+  ok(Presets.buildParams('auto', MEAS([sims.vinyl], 48000), 0.72).declip === 0
+    && Presets.buildParams('auto', MEAS([sims.cassette], 48000), 0.72).declip === 0,
     '…and material that was never clipped does not, however loud it is');
 
-  const probes = Object.keys(sims).map((key) => () => DSP.measure([sims[key]], 48000))
+  const probes = Object.keys(sims).map((key) => () => MEAS([sims[key]], 48000))
     .concat([() => stereoM, () => phaseM, () => rumbleM, () => clippedM]);
+  // Each probe is measured ONCE and its law read at the three amounts once: the
+  // measurements are deterministic, and the per-parameter loop below used to
+  // re-measure every probe for every declared parameter (≈ 2 800 measure() runs
+  // for 62 parameters, most of this file's runtime). Now it is 15 measure() runs.
+  const lawReads = probes.map((probe) => {
+    const m = probe();
+    return [0.25, 0.75, 1].map((p) => Presets.buildParams('auto', m, p));
+  });
   const untouched = declared.filter((k) => {
     if (k === 'bypass') return false;            // the A/B switch, not a law parameter
     let moved = false;
-    for (const probe of probes) {
-      for (const p of [0.25, 0.75, 1]) {
-        const q = Presets.buildParams('auto', probe(), p);
+    for (const reads of lawReads) {
+      for (const q of reads) {
         if (Math.abs(q[k] - ranges[k][0]) > 1e-9) moved = true;
       }
     }
@@ -1072,7 +1129,7 @@ section('audit · presets and parameters');
    * nothing happened, which is the only place the fault was visible. The check
    * below reads the worklet's own source: every parameter in the descriptor
    * list must appear in a `g('name'` read. */
-  const wsrc = require('fs').readFileSync(require('path').join(__dirname, '..', 'assets', 'worklets', 'remaster-processor.js'), 'utf8');
+  const wsrc = workletSrc;                       // the same file, read once above
   const declaredNames = (wsrc.match(/k\('([A-Za-z0-9_]+)'/g) || []).map((t) => t.slice(3, -1));
   const readNames = new Set((wsrc.match(/g\('([A-Za-z0-9_]+)'/g) || []).map((t) => t.slice(3, -1)));
   /* the twelve corrective-EQ bands are read in a loop as `g('eq' + b, 0)`, so a
@@ -1084,12 +1141,12 @@ section('audit · presets and parameters');
     neverRead.length ? 'never read: ' + neverRead.join(', ') : 'all ' + declaredNames.length + ' declared parameters are read');
 
   // 0 % must produce a completely inactive chain
-  const zero = Presets.buildParams('auto', DSP.measure([sims.garage], 48000), 0);
+  const zero = Presets.buildParams('auto', MEAS([sims.garage], 48000), 0);
   // Amounts must be zero; the *rate* parameters (frequencies, sharpnesses, the
   // level references the chain is told to expect) are not amounts — they sit at
   // whatever was measured and are multiplied by a zero amount inside the worklet.
   const RATES = ['noiseFloor', 'hissFloor', 'autoLevel', 'subRatio',
-    'humHz', 'boxF1', 'boxQ1', 'boxF2', 'boxQ2', 'airF', 'airRoom', 'hissTilt', 'hissMax',
+    'humHz', 'boxF1', 'boxQ1', 'boxF2', 'boxQ2', 'airF', 'airRoom', 'airGainDb', 'hissTilt', 'hissMax',
     // the per-song stages add two more: where the de-hisser splits and how the
     // glue compressor is timed are *measurements* of the file, not amounts —
     // each is multiplied by its own zero amount inside the worklet.
@@ -1111,7 +1168,7 @@ section('audit · presets and parameters');
   ok(zero.power === 0, 'at 0 % the dry/wet crossfade is fully dry', String(zero.power));
 
   // …and 100 % must be fully wet and fully scaled
-  const full = Presets.buildParams('garage', DSP.measure([sims.garage], 48000), 1);
+  const full = Presets.buildParams('garage', MEAS([sims.garage], 48000), 1);
   ok(full.power === 1 && full.air > 0.1 && full.exciter > 0.1 && full.dehiss > 0.1,
     'at 100 % the chain is fully active and fully wet', 'air ' + full.air.toFixed(2) + ', dehiss ' + full.dehiss.toFixed(2));
 
@@ -1128,9 +1185,9 @@ section('audit · presets and parameters');
       return H.normalize(s, 0.9);
     };
     const squashed = build(0.25, 6);                       // a modern loud master
-    const mall = DSP.measure([squashed], SR2);
+    const mall = MEAS([squashed], SR2);
     const pSquashed = Presets.buildParams('general', mall, 0.8);
-    const pNormal = Presets.buildParams('general', DSP.measure([H.garageSim(DSP, SR2, 10)], SR2), 0.8);
+    const pNormal = Presets.buildParams('general', MEAS([H.garageSim(DSP, SR2, 10)], SR2), 0.8);
     ok(pSquashed.warmth < pNormal.warmth, 'a limited master is not saturated further',
       'warmth ' + pSquashed.warmth.toFixed(3) + ' vs ' + pNormal.warmth.toFixed(3));
     ok(pSquashed.glue <= pNormal.glue, 'and it is not compressed further either',
@@ -1161,7 +1218,7 @@ section('audit · presets and parameters');
       for (let i = 0; i < sq.length; i++) sq[i] = Math.tanh((sq[i] - mean) * 2.0) / 2.0;
       return H.normalize(sq, 0.88);
     })();
-    const mSq = DSP.measure([flatSq], SR2);
+    const mSq = MEAS([flatSq], SR2);
     const sqIssues = Presets.diagnose(mSq).issues || [];
     ok(mSq.dynamicRangeDb < 9 && sqIssues.indexOf('squashed') !== -1,
       'an over-limited master is diagnosed as one, not merely dosed for',
@@ -1174,9 +1231,9 @@ section('audit · presets and parameters');
       s = H.filter(DSP, s, SR2, 'lp', 17000, 0.707);
       return H.normalize(H.mix([s, H.noise(SR2, 10, 0.0006, 78)]), 0.8);
     })();
-    const mClean = DSP.measure([clean], SR2);
+    const mClean = MEAS([clean], SR2);
     const pClean = Presets.buildParams('general', mClean, 0.8);
-    const pDull = Presets.buildParams('garage', DSP.measure([H.garageSim(DSP, SR2, 10)], SR2), 0.8);
+    const pDull = Presets.buildParams('garage', MEAS([H.garageSim(DSP, SR2, 10)], SR2), 0.8);
     ok(pClean.air < pDull.air * 0.5, 'bright material gets a fraction of the air synthesis',
       'air ' + pClean.air.toFixed(3) + ' vs ' + pDull.air.toFixed(3));
     ok(pClean.exciter < pDull.exciter * 0.6, '…and a fraction of the exciter',
@@ -1186,7 +1243,7 @@ section('audit · presets and parameters');
   }
 
   // monotonic: more power must never mean less effect
-  const m2 = DSP.measure([sims.vinyl], 48000);
+  const m2 = MEAS([sims.vinyl], 48000);
   const series = [0, 0.1, 0.2, 0.4, 0.6, 0.8, 1].map((p) => Presets.buildParams('auto', m2, p));
   const nonMonotone = [];
   for (const k of ['air', 'exciter', 'dehiss', 'declick', 'sub', 'reso', 'glue', 'warmth', 'power']) {
@@ -1305,10 +1362,13 @@ section('audit · DSP robustness');
   ok(Math.abs(quietBig - (2400 + quiet.latency)) <= 1 && Math.abs(quietPeak - 0.9) < 0.05,
     'with the de-clicker engaged but turned down, the same impulse comes out at exactly the declared latency',
     'sample #' + quietBig + ', declared ' + quiet.latency + ', peak ' + quietPeak.toFixed(3));
-  const noClick = H.renderEx(P, [imp], Object.assign({}, H.DEFAULT_PARAMS, { power: 1 })).out[0];
+  const noClickR = H.renderEx(P, [imp], Object.assign({}, H.DEFAULT_PARAMS, { power: 1 }));
+  const noClick = noClickR.out[0];
   let plainBig = -1;
   for (let i = 0; i < noClick.length; i++) if (plainBig === -1 && Math.abs(noClick[i]) > 0.05) plainBig = i;
-  ok(plainBig >= 2399 && plainBig <= 2402, 'with the de-clicker off the chain has no latency at all', 'sample #' + plainBig);
+  // the chain's look-ahead is the same whether or not the de-clicker is on: the
+  // impulse at 2400 comes out exactly the reported latency later
+  ok(plainBig === 2400 + noClickR.latency, 'with the de-clicker off the chain delays by its reported look-ahead, no more and no less', 'sample #' + plainBig + ' = 2400 + ' + noClickR.latency);
 
   // sample rates: the filters must stay stable from 8 kHz to 96 kHz
   const rateProblems = [];
@@ -1322,9 +1382,12 @@ section('audit · DSP robustness');
   ok(rateProblems.length === 0, 'stable at every sample rate from 8 kHz to 96 kHz', rateProblems.join(', '));
 
   // stereo integrity: identical channels must stay identical, and the channels
-  // must not leak into each other
+  // must not leak into each other. The allpass synthesis is the one stage that
+  // *makes* a mono file stereo (its own contract is in tests/dsp.test.js: the
+  // mono sum is kept exactly), so these two checks run with it off.
   const l = H.garageSim(DSP, SR, 2);
-  const outro = H.render(P, [l, l], full);
+  const noSpread = Object.assign({}, full, { monoSpread: 0 });
+  const outro = H.render(P, [l, l], noSpread);
   let maxDiff = 0;
   for (let i = 0; i < outro[0].length; i += 7) maxDiff = Math.max(maxDiff, Math.abs(outro[0][i] - outro[1][i]));
   ok(maxDiff === 0, 'identical input channels stay identical (no channel leakage)', 'max difference ' + maxDiff);
@@ -1333,7 +1396,7 @@ section('audit · DSP robustness');
   ok(peak(rightOnly[0]) < 1e-6, 'silence in the left channel stays silent', 'peak ' + peak(rightOnly[0]).toExponential(1));
 
   // mono vs stereo: the mono render equals the left channel of the stereo render
-  const mono = H.render(P, [l], full)[0];
+  const mono = H.render(P, [l], noSpread)[0];
   let monoDiff = 0;
   for (let i = 0; i < mono.length; i += 13) monoDiff = Math.max(monoDiff, Math.abs(mono[i] - outro[0][i]));
   ok(monoDiff < 1e-6, 'a mono file is processed exactly like one channel of a stereo file', 'max difference ' + monoDiff.toExponential(1));
@@ -1366,7 +1429,7 @@ section('audit · the mains notch');
   // so the numbers are the notch's and nothing else's.
   const bare = { power: 1, bypass: 0, sub: 0, subRatio: 0.5, exciter: 0, air: 0, dehiss: 0, declick: 0, reso: 0,
     glue: 0, warmth: 0, tilt: 0, band0: 0, band1: 0, band2: 0, band3: 0, band4: 0, band5: 0,
-    boxG1: 0, boxF1: 200, boxQ1: 3, boxG2: 0, boxF2: 400, boxQ2: 3, width: 0, airRoom: 0.5, airF: 6000,
+    boxG1: 0, boxF1: 200, boxQ1: 3, boxG2: 0, boxF2: 400, boxQ2: 3, width: 0, airRoom: 0.5, airGainDb: 0, airF: 6000,
     noiseFloor: -70, hissFloor: -80, hissTilt: 0, hissMax: 0, autoLevel: 0, hum: 0, hum2: 0, hum3: 0, humHz: 50 };
   const spec = (ch) => DSP.spectrum([ch], SR, { fftSize: 16384 });
   const line = (ch, f) => DSP.bandLevel(spec(ch), f - 1.5, f + 1.5);
@@ -1721,7 +1784,10 @@ section('audit · the de-clicker\'s own floor');
 {
   const SR = 48000, SEC = 6;
   const num = (v, d) => (typeof v === 'number' && isFinite(v) ? v.toFixed(d === undefined ? 1 : d) : String(v));
-  const LOOK = 65;                       // the stage's own look-ahead, in samples (17 spike + 48 ring)
+  // the samples the de-clicker sees are held back by the de-clipper's 271 first —
+  // the chain now delays by both stages' look-ahead whether they are engaged or
+  // not — then by the de-clicker's own 65 (17 spike + 48 ring)
+  const LOOK = 271 + 65;
   const SRC_C = '  tick(x, amount, reconstructed, clipLevel) {';
   const SRC_B = '    let out = m > 0.001 ? xd + (p - xd) * m : xd;';
   const PATCH_C = SRC_C + '\n    this.__n = (this.__n || 0) + 1;';
@@ -1826,18 +1892,18 @@ section('audit · the de-clicker\'s own floor');
       for (let k = 0; k < Math.round(0.002 * SR); k++) {
         const j = h + k;
         if (j + kitOn.latency >= kitOn.out[0].length) break;
-        const d = kitOn.out[0][j + kitOn.latency] - kitOff.out[0][j];
+        const d = kitOn.out[0][j + kitOn.latency] - kitOff.out[0][j + kitOff.latency];
         e += d * d; n++;
         const a = Math.abs(kitOff.out[0][j]); if (a > peak) peak = a;
       }
       const db = 20 * Math.log10(Math.sqrt(e / n) / (peak + 1e-12) + 1e-12);
       if (db < worstSnare) worstSnare = db;
     }
-    for (let i = 0; i + kitOn.latency < kitOn.out[0].length; i++) if (Math.abs(kitOn.out[0][i + kitOn.latency] - kitOff.out[0][i]) > 0.002) touched++;
+    for (let i = 0; i + kitOn.latency < kitOn.out[0].length; i++) if (Math.abs(kitOn.out[0][i + kitOn.latency] - kitOff.out[0][i + kitOff.latency]) > 0.002) touched++;
     const wOn = H.renderEx(Pk, [wide], { power: 1, autoLevel: 0, declick: dk });
     const wOff = H.renderEx(Pk, [wide], { power: 1, autoLevel: 0 });
     let wt = 0;
-    for (let i = 0; i + wOn.latency < wOn.out[0].length; i++) if (Math.abs(wOn.out[0][i + wOn.latency] - wOff.out[0][i]) > 0.002) wt++;
+    for (let i = 0; i + wOn.latency < wOn.out[0].length; i++) if (Math.abs(wOn.out[0][i + wOn.latency] - wOff.out[0][i + wOff.latency]) > 0.002) wt++;
     return { snare: worstSnare, kit: 100 * touched / kit.sig.length, master: 100 * wt / wOn.out[0].length };
   };
   const shipped = costOf(maps[0][1]), near = costOf(maps[1][1]), reach = costOf(maps[2][1]);
@@ -2384,7 +2450,7 @@ section('audit · codecs');
   ok(-2 - Presets.codecMargin('mp3', 192) + WORST[192] <= -1,
     'so the general −1 dBTP a service asks for survives the worst case',
     'worst delivered ' + (-2 - Presets.codecMargin('mp3', 192) + WORST[192]).toFixed(2) + ' dBTP on a hot master at 192 kbit/s');
-  ok(/Presets\.codecMargin\(State\.format, State\.mp3Rate\)/.test(read('assets/js/app.js')),
+  ok(/Presets\.ceilingDb\(\{ format: State\.format, kbps: State\.mp3Rate/.test(read('assets/js/app.js')),
     'the app applies it where the export format is known');
   ok(/Math\.max\(1152 \* 4, Math\.floor\(rate \* 1\.5\)\)/.test(read('assets/js/codecs.js'))
     && /Math\.max\(1152 \* 4, Math\.floor\(rate \* 1\.5\)\)/.test(read('tools/util.js')),
@@ -2537,7 +2603,10 @@ section('audit · documentation matches the product');
     ok(readme.indexOf(base) !== -1, 'README mentions ' + base);
   }
   // claims that must stay true
-  ok(!/localStorage/.test(appSrc) && !/document\.cookie/.test(appSrc), 'the privacy claims still hold in code');
+  // the loader is the one place that stores the two user settings (rs.online,
+  // rs.inferenceBudgetMaxMs; web.test.js checks those keys exactly); nothing else may
+  const storageSrc = APP_JS.filter((f) => !/library-loader\.js$/.test(f)).map(read).join('\n');
+  ok(!/localStorage/.test(storageSrc) && !/document\.cookie/.test(appSrc), 'the privacy claims still hold in code');
   ok(/8–16 kHz/.test(readme) && /30–60 Hz/.test(readme), 'the README states the two synthesis ranges');
   // the latency claim has to match the DSP: the de-clicker's look-ahead is the
   // one delay in the chain, and the README has to say so.

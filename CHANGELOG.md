@@ -6,6 +6,231 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Slimmer repository, dead code removed, smoother waveform and sliders
+
+* **Screenshots are no longer versioned.** The 19 PNG files in `docs/beta/` are removed from Git and
+  ignored (`docs/beta/*.png`). `tests/beta/beta.js` writes its screenshots to `test-results/beta/`,
+  which is git-ignored. The beta report links there.
+* **Dead code removed**, found with ESLint (`no-unused-vars`, `no-unreachable`, `no-undef`): an unused
+  spectrum helper, an unused engine method and loader method, an unused mastering constant and helper
+  in the worklet, unused locals and an unused `recipe()` argument. No commented-out code was found.
+* **Waveform geometry is cached.** The bars and correction columns are built once per data set and
+  canvas size. Playback only fills them again. The output was compared against the previous drawing
+  on the same data, with and without `Path2D`: the same colours, rectangles and order.
+* **Fewer DOM writes during playback.** The seek bar, its accessibility value and the time text are
+  written only when they change. The seek element is looked up once.
+* **Live sliders apply once per frame.** Dragging the power control no longer sends one parameter
+  update per input event. The preset change and the final value still apply immediately.
+* **The click fit allocates nothing.** Its buffer is reused, in line with the worklet's header, which
+  already promises no allocation inside `process()`.
+
+No DSP coefficient, threshold or signal path changed.
+
+### Production hardening: strict local mode, load budget, CI, listening tests
+
+* **Strict local mode is the default** (`library-loader.js`). The page makes no request to any host
+  other than its own. A missing bundled file is refused at once (the test measures 0 ms with no
+  opt-in) and the DSP path runs. There is no CDN fallback unless the user turns on the online
+  switch. `setMode('cdn')` alone no longer contacts a CDN.
+* **One gate for every third-party request.** The libraries (JSZip, lamejs), the ONNX runtime, the
+  neural models, the FFmpeg rescue decoder and the MP3 encoder inside the worker are all fetched
+  through `remoteOnly()`. It returns an empty list unless the user opted in and the browser is
+  online. The old `lameUrl()` path that returned the CDN address in `cdn` mode is closed.
+* **Online switch**: *About & credits → Libraries* (or `RSLibs.setOnline(on)`), stored as
+  `localStorage['rs.online']`. The neural worker has no storage, so the page hands it the switch
+  in `init`.
+* **Load budget: default 5 s.** The floor stays at 3 s. The ceiling is 5 s by default and can be
+  raised for high-end devices to 60 s, via `localStorage['rs.inferenceBudgetMaxMs']` or
+  `RSLibs.setBudgetMax(ms)`. The page watchdog (`engine.js`) reads the loader's limits instead of
+  its own fixed clamp, so the worker and the page agree. This supersedes the earlier "3–5 s, default
+  4 s" entry below.
+* **Storage is documented and tested.** Exactly two user settings are stored, in one place. The
+  web suite fails if any other storage, cookie or beacon appears.
+* **Acceptance matrix in CI, no silent skips.** `RS_REQUIRE_FFMPEG=1` makes a missing ffmpeg a
+  failure, and any SKIPPED section fails the gate. `tools/acceptance.js` runs real MP3 round-trips.
+* **Export honesty is gated.** A repaired defect that comes back on the 320 kbit/s re-upload fails
+  the run. The one measured return, `general:hum`, is recorded as a `KNOWN_ISSUE` with its residual
+  visible in the gate, not hidden as a note. It is not repaired yet.
+* **`.github/workflows/ci.yml`**: on push to `main` and on pull requests, Ubuntu 24.04, Node 22,
+  ffmpeg from apt (libmp3lame and the mp3 decoder are checked), `npm install`, `npm test`. The
+  acceptance log is uploaded as an artifact.
+* **Listening-test protocol** in `docs/LISTENING-TESTS.md`: 3–5 golden samples for Air synthesis,
+  De-Click and BWE, ABX with the 12/16 threshold (p = 0.038), MUSHRA-style preference, a control
+  sample, and pass criteria. Documentation only; no audio is committed. The golden set is not yet
+  sourced.
+* **Tests updated deliberately**: the budget tests expect the 5 s default, the CDN tests opt in
+  explicitly, a new privacy section covers the strict mode, and the beta checks the online switch
+  (not the old mode toggle).
+
+### Neural load window: stalls are cut, progress is not
+
+* **A body that stops is cut one window after its last byte** (`library-loader.js` `fetchBytes`).
+  The total limit now covers only the connection (up to the response headers). The body has a
+  stall window of one budget, re-armed by each chunk. A large local model on a slow device is loaded
+  in full while it keeps arriving; the old total limit refused it as `unavailable`.
+* **The acquisition is watched from the page** (`engine.js` `_watchNeural`). The worker reports
+  `acquiring`, `progress` and `acquired`. Progress re-arms a watchdog; silence for one window
+  terminates the worker and reports the stage `unavailable`. This covers a host that accepts the
+  connection and then stalls inside `importScripts`, which a worker cannot interrupt itself. Session
+  creation after `acquired` is CPU work and is not timed.
+* ~~**The window is configurable**: `initNeural({ budgetMs })`, clamped to 3–5 s, default 4 s, handed to
+  the worker.~~ *Superseded in the production-hardening entry above: the default is 5 s, and the
+  ceiling is adjustable by localStorage or `setBudgetMax`.*
+* Tests: `tests/neural.test.js` covers a body that trickles in past the budget (loaded), one that
+  stops (cut at ≈ 3 s), a silent acquisition (terminated and reported), and a moving one (not cut).
+
+### Play clock, waveform textures, audit speed
+
+* **Play starts the clock every time** (`engine.js` `play()`). A context the browser had suspended
+  stayed suspended while the monitor reported itself as playing, because `init()` returns early
+  once the context is loaded. `play()` now resumes a suspended context first. Regression check in
+  `tests/web.test.js` (suspended context → `resume()` is called, the context runs, `playing` is true).
+* **Beta clock check no longer races its own threshold.** The poll stopped at +0.2 s while the
+  assertion wanted +0.3 s. The check now waits for the clock to leave zero, reads the start position,
+  then waits (6 s deadline) for +0.3 s. The threshold is unchanged. Beta: 93 passed / 1 failed before,
+  97 passed after.
+* **Beta checks the preview banner and the waveform textures.** `.preview-note` must be visible on
+  every card with its "40" text. The correction textures are read back from the canvas: gold hatch
+  over removed clicks, cyan dots over lifted top end. Both must sit only on the flagged columns; the
+  one-pixel anti-aliased edge beside a flagged column is not counted.
+* **Audit "presets and parameters" measures each synthetic buffer once.** `DSP.measure()` is pure, so
+  its result is memoised per buffer (keyed by channel identity). On the same machine, in the same
+  profiled run conditions: 16.5 s → 12.7 s for the section (−23 %), and 94 → 76 `measure()` calls
+  across the audit file. The section is now well inside its 30 s budget.
+* **Test runner: timing-sensitive suite runs alone.** The audit suite asserts wall-clock budgets
+  ("renders at real time"). Beside a heavy neighbour on the two-core check machine it read 0.7× real
+  time and failed; on its own it reads 1.1×. It now runs alone after the parallel pool; the other six
+  still run side by side.
+* **Docs.** The README project tree lists `tools/run-tests.js` with the parallel runner's behaviour.
+  `docs/BETA-REPORT.md` and the screenshot matrix in `docs/beta/` are regenerated from the 97-check run.
+
+### Codec classes, room detector, hum, air, fallbacks, test runner, beta
+
+* **Codec cut frequency names the bitrate** (`dsp-utils.js` `detectMp3Brickwall`, `presets.js`). A
+  steep wall (> 30 dB/oct) at or below 15.5 kHz is `codecWall64k`; above 15.5 kHz and up to 18.0 kHz
+  it is `codecWall128k`. Both count as codec loss; each sets its own true-peak margin.
+* **Air repair on codec loss raised to +2.5 dB** (`airGainDb`, was +2.0), still under the 12–16 kHz
+  +3 dB overshoot gate.
+* **Room detector sees narrow, persistent peaks.** The reference is the median of a ±47 Hz
+  neighbourhood (was the mean of ±100 Hz, which an axial comb lifts), and the excess weight is a
+  trapezoid. A sustained musical chord had scored 1.00 as a room; it now scores 0.00. The acceptance
+  room fixture moves 0.00 → 0.19 against the 0.2 notch gate, so the notch field does not open on it
+  yet. The room row stays a metric, not a gate.
+* **Hum: not closed.** Narrowing the 50/150 Hz notches from 3 to 2 Hz changed the residual by 0.02 dB
+  (22.25 → 22.23 dB, ceiling 22.75), so the notch width is not what limits it. Reverted.
+* **Neural stages fall back silently.** `library-loader.onnxRuntime()` never throws: in Node it binds
+  the installed onnxruntime-node, otherwise it resolves to `null`. Missing weights reject with
+  `code: 'UNAVAILABLE'`. The worker answers `unavailable` (not `error`), and the engine keeps the DSP
+  chain running with no latency added.
+* **Browser decode:** `AudioContext.decodeAudioData()` on one shared context is the primary path.
+  `OfflineAudioContext` is used only where no live context can be created, and a file the browser
+  refuses goes straight to the FFmpeg rescue.
+* **Test runner:** `npm test` runs the seven suites in parallel (`tools/run-tests.js`, `--serial`,
+  `--only`). Full logs go to `tools/work/logs/`. Wall time 397 s → 275 s.
+* **Audit suite 397 s → 117 s.** The "every declared parameter is driven by the law" check measured
+  every probe for every parameter (≈ 2 800 measurements); each probe is now measured once. Each file
+  is read once.
+* **Accessible waveform textures.** Gold (removed clicks) is a diagonal hatch and cyan (lifted top end)
+  a dot grid, so the two differ without colour. A legend sits under each waveform.
+* **Latency, one number.** The chain's total look-ahead is **424 samples at 48 kHz**: the de-clipper
+  271 + the de-clicker 65 + the true-peak limiter 88. The code comments and the README now say so.
+* **Beta in a real Chromium (`npm run test:beta`): 94 checks.** Two fixes came out of the run.
+  The docked job bar covered the end of the last card on a phone, so the list now has room under the
+  bar, and the check scrolls the page until the card's end is reachable above the bar (the page uses
+  smooth scrolling, so the check scrolls instantly). The play-clock check now polls for the clock
+  instead of sleeping a fixed time: it failed once in five runs under load. Screenshots and
+  `docs/BETA-REPORT.md` are regenerated.
+
+### Neural side chain, part 3 — DeepFilterNet3 denoising, FIR before super-resolution, memory guard
+
+* **`assets/js/neural-dsp.js` (RSNeural)** — pure DSP for the ML path, dual-exported (Node and
+  browser). 960-point FFT, 32-band ERB filter bank, Vorbis-windowed STFT at 48 kHz (hop 480),
+  DeepFilterNet3 channel and stream. Model windows are 50 frames with 2 frames of look-ahead
+  and a constant latency of 26 400 samples (0.55 s), independent of the chunk size.
+* **Linear-phase FIR lowpass** `linearPhaseLowpass(fc, sr, taps)` — Blackman-windowed sinc,
+  symmetric taps, group delay (N−1)/2 compensated in `applyFir()`. Verified: unity DC,
+  pass band within 0.01 dB below 13.5 kHz, ≥ 60 dB stop band from 16 kHz, zero delay and no
+  level change on a 1 kHz tone. Meant to sit at the measured codec cut before super-resolution,
+  so SR does not create intermodulation products above it.
+* **Memory guard** `chooseModelTier()` — compact NovaSR tier on mobile or when free heap is below
+  420 MB; full tier otherwise, and when the heap cannot be read.
+* **DeepFilterNet3 in `neural-worker.js`** — `loadDfn3` checks for 48 kHz rings, runs the memory
+  guard, opens the three graphs from `assets/vendor/models/` (local first) and streams audio
+  through a per-channel FIFO. The `loaded` message reports `tier` and `latency` (stream latency
+  plus one 480-sample frame of FIFO slack); the stats report `denoiser`, `tier` and `denoiseLatency`.
+* **Engine** — `initNeural({ denoise: true })` loads DeepFilterNet3 after the rings are set up.
+* **Known limits, stated plainly:** the 48 kHz super-resolution stage (NovaSR / LavaSR) is **not
+  delivered** — no weight file is available in this repository, and the stage is not active.
+  On noisy speech the denoiser lowers the level by about 5 dB at low SNR (typical for this
+  model family; not yet tuned). The engine's output compensation does not yet include the
+  DeepFilterNet delay.
+* **Tests** — `tests/e2e.test.js` gains a *neural* section: FIR symmetry, response and alignment,
+  the memory tiers, FFT and ERB constants, the declared latency, and the stream's delay
+  sample for sample. With the model files present it also runs DeepFilterNet3 on damaged-MP3
+  material (brick wall measured by the detector, a non-stationary burst, silence, voiced
+  speech) and the worker end to end through the rings with the real graphs; without them those
+  checks skip with a message. `onnxruntime-node` is a dev dependency for these checks.
+
+### The hybrid ML foundation — offscreen worker, lock-free rings, lazy ONNX loading
+
+The setup the ML side chain runs on, without touching the shipped DSP: the AudioWorklet stays
+exactly as it is, and everything new sits beside it until it is wired in.
+
+* **`assets/js/ring-buffer.js` (RSRing)** — a lock-free single-producer / single-consumer ring
+  buffer over SharedArrayBuffer: the worklet's 128-frame quanta in on one side, the inference
+  worker's 512…2048-frame hops out on the other, planar Float32 data behind a 16-cell Int32
+  header. No locks, no waiting on the audio path — the producer publishes the write index only
+  after the data is copied, the consumer mirrors it, and a short read/write returns exactly the
+  frames moved and counts the rest as overrun/underrun instead of dropping them silently
+  (lossless by contract). `latencyFrames()` reports the fill level plus a fixed compensation
+  (hop alignment + model delay) so a mixer can keep its dry path aligned. Bounded
+  `waitForFrames`/`waitForSpace` (Atomics.wait where blocking is legal, polling on the main
+  thread) give the worker side real flow control.
+* **`assets/js/neural-worker.js`** — the offscreen inference worker. Drains the input ring in
+  hops, runs the ONNX block and fills the return ring; until a model is loaded it forwards
+  blocks unchanged, so a missing model degrades to a silent ML path, never to a crash. The
+  session runs on **WebGPU first** with an automatic fallback to the **WASM** build
+  (multi-threaded SIMD where cross-origin isolation allows threads), and the provider that won
+  is reported honestly in the `loaded` message.
+* **`assets/js/library-loader.js` (RSLibs)** — grows the lazy loading for all of it:
+  `onnxRuntime()` (local drop-in in `assets/vendor/onnxweb/` first, free CDNs after),
+  `onnxModel(name)` (local filesystem `assets/vendor/models/` first, registered CDN fallback,
+  reversed in `cdn` mode) and `registerModel()` for those fallbacks. The loader now also runs
+  inside a dedicated worker (importScripts), and `setBase()` points worker-side URL resolution
+  back at the page so `assets/vendor/…` still resolves. Nothing is fetched before the ML path
+  is asked for — the zero-external-request default mode still makes zero external requests.
+* **`assets/js/engine.js`** — `initNeural()` sets the side chain up (two rings + worker) and
+  resolves to `null` without SharedArrayBuffer/Worker, so plain browsers degrade to pure DSP;
+  `disposeNeural()` tears it down. Not started before it is asked for.
+* **Tests** — `tests/dsp.test.js` verifies the ring buffer at capacities 256…16384 frames:
+  bit-exact fill/drain, the 128→512/1024/2048 hop exchange through repeated wraps, overflow
+  and underrun accounting (a refused frame never overwrites an unread one), latency
+  accounting, bounded waits, reset — and a real two-thread producer/consumer run over
+  worker_threads in which 96 000 frames cross the boundary in order with zero losses (49 new
+  checks, 213 total).
+
+### Codec, room and comb measurements — `measure()` and `measureAsync()` report four more indicators
+
+The measurement layer now quantifies four defects the older checks could not separate from musical content. All of
+them are plain numbers on the result object, computed in the same sliced pass as everything else.
+
+* **`mp3BrickwallHz`** — the cut frequency of a codec's low-pass (0 when there is none). A cut counts only if the
+  spectrum falls at least 36 dB/oct across it, at least 60 % of that fall happens within an eighth of an octave, and
+  everything above the edge stays 20 dB lower. Measured on synthetic 128 kbit/s-style cuts at 15.5, 16.5 and 17 kHz:
+  each is found within 30 Hz. A 12 kHz filter slope is steep but is correctly not reported as a wall.
+* **`spectralHoleDensity`** — the share of bins below that cut that sit 25 dB under their neighbours, on
+  granule-scale (2048-point) frames. Chance level for noise is about 0.2 %; band-wise codec holes measure about 3 %.
+* **`roomResonanceScore`** — 0…1, the strongest narrow peak in 200–800 Hz whose phase stays consistent from hop to
+  hop across several places in the file. A steady ring scores 0.95; the same tone with its phase redrawn every
+  512 samples scores 0; noise scores 0.
+* **`combFilterPeriod`** — the notch spacing in Hz of a periodic comb in the spectrum, from the autocorrelation of
+  the first difference of the dB spectrum (0 when there is none). Measured on delayed-copy combs: 996 Hz for a
+  48-sample echo, 299 Hz for a 160-sample echo; noise reads 0.09 against a 0.4 threshold.
+
+Known limits, stated here rather than hidden: a spectral hole measured on a file that is not aligned to the codec's
+granules reads shallower, so the density is a lower bound; a comb's own notches also count as holes below the cut;
+a phase jump every 2048 samples still reads about 0.7 coherence (three of four hops stay in phase).
+
 ### Round 22 — the beta suite, complete: every control, the whole journey, and two rows that were the suite's own fault
 
 **The beta is now a full pass over the interface, not a tour of it.** It grew from 63 to **94 checks**, and the two

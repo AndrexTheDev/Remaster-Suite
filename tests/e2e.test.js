@@ -10,6 +10,8 @@
  *   · a ten-file batch, processed sequentially, packed into one ZIP
  *   · mono, stereo, 32 kHz, 96 kHz
  *   · hostile input: silence, clipping, DC offset, 1-sample file, noise only
+ *   · neural DSP: FIR lowpass before super-resolution, the memory tier, and
+ *     DeepFilterNet3 on damaged MP3 material (real graphs when present)
  *
  * Run:  node tests/e2e.test.js
  * ========================================================================== */
@@ -60,7 +62,7 @@ function boot() {
   win.URL.revokeObjectURL = () => {};
   Object.defineProperty(win.navigator, 'clipboard', { value: { writeText: async () => {} }, configurable: true });
   win.eval(fs.readFileSync(path.join(ROOT, 'assets/vendor/lame.min.js'), 'utf8'));
-  for (const f of ['dsp-utils.js', 'presets.js', 'i18n.js', 'library-loader.js', 'codecs.js', 'analyzer.js', 'engine.js', 'ui.js', 'app.js']) {
+  for (const f of ['dsp-utils.js', 'presets.js', 'i18n.js', 'library-loader.js', 'codecs.js', 'analyzer.js', 'ring-buffer.js', 'neural-dsp.js', 'engine.js', 'ui.js', 'app.js']) {
     win.eval(fs.readFileSync(path.join(ROOT, 'assets/js', f), 'utf8'));
   }
   return win;
@@ -94,6 +96,394 @@ async function bytesOf(win, result) {
 }
 
 /* ══════════════════════════════════════════════════════════════════ the suite ══ */
+
+/* ───────────────────────────────────────────────── neural DSP regression ── */
+
+const NEURAL = path.join(ROOT, 'assets', 'js', 'neural-dsp.js');
+const NeuralDsp = require(NEURAL);
+const NEURAL_WORKER = path.join(ROOT, 'assets', 'js', 'neural-worker.js');
+const MODEL_DIR = path.join(ROOT, 'assets', 'vendor', 'models');
+const DFN_FILES = ['dfn3-enc.onnx', 'dfn3-erb-dec.onnx', 'dfn3-df-dec.onnx'];
+
+/** Deterministic white noise in [-amp, amp). */
+function lcgNoise(n, amp, seed) {
+  const out = new Float32Array(n);
+  let s = seed >>> 0 || 1;
+  for (let i = 0; i < n; i++) {
+    s = (Math.imul(s, 1103515245) + 12345) >>> 0;
+    out[i] = amp * ((s / 4294967296) * 2 - 1);
+  }
+  return out;
+}
+
+/** Formant-synthesised voice: pulse train at 120 Hz, three resonators, syllable envelope. */
+function voiceLike(sr, seconds, seed) {
+  const L = Math.round(sr * seconds);
+  const out = new Float32Array(L);
+  const noise = lcgNoise(L, 1, seed);
+  const formants = [[700, 110], [1220, 120], [2600, 160]].map(([f, bw]) => {
+    const r = Math.exp((-Math.PI * bw) / sr), th = (2 * Math.PI * f) / sr;
+    return { a1: -2 * r * Math.cos(th), a2: r * r, g: 1 - r, y1: 0, y2: 0 };
+  });
+  let phase = 0;
+  for (let i = 0; i < L; i++) {
+    const t = i / sr;
+    const env = Math.pow(Math.max(0, Math.sin(Math.PI * 4 * t)), 2);
+    phase += 120 / sr;
+    let y = 0;
+    if (phase >= 1) { phase -= 1; y = 1; }
+    y = y * env + 0.003 * noise[i] * env;
+    for (const q of formants) {
+      const v = q.g * y - q.a1 * q.y1 - q.a2 * q.y2;
+      q.y2 = q.y1; q.y1 = v; y = v;
+    }
+    out[i] = y;
+  }
+  let pk = 0;
+  for (let i = 0; i < L; i++) pk = Math.max(pk, Math.abs(out[i]));
+  for (let i = 0; i < L; i++) out[i] = (out[i] * 0.5) / (pk || 1);
+  return out;
+}
+
+/** Damaged-MP3 stand-in: voice-like programme behind a 128k-style brick wall at
+ *  14.8 kHz. Returns { x, cutHz } with the cut measured by detectMp3Brickwall. */
+function damagedMp3(DSPmod, sr, seconds, seed) {
+  const L = Math.round(sr * seconds);
+  const env = new Float32Array(L);
+  for (let i = 0; i < L; i++) env[i] = 0.55 + 0.45 * Math.sin((2 * Math.PI * 1.7 * i) / sr);
+  const base = voiceLike(sr, seconds, seed);
+  const x = new Float32Array(L);
+  for (let i = 0; i < L; i++) x[i] = 0.6 * base[i] * env[i];
+  // programme material right up to the cut (a detector needs energy below the edge),
+  // then the codec's brick wall: a steep linear-phase cut at 14.8 kHz, nothing above it
+  const floor = lcgNoise(L, 0.01, seed + 7);
+  const out = applyFirSafe(Float32Array.from(x, (v, i) => v + floor[i]), sr, 14800);
+  // the spectrum of a damaged file is measured on the material itself
+  const spec = DSPmod.spectrum([out], sr, { fftSize: 8192, maxFrames: 120 });
+  const m = DSPmod.detectMp3Brickwall(spec);
+  return { x: out, cutHz: m.detected ? m.hz : 0 };
+}
+
+function applyFirSafe(x, sr, fc) {
+  return NeuralDsp.applyFir(x, NeuralDsp.linearPhaseLowpass(fc, sr, 255));
+}
+
+function biquadLp(x, sr, f, q) {
+  const w = (2 * Math.PI * f) / sr, al = Math.sin(w) / (2 * q), c = Math.cos(w);
+  const b0 = (1 - c) / 2, b1 = 1 - c, b2 = (1 - c) / 2, a0 = 1 + al, a1 = -2 * c, a2 = 1 - al;
+  return biquad(x, b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0);
+}
+function biquadHp(x, sr, f, q) {
+  const w = (2 * Math.PI * f) / sr, al = Math.sin(w) / (2 * q), c = Math.cos(w);
+  const b0 = (1 + c) / 2, b1 = -(1 + c), b2 = (1 + c) / 2, a0 = 1 + al, a1 = -2 * c, a2 = 1 - al;
+  return biquad(x, b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0);
+}
+function biquad(x, b0, b1, b2, a1, a2) {
+  const y = new Float32Array(x.length);
+  let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+  for (let i = 0; i < x.length; i++) {
+    const v = b0 * x[i] + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+    x2 = x1; x1 = x[i]; y2 = y1; y1 = v; y[i] = v;
+  }
+  return y;
+}
+
+/** |H(f)| in dB of a tap set, by direct evaluation. */
+function firDb(h, sr, f) {
+  let re = 0, im = 0;
+  for (let n = 0; n < h.length; n++) {
+    const w = (-2 * Math.PI * f * n) / sr;
+    re += h[n] * Math.cos(w); im += h[n] * Math.sin(w);
+  }
+  return 20 * Math.log10(Math.hypot(re, im) + 1e-30);
+}
+
+/** Energy (dB) of a signal inside [f1, f2], from a Hann-windowed FFT average. */
+function bandDb(DSPmod, x, sr, f1, f2) {
+  const spec = DSPmod.spectrum([x], sr, { fftSize: 4096, maxFrames: 200 });
+  let p = 0, n = 0;
+  for (let k = 0; k < spec.n; k++) {
+    const f = spec.freq[k];
+    if (f >= f1 && f < f2) { p += Math.pow(10, spec.db[k] / 10); n++; }
+  }
+  return n ? 10 * Math.log10(p / n + 1e-30) : -300;
+}
+
+/** Peak lag (samples) of y against x inside [−maxLag, maxLag]. */
+function lagBetween(y, x, maxLag, from, to) {
+  let best = -Infinity, bl = 0;
+  for (let L = -maxLag; L <= maxLag; L++) {
+    let s = 0;
+    for (let i = from; i < to; i++) s += y[i + L] * x[i];
+    if (s > best) { best = s; bl = L; }
+  }
+  return bl;
+}
+
+/** Load the ML worker into a Node VM with the real graphs and a shim ORT. */
+function makeWorkerContext(ort) {
+  const vm = require('vm');
+  const msgs = [];
+  const ctx = {
+    console, setTimeout, clearTimeout, performance, Math, JSON, Promise, Error,
+    navigator: { userAgent: 'node-harness' },
+    crossOriginIsolated: true,
+    fetch: async (url) => {
+      const m = String(url).match(/vendor\/models\/([^/?#]+)$/);
+      if (!m || !fs.existsSync(path.join(MODEL_DIR, m[1]))) return { ok: false, status: 404 };
+      const b = fs.readFileSync(path.join(MODEL_DIR, m[1]));
+      return { ok: true, status: 200, arrayBuffer: async () => b.buffer.slice(b.byteOffset, b.byteOffset + b.length) };
+    },
+    ort: {
+      env: { wasm: {} },
+      // the worker's arrays belong to the VM realm; onnxruntime checks instanceof
+      // against this realm, so the data is copied across before it reaches ORT
+      Tensor: function Tensor(type, data, dims) { return new ort.Tensor(type, Float32Array.from(data), dims); },
+      InferenceSession: {
+        create: async (bytes) => ort.InferenceSession.create(new Uint8Array(bytes), { executionProviders: ['cpu'] }),
+      },
+    },
+  };
+  ctx.self = ctx;
+  ctx.postMessage = (m) => msgs.push(m);
+  ctx.importScripts = (name) => vm.runInContext(fs.readFileSync(path.join(ROOT, 'assets', 'js', name), 'utf8'), ctx, { filename: name });
+  vm.createContext(ctx);
+  ctx.importScripts('ring-buffer.js');
+  ctx.importScripts('library-loader.js');
+  ctx.importScripts('neural-dsp.js');
+  vm.runInContext(fs.readFileSync(NEURAL_WORKER, 'utf8'), ctx, { filename: 'neural-worker.js' });
+  return { ctx, msgs };
+}
+
+async function waitFor(pred, ms) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    const hit = pred();
+    if (hit) return hit;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  return null;
+}
+
+/** Stream mono audio through the worker's rings and collect what comes back. */
+async function runWorkerOverRings(ctx, msgs, signal, sr) {
+  const hop = 1024;
+  const input = ctx.RSRing.create({ capacity: 8192, channels: 1, sampleRate: sr });
+  const output = ctx.RSRing.create({ capacity: 8192, channels: 1, sampleRate: sr, targetFill: hop, latencyCompensation: hop });
+  ctx.onmessage({ data: { type: 'init', id: 1, inputSab: input.sab, outputSab: output.sab, hopSize: hop, passThrough: false } });
+  ctx.onmessage({ data: { type: 'loadDfn3', id: 2 } });
+  const loaded = await waitFor(() => msgs.find((m) => m.id === 2 && (m.type === 'loaded' || m.type === 'error')), 60000);
+  if (!loaded || loaded.type !== 'loaded') return { loaded, out: null };
+  ctx.onmessage({ data: { type: 'start' } });
+
+  const latency = loaded.latency;
+  const total = signal.length + latency;
+  const feedTotal = total + 2 * hop;            // a partial last hop needs padding to be emitted
+  const got = new Float32Array(total);
+  let fed = 0, read = 0;
+  const deadline = Date.now() + 120000;
+  while (read < total && Date.now() < deadline) {
+    if (fed < feedTotal) {
+      const n = Math.min(512, feedTotal - fed, input.free());
+      if (n > 0) {
+        const chunk = new Float32Array(n);
+        for (let i = 0; i < n; i++) chunk[i] = fed + i < signal.length ? signal[fed + i] : 0;
+        input.write([chunk], n, 0);
+        fed += n;
+      }
+    }
+    const avail = Math.min(output.available(), total - read);
+    if (avail > 0) {
+      const dst = [new Float32Array(avail)];
+      output.read(dst, avail, 0);
+      got.set(dst[0], read);
+      read += avail;
+    } else {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+  }
+  ctx.onmessage({ data: { type: 'stats', id: 3 } });
+  const reply = await waitFor(() => msgs.find((m) => m.id === 3 && m.type === 'stats'), 5000);
+  ctx.onmessage({ data: { type: 'stop' } });
+  const stat = reply;
+  const error = msgs.find((m) => m.type === 'error');
+  return { loaded, out: got.subarray(latency, latency + signal.length), latency, stat, error };
+}
+
+async function neuralRegression(ort) {
+  const Dsp = NeuralDsp;
+  const modelsReady = DFN_FILES.every((f) => fs.existsSync(path.join(MODEL_DIR, f)));
+  let ortReady = !!ort;
+  if (!ort) { try { ort = require('onnxruntime-node'); ortReady = true; } catch (e) { ortReady = false; } }
+
+  /* ─ FIR lowpass H_LP and the memory tier (pure, always run) ─ */
+  section('neural · linear-phase FIR lowpass H_LP before super-resolution');
+  {
+    const SRv = 48000, fc = 14800;
+    const h = Dsp.linearPhaseLowpass(fc, SRv, 255);
+    const sym = h.every((v, i) => Math.abs(v - h[h.length - 1 - i]) < 1e-12);
+    ok(sym && h.length === 255, 'taps are exactly symmetric (linear phase, group delay (N−1)/2 = 127 samples)');
+    ok(Math.abs(firDb(h, SRv, 0)) < 1e-6, 'unity DC gain', firDb(h, SRv, 0).toFixed(6) + ' dB');
+    const pass = Math.max(...[1000, 6000, 10000, 12500, 13500].map((f) => Math.abs(firDb(h, SRv, f))));
+    ok(pass < 0.01, 'pass band flat to 0.01 dB below 13.5 kHz', pass.toFixed(4) + ' dB');
+    const stop = Math.max(...[16000, 17000, 18000, 20000, 23000].map((f) => firDb(h, SRv, f)));
+    ok(stop < -60, 'stop band ≥ 60 dB down from 16 kHz on', stop.toFixed(1) + ' dB');
+    let threw = false;
+    try { Dsp.linearPhaseLowpass(30000, SRv, 255); } catch (e) { threw = true; }
+    ok(threw, 'an fc above Nyquist is refused, not silently clipped');
+    threw = false;
+    try { Dsp.linearPhaseLowpass(fc, SRv, 128); } catch (e) { threw = true; }
+    ok(threw, 'an even tap count is refused (no integer group delay)');
+
+    // a tone well inside the pass band comes out with no delay and no level change
+    const tone = new Float32Array(48000);
+    for (let i = 0; i < tone.length; i++) tone[i] = 0.4 * Math.sin((2 * Math.PI * 1000 * i) / SRv);
+    const y = Dsp.applyFir(tone, h);
+    const lag = lagBetween(y, tone, 4, 4000, 44000);
+    ok(lag === 0, 'FIR output is delay-compensated (lag 0 samples)', 'lag ' + lag);
+    let e1 = 0, e2 = 0;
+    for (let i = 4000; i < 44000; i++) { e1 += tone[i] * tone[i]; e2 += y[i] * y[i]; }
+    ok(Math.abs(10 * Math.log10(e2 / e1)) < 0.05, '1 kHz level is untouched by the lowpass', (10 * Math.log10(e2 / e1)).toFixed(3) + ' dB');
+  }
+
+  section('neural · memory guard: compact tier on mobile or below 420 MB heap');
+  {
+    ok(Dsp.chooseModelTier({ mobile: true, heapLimitMB: 4096, usedHeapMB: 100 }).tier === 'compact', 'mobile always gets the compact NovaSR tier');
+    const low = Dsp.chooseModelTier({ mobile: false, heapLimitMB: 512, usedHeapMB: 200 });
+    ok(low.tier === 'compact' && low.reason === 'heap', 'free heap below 420 MB switches to compact', low.availableHeapMB.toFixed(0) + ' MB free');
+    const edge = Dsp.chooseModelTier({ mobile: false, heapLimitMB: 920, usedHeapMB: 500 });
+    ok(edge.tier === 'full', 'exactly 420 MB free stays on the full model', edge.availableHeapMB.toFixed(0) + ' MB free');
+    const big = Dsp.chooseModelTier({ mobile: false, heapLimitMB: 4096, usedHeapMB: 500 });
+    ok(big.tier === 'full' && big.reason === 'default', 'a desktop with ample heap uses the full model');
+    const unknown = Dsp.chooseModelTier({ mobile: false });
+    ok(unknown.tier === 'full' && isNaN(unknown.availableHeapMB), 'an unreadable heap does not force the compact tier');
+  }
+
+  /* ─ FFT, ERB bank and the latency contract (pure, always run) ─ */
+  section('neural · FFT, ERB bank and the stream latency contract');
+  {
+    const n = 960, re = new Float64Array(n), im = new Float64Array(n);
+    for (let i = 0; i < n; i++) { re[i] = Math.sin(i * 0.37) + 0.3 * Math.cos(i * 1.9); im[i] = 0.1 * Math.sin(i * 0.05); }
+    const f = Dsp.fft(re, im);
+    let err = 0;
+    for (let k = 0; k < n; k += 13) {
+      let a = 0, b = 0;
+      for (let t = 0; t < n; t++) {
+        const ang = (-2 * Math.PI * k * t) / n;
+        a += re[t] * Math.cos(ang) - im[t] * Math.sin(ang);
+        b += re[t] * Math.sin(ang) + im[t] * Math.cos(ang);
+      }
+      err = Math.max(err, Math.abs(a - f.re[k]), Math.abs(b - f.im[k]));
+    }
+    ok(err < 1e-8, 'mixed-radix FFT (960 = 2⁶·3·5) matches the direct DFT', 'max error ' + err.toExponential(1));
+    const bank = Dsp.erbFilterBank(48000, 960, 32, 2);
+    ok(bank.length === 32 && bank.reduce((a, b) => a + b, 0) === 481 && bank.every((w) => w >= 2),
+      'ERB bank: 32 bands covering all 481 bins, at least two bins each');
+    ok(Dsp.normAlpha(48000, 480, 1) === 0.99, 'normalisation constant α = 0.99 (norm_tau 1 s, hop 10 ms)');
+    ok(Dsp.DFN3.latency === (Dsp.DFN3.chunk + 2 + 3) * 480, 'declared latency is (chunk + look-ahead + 3) hops',
+      Dsp.DFN3.latency + ' samples');
+
+    // clean path (model says "clean speech", no mask): exact reconstruction, delayed by exactly the latency
+    const clean = async (kind, feeds) => {
+      if (kind !== 'enc') return { m: { data: new Float32Array(0), dims: [1, 1, 0, 32] }, coefs: { data: new Float32Array(0), dims: [1, 0, 96, 10] } };
+      const S = feeds.feat_erb.dims[2];
+      return { lsnr: { data: new Float32Array(S).fill(40), dims: [1, S, 1] }, emb: { data: new Float32Array(0), dims: [1, S, 512] }, e0: { data: new Float32Array(0), dims: [1, 64, S, 32] }, e1: { data: new Float32Array(0), dims: [1, 64, S, 16] }, e2: { data: new Float32Array(0), dims: [1, 64, S, 8] }, e3: { data: new Float32Array(0), dims: [1, 64, S, 8] }, c0: { data: new Float32Array(0), dims: [1, 64, S, 96] } };
+    };
+    const sig = lcgNoise(48000 * 3, 0.1, 99);
+    const stream = new Dsp.Dfn3Stream(clean, {});
+    const out = await stream.processSignal(sig, 512);
+    let worst = 0;
+    for (let i = 60000; i < 130000; i++) worst = Math.max(worst, Math.abs(out[i] - sig[i]));
+    ok(worst < 1e-4, 'with no mask applied the STFT path is transparent', 'max error ' + worst.toExponential(1));
+    const raw = new Dsp.Dfn3Stream(clean, {});
+    // a noise floor above the silence gate, so the stream is not in digital silence
+    const impulse = lcgNoise(120000, 0.001, 5); impulse[30000] += 0.5;
+    const rawOut = []; for (let i = 0; i < impulse.length; i += 512) rawOut.push(await raw.process(impulse.subarray(i, Math.min(impulse.length, i + 512))));
+    const flat = new Float32Array(impulse.length); let at = 0; for (const b of rawOut) { flat.set(b, at); at += b.length; }
+    let pk = 0; for (let i = 0; i < flat.length; i++) if (Math.abs(flat[i]) > Math.abs(flat[pk])) pk = i;
+    ok(pk - 30000 === Dsp.DFN3.latency, 'stream delay matches the declared latency, sample for sample', 'measured ' + (pk - 30000));
+  }
+
+  /* ─ DeepFilterNet3 on damaged MP3 material (needs the model files and onnxruntime-node) ─ */
+  const skipReason = !modelsReady ? 'DeepFilterNet3 ONNX files not in assets/vendor/models/ (see its README)'
+    : !ortReady ? 'onnxruntime-node is not installed (npm install)' : null;
+
+  section('neural · DeepFilterNet3 on damaged MP3 material');
+  if (skipReason) {
+    console.log('  – skipped: ' + skipReason);
+  } else {
+    const runner = async (kind, feeds) => {
+      const names = { enc: ['feat_erb', 'feat_spec'], erbDec: ['emb', 'e3', 'e2', 'e1', 'e0'], dfDec: ['emb', 'c0'] };
+      const file = { enc: 'dfn3-enc.onnx', erbDec: 'dfn3-erb-dec.onnx', dfDec: 'dfn3-df-dec.onnx' }[kind];
+      const sess = await loadSession(file);
+      const f = {};
+      for (const k of names[kind]) f[k] = new ort.Tensor('float32', feeds[k].data, feeds[k].dims);
+      const out = await sess.run(f);
+      const r = {};
+      for (const k of Object.keys(out)) r[k] = { data: Float32Array.from(out[k].data), dims: out[k].dims.slice() };
+      return r;
+    };
+    const sessions = {};
+    async function loadSession(file) {
+      if (!sessions[file]) sessions[file] = ort.InferenceSession.create(path.join(MODEL_DIR, file), { executionProviders: ['cpu'] });
+      return sessions[file];
+    }
+    const DS = 48000;
+    const dmg = damagedMp3(DSP, DS, 3, 17);
+    ok(dmg.cutHz > 13500 && dmg.cutHz < 16000, 'the damaged file’s brick wall is measured near 14.8 kHz', (dmg.cutHz / 1000).toFixed(2) + ' kHz');
+    const noisy = new Float32Array(dmg.x.length);
+    const burst = lcgNoise(dmg.x.length, 0.02, 4);
+    for (let i = 0; i < noisy.length; i++) noisy[i] = dmg.x[i] + (i > dmg.x.length * 0.4 && i < dmg.x.length * 0.6 ? burst[i] : 0);
+    const streamDfn = new Dsp.Dfn3Stream(runner, {});
+    const den = await streamDfn.processSignal(noisy, 512);
+    // the burst is non-stationary: the denoiser should take a bite out of it
+    const b0 = Math.round(dmg.x.length * 0.4) + 4800, b1 = Math.round(dmg.x.length * 0.6) - 4800;
+    let eIn = 0, eOut = 0;
+    for (let i = b0; i < b1; i++) { eIn += (noisy[i] - dmg.x[i]) ** 2; eOut += (den[i] - dmg.x[i]) ** 2; }
+    ok(eOut < eIn, 'the denoiser reduces the non-stationary burst', (10 * Math.log10(eOut / eIn)).toFixed(1) + ' dB vs the noisy input');
+    ok(den.every((v) => Number.isFinite(v)), 'DeepFilterNet3 output is finite everywhere');
+    let peak = 0; for (let i = 0; i < den.length; i++) peak = Math.max(peak, Math.abs(den[i]));
+    ok(peak <= 1.0, 'output stays inside full scale (no clipping, no noise bomb)', 'peak ' + peak.toFixed(3));
+    const hfIn = bandDb(DSP, noisy, DS, dmg.cutHz + 1500, 23000);
+    const hfOut = bandDb(DSP, den, DS, dmg.cutHz + 1500, 23000);
+    ok(hfOut <= Math.max(hfIn + 3, -70), 'the denoiser adds nothing above the codec cut (no HF artefacts)',
+      'in ' + hfIn.toFixed(1) + ' → out ' + hfOut.toFixed(1) + ' dB');
+    const sil = new Float32Array(DS * 2);
+    const silOut = await new Dsp.Dfn3Stream(runner, {}).processSignal(sil, 512);
+    let silPk = 0; for (let i = 0; i < silOut.length; i++) silPk = Math.max(silPk, Math.abs(silOut[i]));
+    ok(silPk === 0, 'digital silence stays digital silence', 'peak ' + silPk);
+
+    // voiced speech through the model keeps its level: the model does not gate it away
+    const v = voiceLike(DS, 2, 21);
+    const vOut = await new Dsp.Dfn3Stream(runner, {}).processSignal(v, 512);
+    let e1 = 0, e2 = 0;
+    for (let i = 24000; i < v.length - 24000; i++) { e1 += v[i] * v[i]; e2 += vOut[i] * vOut[i]; }
+    ok(Math.sqrt(e2 / e1) > 0.6, 'clean voiced material keeps at least 60 % of its level', 'ratio ' + Math.sqrt(e2 / e1).toFixed(2));
+  }
+
+  section('neural · ML worker end to end, real graphs through the rings');
+  if (skipReason) {
+    console.log('  – skipped: ' + skipReason);
+  } else {
+    const { ctx, msgs } = makeWorkerContext(ort);
+    const sig = voiceLike(48000, 2, 8);
+    const res = await runWorkerOverRings(ctx, msgs, sig, 48000);
+    ok(res.loaded && res.loaded.type === 'loaded', 'the worker loads the three DeepFilterNet3 graphs from assets/vendor/models/',
+      res.loaded && res.loaded.type === 'error' ? res.loaded.message : 'ok');
+    ok(!res.error, 'the worker runs without error while streaming', res.error ? res.error.message : 'clean');
+    if (res.out) {
+      ok(res.loaded.latency === Dsp.DFN3.latency + Dsp.DFN3.hop, 'the worker reports its full latency (stream + one frame of FIFO slack)', res.loaded.latency + ' samples');
+      ok(['full', 'compact'].indexOf(res.loaded.tier) >= 0, 'the memory tier is reported with the load', res.loaded.tier);
+      ok(res.out.every((v) => Number.isFinite(v)), 'worker output is finite');
+      const lag = lagBetween(res.out, sig, 300, 30000, 60000);
+      ok(Math.abs(lag) <= 2, 'worker output is aligned once the reported latency is removed', 'lag ' + lag);
+      let e1 = 0, e2 = 0;
+      for (let i = 30000; i < res.out.length - 30000; i++) { e1 += sig[i] * sig[i]; e2 += res.out[i] * res.out[i]; }
+      ok(e2 > 0 && Math.sqrt(e2 / e1) > 0.5, 'worker output carries the program (not a muted path)', 'ratio ' + Math.sqrt(e2 / e1).toFixed(2));
+      ok(res.stat && res.stat.denoiser === 'dfn3', 'worker stats report the DeepFilterNet3 path active');
+    }
+  }
+}
 
 async function run() {
   const win = boot();
@@ -490,6 +880,8 @@ async function run() {
     ok(App.State.cards.length === 0 && win.document.querySelectorAll('#fileList .card').length === 0,
       'the list can be cleared completely');
   }
+
+  await neuralRegression();
 
   console.log('\n' + '-'.repeat(60));
   console.log(failed ? failed + ' FAILED / ' + passed + ' passed' : 'ALL TESTS PASSED (' + passed + ')');

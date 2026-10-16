@@ -33,6 +33,40 @@
   }
 
   /** Range inputs paint their own filled track through one CSS variable. */
+  /* Texture for the two correction highlights: a hatch (removed clicks) and a dot
+   * grid (lifted top end). Built once per kind from a small offscreen canvas. A
+   * context that cannot make a pattern returns null, and the tint alone is drawn. */
+  const MARK_PAT = {};
+  /* Path2D where the browser has it; otherwise the rectangles are kept as a plain list and
+   * replayed, so the drawing is the same either way. */
+  const HAS_PATH2D = typeof global.Path2D === 'function';
+  function rectPath() { return HAS_PATH2D ? new global.Path2D() : []; }
+  function addRect(p, x, y, w, h) { if (HAS_PATH2D) p.rect(x, y, w, h); else p.push([x, y, w, h]); }
+  function fillPath(g, p) {
+    if (HAS_PATH2D) { g.fill(p); return; }
+    g.beginPath();
+    for (const r of p) g.rect(r[0], r[1], r[2], r[3]);
+    g.fill();
+  }
+  function markPattern(g, kind) {
+    if (kind in MARK_PAT) return MARK_PAT[kind];
+    MARK_PAT[kind] = null;
+    try {
+      const c = document.createElement('canvas');
+      c.width = 8; c.height = 8;
+      const x = c.getContext('2d');
+      if (!x || !g.createPattern) return null;
+      if (kind === 'hatch') {
+        x.strokeStyle = 'rgba(255,200,40,.9)'; x.lineWidth = 1.6;
+        x.beginPath(); x.moveTo(-2, 8); x.lineTo(8, -2); x.moveTo(-2, 2); x.lineTo(2, -2); x.moveTo(6, 10); x.lineTo(10, 6); x.stroke();
+      } else {
+        x.fillStyle = 'rgba(64,200,255,.95)';
+        x.beginPath(); x.arc(4, 4, 1.3, 0, Math.PI * 2); x.fill();
+      }
+      MARK_PAT[kind] = g.createPattern(c, 'repeat');
+    } catch (e) { MARK_PAT[kind] = null; }
+    return MARK_PAT[kind];
+  }
   function paintRange(input) {
     const min = Number(input.min || 0), max = Number(input.max || 100);
     const v = Number(input.value);
@@ -229,6 +263,8 @@
     setData(data) {
       this.before = data.before || this.before;
       this.after = data.after || this.after;
+      // the highlights belong to one restoration: none without its render
+      this.corrections = data.corrections || null;
       this.duration = data.duration || 0;
       this.schedule();
     }
@@ -241,6 +277,39 @@
     schedule() {
       if (this._raf) return;
       this._raf = global.requestAnimationFrame(() => { this._raf = 0; this.draw(); });
+    }
+
+    /** Bars and correction columns for one size and one data set. Rebuilt only when the
+     *  canvas size, the bar count, the envelopes or the correction map change. */
+    geometry(w, h, n) {
+      const G = this._geo;
+      if (G && G.w === w && G.h === h && G.n === n && G.src === this.before
+        && G.after === this.after && G.corr === this.corrections) return G;
+      const mid = h / 2, half = mid - 4, px = w / n;
+      const bw = Math.max(1, px * 0.92), cw = Math.max(1, px);
+      const bars = (env, dir) => {
+        const p = rectPath();
+        for (let i = 0; i < n; i++) {
+          const mag = Math.min(1, Math.max(Math.abs(env.max[i]), Math.abs(env.min[i])));
+          const y = mid + dir * mag * half;
+          addRect(p, i * px, Math.min(mid, y), bw, Math.max(1, Math.abs(mid - y)));
+        }
+        return p;
+      };
+      const columns = (flags) => {
+        const p = rectPath();
+        if (flags) for (let i = 0; i < n && i < flags.length; i++) if (flags[i]) addRect(p, i * px, 0, cw, h);
+        return p;
+      };
+      const corr = this.corrections;
+      this._geo = {
+        w, h, n, src: this.before, after: this.after, corr,
+        before: bars(this.before, -1),
+        after: this.after ? bars(this.after, 1) : null,
+        bright: columns(corr && corr.bright),
+        clicks: columns(corr && corr.clicks),
+      };
+      return this._geo;
     }
 
     draw() {
@@ -259,7 +328,6 @@
       g.clearRect(0, 0, w, h);
 
       const mid = h / 2;
-      const half = mid - 4;
 
       // baseline + frame
       g.strokeStyle = 'rgba(255,255,255,.07)';
@@ -273,42 +341,46 @@
       if (!hasData) return;
 
       const n = this.before.max.length;
-      const px = w / n;
       const progressX = this.duration ? (this.position / this.duration) * w : 0;
+      // the bars and the correction columns are geometry: built once per data set and
+      // size (see geometry()), so a playhead move only fills them again
+      const geo = this.geometry(w, h, n);
 
-      const drawSide = (env, dir, style, styleBright) => {
+      const drawSide = (path, style, styleBright, dir) => {
         g.fillStyle = style;
-        g.beginPath();
-        for (let i = 0; i < n; i++) {
-          const mag = Math.min(1, Math.max(Math.abs(env.max[i]), Math.abs(env.min[i])));
-          const x = i * px;
-          const bw = Math.max(1, px * 0.92);
-          const y = mid + dir * mag * half;
-          g.rect(x, Math.min(mid, y), bw, Math.max(1, Math.abs(mid - y)));
-        }
-        g.fill();
+        fillPath(g, path);
         g.fillStyle = styleBright;
         g.save();
         g.beginPath();
         g.rect(0, dir > 0 ? mid : 0, progressX, dir > 0 ? h - mid : mid);
         g.clip();
-        g.beginPath();
-        for (let i = 0; i < n; i++) {
-          const mag = Math.min(1, Math.max(Math.abs(env.max[i]), Math.abs(env.min[i])));
-          const x = i * px;
-          const bw = Math.max(1, px * 0.92);
-          const y = mid + dir * mag * half;
-          g.rect(x, Math.min(mid, y), bw, Math.max(1, Math.abs(mid - y)));
-        }
-        g.fill();
+        fillPath(g, path);
         g.restore();
       };
 
+      // corrections: the columns the restoration changed, lifted behind both
+      // halves so the eye finds them before it reads the waves. Gold is a click
+      // taken out; cyan is top end that was lifted where there is content.
+      if (this.corrections) {
+        // the tint carries the colour; the pattern carries the meaning for a
+        // reader who cannot tell gold from cyan (hatch = click, dots = top end)
+        const lift = (path, colour, kind) => {
+          g.fillStyle = colour;
+          fillPath(g, path);
+          const pat = markPattern(g, kind);
+          if (!pat) return;
+          g.fillStyle = pat;
+          fillPath(g, path);
+        };
+        lift(geo.bright, 'rgba(64,200,255,.16)', 'dots');
+        lift(geo.clicks, 'rgba(255,200,40,.26)', 'hatch');
+      }
+
       // original: above the line, muted grey until played, off-white after
-      drawSide(this.before, -1, 'rgba(124,132,146,.55)', 'rgba(240,242,245,.9)');
+      drawSide(geo.before, 'rgba(124,132,146,.55)', 'rgba(240,242,245,.9)', -1);
       if (this.after) {
         // restored: below the line, green dim / gradient bright once played
-        drawSide(this.after, 1, 'rgba(0,180,110,.35)', 'rgba(0,230,118,.95)');
+        drawSide(geo.after, 'rgba(0,180,110,.35)', 'rgba(0,230,118,.95)', 1);
       }
 
       // hover marker

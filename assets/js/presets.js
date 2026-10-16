@@ -45,6 +45,8 @@
    * ---------------------------------------------------------------------- */
   const CEILING = {
     reso: 0.55,        // dynamic de-resonating depth
+    roomNotch: 0.5,    // adaptive room-drone notch field, 200–800 Hz (gated by the measured score)
+    monoSpread: 0.6,   // allpass M/S width for mono input (the worklet only acts on mono content)
     sub: 0.45,         // sub-harmonic synthesis
     exciter: 0.26,     // harmonic exciter
     air: 0.30,         // 8–16 kHz air synthesis (dosed by need × deriveRoom)
@@ -326,12 +328,17 @@
    * octave is the right answer; above it there is nothing missing to rebuild.
    */
   function codecLoss(m) {
+    // a measured MP3 wall (a steep cut at or below 18.0 kHz: the 64 kbit/s class
+    // ≤ 15.5 kHz, the 128 kbit/s class 15.5–18.0 kHz, see detectMp3Brickwall) is
+    // a codec's by definition: it is the finding the top-octave rules below miss
+    if (m.codecWall128k || m.codecWall64k) return true;
     // Two ways a lossy stage can have removed something audible, and the
     // difference between them is *where* the wall is:
     //
     //  · a measured cliff inside the top octave (4–17 kHz) is a codec's
     //    signature, whatever the programme around it sounds like. A 128 kbit/s
-    //    MP3 cuts at ~14.5 kHz and this fires on it;
+    //    MP3 cuts between 15.5 and 18.0 kHz (measured) — the wall rule above
+    //    names it; this cliff rule covers the cuts it does not catch;
     //  · a bandwidth ceiling below 17 kHz *can* be the same thing, but it can
     //    just as well be a dull programme — an old transfer that stops at 8 kHz
     //    because that is all the medium had. That one is named by its own card
@@ -1099,6 +1106,11 @@
     // factor that separates "rolled off, worth rebuilding" from "gone, leave it
     // alone", and it is deliberately applied to the amount, after the dose curve
     a.air = clamp(a.air * airDose * D.headroom * D.deriveRoom, 0, cap.air);
+    // Codec loss measured: the synthesised 8–16 kHz band is worth a little more
+    // level, up to +2.5 dB (the top of the +1.5…+2.5 dB window). Only where a
+    // codec was actually measured; a healthy file keeps its level. The 12–16 kHz
+    // overshoot gate (≤ +3 dB against the original) still applies.
+    a.airGainDb = codecLoss(m) && a.air > 0.0001 ? 2.5 : 0;
     // The *ceiling* is a separate axis from the amount. `deriveRoom` says how
     // much of the missing top end is worth asking for; `airRoom` says how far
     // above the band it was derived from the synthesised band may reach. On a
@@ -1176,6 +1188,12 @@
      * encoder overdriven. */
     const loud = (m.loudness === undefined ? -70 : m.loudness) > -14;
     a.tpCeil = loud ? -2 : -1;
+    // a 128 kbit/s wall means the source was already encoded at 128: its next
+    // encode is the one that needs the 128 margin, so the ceiling takes it now
+    if (m.codecWall128k) a.tpCeil = Math.min(a.tpCeil, -1 - codecMargin('mp3', 128));
+    // a 64 kbit/s wall (cut ≤ 15.5 kHz): the next encode is at 64 kbit/s, whose
+    // margin is the same 2.1 dB as 128 (see codecMargin)
+    if (m.codecWall64k) a.tpCeil = Math.min(a.tpCeil, -1 - codecMargin('mp3', 64));
     /* …and that number is a promise about the file the user *keeps*. A lossy
      * encoder re-shapes the waveform between the samples and its own overshoot
      * comes out of the promise, so a lossy export lowers the render's ceiling by
@@ -1255,6 +1273,20 @@
      * mono: the worklet adds the high-passed side signal, so the bass stays in
      * the centre and a mono master stays mono. */
     a.width = clamp(cap.width * smoothstep(0.08, 0.55, D.widenNeed), 0, cap.width);
+
+    /* ── 7e · room drone and allpass width (Prompt 4) ─────────────────────
+     * The room-notch field is opened by the measured phase-stable resonance
+     * score; its depth is a ceiling the power curve scales. The allpass
+     * synthesis is a ceiling too: the worklet itself only acts where the input
+     * is mono (side/mid below −30 dB), so a real stereo image is left alone. */
+    a.roomScore = clamp(m.roomResonanceScore || 0, 0, 1);
+    /* the strongest measured mode inside the notch field (230–780 Hz): the
+     * dynamic band of the field is tuned to it, so the notch lands on the mode
+     * that was measured, not on the nearest fixed band. 0 = no mode there. */
+    const roomPk = (m.roomResonances || []).find((p) => p.hz >= 230 && p.hz <= 780);
+    a.roomHz = roomPk ? roomPk.hz : 0;
+    a.roomNotch = cap.roomNotch;
+    a.monoSpread = cap.monoSpread;
 
     /* ── 8 · tone tilt ────────────────────────────────────────────────────
      * A gentle nudge, at most a quarter of what was measured, and only when
@@ -1371,10 +1403,54 @@
   function codecMargin(format, kbps) {
     if (format !== 'mp3') return 0;
     const k = kbps || 320;
+    // 64 and 128 kbit/s share one margin: the two classes are told apart by the
+    // cut, not by the margin, which is set by the encoder's overshoot at 128
     if (k <= 128) return 2.1;
     if (k <= 192) return 0.8;
     if (k <= 256) return 0.5;
     return 0.5;
+  }
+
+  /* ── non-linear power curves (Prompt 5) ──────────────────────────────────
+   * One slider, four response shapes. Every curve is exactly 0 at 0 %, which is
+   * what keeps 0 % a bit-transparent copy of the input.
+   *
+   *   fix(P)        measured defects (hum, de-click, boxiness, width): full
+   *                 repair from 20 % on, ramped in smoothly below it. A defect
+   *                 that was measured is not a matter of taste, so it must not
+   *                 creep in at half power.
+   *   amt(P)        harmonic enrichment (exciter, air, sub): P^0.85, a slightly
+   *                 concave curve so the low end of the slider stays useful.
+   *   neuralBlend(P) the neural reconstruction signal: a continuous fade from
+   *                 10 % (none) to 90 % (all of it). Below 10 % the DSP alone
+   *                 is heard; above 90 % the network is.
+   */
+  const smoothstep01 = (e0, e1, x) => {
+    const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
+    return t * t * (3 - 2 * t);
+  };
+  const POWER = Object.freeze({
+    fix: (P) => smoothstep01(0, 0.20, clamp(P, 0, 1)),
+    amt: (P) => Math.pow(clamp(P, 0, 1), 0.85),
+    neuralBlend: (P) => smoothstep01(0.10, 0.90, clamp(P, 0, 1)),
+  });
+
+  /**
+   * The true-peak ceiling the limiter holds the render to, in dBTP.
+   *
+   *   lossy (MP3):  dBTP_ceiling = −1.0 − Margin(format, bitrate)
+   *                 — the encoder's own overshoot is paid for up front, so the
+   *                 file the user keeps still meets −1 dBTP (margin 2.1 dB at
+   *                 128 kbit/s, 0.5 dB at 320 kbit/s; see codecMargin).
+   *   lossless:     −1 dBTP, or −2 dBTP for a master louder than −14 LUFS.
+   *
+   * @param {{format?:string, kbps?:number, loud?:boolean}} o
+   * @returns {number}
+   */
+  function ceilingDb(o) {
+    const opt = o || {};
+    if (opt.format === 'mp3') return -1.0 - codecMargin('mp3', opt.kbps);
+    return opt.loud ? -2 : -1;
   }
 
   /**
@@ -1473,12 +1549,12 @@
      * reference never learns a body). That trade is not yet bounded by
      * measurement here and is left where it is on purpose.
      */
-    const repairMeasured = (x) => x * smoothstep(0, 0.20, p);
+    const repairMeasured = (x) => x * POWER.fix(p);
     // Measured defects are not a matter of taste: once the slider has left zero,
     // hum, boxiness and a collapsed image are fixed by the *measurement* — a
     // mains notch shallower than the hum leaves the hum, and one deeper than it
     // cuts the bass. These are gated, never scaled down.
-    const fix = (x) => x * smoothstep(0, 0.20, p);
+    const fix = (x) => x * POWER.fix(p);
 
     // bands are an amount like every other: they follow the same curve as the
     // rest of the chain (`p` alone made them 3 dB weaker at half power, which is
@@ -1503,6 +1579,7 @@
       declipLevel: num(clamp(a.declipLevel, -60, 0), -0.1),
       declick: repair(a.declick),
       tpCeil: num(a.tpCeil, 0),
+      airGainDb: num(a.airGainDb, 0),
       // …and the file's own peak, so the stages that are neither a repair nor
       // an absolute target (the glue, the analogue warmth) place their
       // thresholds relative to *this recording* instead of full scale. See the
@@ -1523,6 +1600,13 @@
       boxG2: num(fix(a.box[1]), 0), boxF2: a.boxF[1], boxQ2: a.boxQ[1],
       // width is taste, not a defect: it follows the repair curve with the rest
       width: num(repair(a.width), 0),
+      // room-drone notches and mono allpass width: dosed by the power curve. The
+      // room notch's own gate is the measured score (roomScore, not scaled).
+      // (scaled by `on`: a measurement, but at 0 % it must still read exactly 0)
+      roomScore: num(a.roomScore * on, 0),
+      roomHz: num(a.roomHz * on, 0),
+      roomNotch: num(a.roomNotch * amt, 0),
+      monoSpread: num(a.monoSpread * amt, 0),
       // how much top end the synthesiser may rebuild, and where it derives it
       // from: a low-bitrate file needs the source band below its cliff, not the
       // fixed 6 kHz band that sits partly above it. (`num` keeps a parameter
@@ -1585,7 +1669,7 @@
    * @param {number} [power] 0..1
    * @returns {{findings:Array, headline:{count:number,severe:number}, character:string}}
    */
-  function recipe(m, params, power) {
+  function recipe(m, params) {
     const p = params || {};
     const D = demand(m);
     const st = m.stereo || {};
@@ -1594,7 +1678,6 @@
       out.push({ key, sev: clamp(sev, 0, 1), value: value || null, act: act || null });
     };
     const dbv = (n) => ({ n, unit: 'db' });
-    const pct = (n) => ({ n, unit: 'pct' });
     // an action carries the parameter it ends up setting, in its own unit, so
     // the UI can print the dose the file will really get
     const act = (key, n, unit) => ({ key, value: n === null || n === undefined ? null : { n, unit: unit || 'pct' } });
@@ -1658,10 +1741,9 @@
     }
     // the per-song EQ itself: the largest correction it makes, and where
     if (p.eq0 !== undefined) {
-      let worst = 0, worstF = 0, count = 0;
+      let worst = 0, worstF = 0;
       for (let i = 0; i < 12; i++) {
         const g = p['eq' + i] || 0;
-        if (Math.abs(g) > 0.6) count++;
         if (Math.abs(g) > Math.abs(worst)) { worst = g; worstF = (m.eqCenters && m.eqCenters[i]) || 0; }
       }
       if (Math.abs(worst) > 0.6) {
@@ -1745,6 +1827,8 @@
     if (d.crackle > 0.15) push('crackle', d.crackle + 0.2);
     if (d.hum > 0.35) push('hum', d.hum);
     if (d.brick > 0.4) push('codec', d.brick);
+    if (m.codecWall128k) push('codecWall128k', clamp(m.brickwall || 0, 0, 1));
+    if (m.codecWall64k) push('codecWall64k', clamp(m.brickwall || 0, 0, 1));
     if (d.harsh > 0.35) push('harsh', d.harsh);
     if ((m.clipEvidence || 0) > 0.05) push('clipping', clamp(m.clipEvidence, 0, 1));
     else if (m.clipRatio > 0.002) push('clipping', 0.6);
@@ -1790,7 +1874,7 @@
     return classify(metrics).id;
   }
 
-  const API = { PRESETS, PRESET_ORDER, CEILING, MANUAL, PROFILE_EQ, CHAIN_MIN, TONE_MIN, classify, chainOf, evidence, mixAnchors, demand, adapt, resolve, buildParams, diagnose, recipe, eqCurve, curveDb, biquadDb, profileDb, codecMargin };
+  const API = { PRESETS, PRESET_ORDER, CEILING, MANUAL, PROFILE_EQ, CHAIN_MIN, TONE_MIN, classify, chainOf, evidence, mixAnchors, demand, adapt, resolve, buildParams, diagnose, recipe, eqCurve, curveDb, biquadDb, profileDb, codecMargin, ceilingDb, fix: POWER.fix, amt: POWER.amt, neuralBlend: POWER.neuralBlend };
   global.RSPresets = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

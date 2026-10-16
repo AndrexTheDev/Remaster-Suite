@@ -36,7 +36,8 @@ function ensureChromium() {
   let here = path.dirname(require.resolve('@sparticuz/chromium'));
   while (here !== path.dirname(here) && !fs.existsSync(path.join(here, 'bin'))) here = path.dirname(here);
   const bin = path.join(here, 'bin');
-  const work = path.join(os.tmpdir(), 'rs-beta-chromium');
+  // scratch, git-ignored: the unpacked browser stays out of /tmp
+  const work = path.join(__dirname, '..', '..', 'scratch', 'beta', 'chromium');
   fs.mkdirSync(work, { recursive: true });
 
   // the package extracts the binary itself; the shared libs and fonts we unpack
@@ -67,8 +68,8 @@ function ensureChromium() {
     ...process.env,
     LD_LIBRARY_PATH: [work, path.join(work, 'lib'), process.env.LD_LIBRARY_PATH || ''].join(':'),
     FONTCONFIG_PATH: path.join(work, 'fonts'),
-    HOME: os.tmpdir(),
-    XDG_RUNTIME_DIR: os.tmpdir(),
+    HOME: work,
+    XDG_RUNTIME_DIR: work,
   };
 
   const args = [

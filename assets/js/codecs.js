@@ -84,54 +84,93 @@
     return Promise.reject(new Error('cannot read file'));
   }
 
-  let liveDecodeCtx = null;
-  function decodeContext(sr) {
-    const rate = clamp(sr || 44100, 8000, 96000);
+  /* ----------------------------------------------------- decode contexts (B2)
+   * Which AudioContext may exist, and why. A live context is the page's
+   * precious resource: browsers cap how many a page may hold, and one created
+   * without a user gesture logs an autoplay warning. So:
+   *  · the PRIMARY live context is the engine's own (created on the play
+   *    gesture, see useLiveContext). It is reused and never closed here;
+   *  · an OfflineAudioContext needs no gesture, no device and no permission.
+   *    One is kept per sample rate and reused, so no instances pile up;
+   *  · a TEMPORARY live context is created only when the page has neither (very
+   *    old browsers), used once, and closed with ctx.close() as soon as its
+   *    decode has settled. */
+  let primaryLive = null;
+  const offlineByRate = Object.create(null);
+
+  /** The engine registers its live context here once it exists. */
+  function useLiveContext(ctx) {
+    primaryLive = ctx || null;
+    return primaryLive;
+  }
+
+  /** A context's decode as a promise: both the callbacks and the promise forms. */
+  function decodeWith(ctx, arrayBuffer) {
+    return new Promise((resolve, reject) => {
+      const p = ctx.decodeAudioData(arrayBuffer.slice(0), resolve, reject);
+      if (p && typeof p.then === 'function') p.then(resolve, reject);
+    });
+  }
+
+  function offlineContext(rate) {
     const Ctor = global.OfflineAudioContext || global.webkitOfflineAudioContext;
     if (!Ctor) return null;
-    // an offline context decodes just as well as a live one — and needs no
-    // user gesture, no output device and no permission
-    return new Ctor(1, 1024, rate);
+    if (!offlineByRate[rate]) offlineByRate[rate] = new Ctor(1, 1, rate);
+    return offlineByRate[rate];
+  }
+
+  /** A "no context" failure: the native decoder could not even be started. */
+  function noContext(msg) {
+    const e = new Error(msg);
+    e.noContext = true;
+    return e;
   }
 
   /**
-   * Very old browsers (Safari before 14.1) have no decodeAudioData() on the
-   * offline context; a suspended live context decodes fine there. It is created
-   * once and closed again as soon as we are done.
+   * Decode an ArrayBuffer and say which path did it.
+   * Order: 'native-live' (the primary context) → 'native-offline' (no gesture,
+   * no warning) → 'native-live' on a temporary context that is closed again.
+   * A file the browser itself refuses is an error, not a reason to try a second
+   * native decoder: it propagates, and the caller decides about FFmpeg.
+   * @returns {Promise<{buffer:AudioBuffer, path:string, contextClosed:boolean}>}
    */
-  function decodeInLiveContext(arrayBuffer, sr) {
-    const Ctor = global.AudioContext || global.webkitAudioContext;
-    if (!Ctor) throw new Error('no audio context for decoding');
-    if (!liveDecodeCtx) {
-      try { liveDecodeCtx = new Ctor({ sampleRate: clamp(sr || 44100, 8000, 96000) }); }
-      catch (e) { liveDecodeCtx = new Ctor(); }
+  async function decodeTracked(arrayBuffer, sr) {
+    const rate = clamp(sr || 44100, 8000, 96000);
+    if (primaryLive && primaryLive.state !== 'closed') {
+      const buffer = await decodeWith(primaryLive, arrayBuffer);
+      return { buffer: buffer, path: 'native-live', contextClosed: false };
     }
-    return new Promise((resolve, reject) => {
-      const p = liveDecodeCtx.decodeAudioData(arrayBuffer.slice(0), resolve, reject);
-      if (p && p.then) p.catch(reject);
-    });
+    let off = null;
+    try { off = offlineContext(rate); } catch (e) { off = null; }
+    if (off && typeof off.decodeAudioData === 'function') {
+      const buffer = await decodeWith(off, arrayBuffer);
+      return { buffer: buffer, path: 'native-offline', contextClosed: false };
+    }
+    const Live = global.AudioContext || global.webkitAudioContext;
+    if (!Live) throw noContext('no native decoder in this page');
+    let tmp = null;
+    try { tmp = new Live({ sampleRate: rate }); }
+    catch (e) {
+      try { tmp = new Live(); }
+      catch (e2) { throw noContext('AudioContext refused: ' + e2.message); }
+    }
+    try {
+      const buffer = await decodeWith(tmp, arrayBuffer);
+      return { buffer: buffer, path: 'native-live', contextClosed: true };
+    } finally {
+      // a temporary instance is closed explicitly, whatever the decode did
+      try { await tmp.close(); } catch (e) { /* already closed */ }
+    }
   }
 
   /**
    * Decode an ArrayBuffer to an AudioBuffer at the given (or detected) rate.
+   * Thin wrapper over decodeTracked for callers that only want the buffer.
    * @param {ArrayBuffer} arrayBuffer
    * @param {number} [sr] target sample rate
    */
   async function decodeArrayBuffer(arrayBuffer, sr) {
-    const rate = sr || 44100;
-    const ctx = decodeContext(rate);
-    // decodeAudioData detaches its input in some browsers → hand it a copy
-    if (ctx) {
-      try {
-        return await ctx.decodeAudioData(arrayBuffer.slice(0));
-      } catch (err) {
-        if (err && /OfflineAudioContext|decodeAudioData/i.test(String(err.name || err.message))) {
-          return decodeInLiveContext(arrayBuffer, rate);
-        }
-        throw err;
-      }
-    }
-    return decodeInLiveContext(arrayBuffer, rate);
+    return (await decodeTracked(arrayBuffer, sr || 44100)).buffer;
   }
 
   /**
@@ -159,7 +198,10 @@
   /**
    * Decode a File/Blob, preserving the source sample rate when it can be read
    * from the container header.
-   * @returns {Promise<{buffer:AudioBuffer, sampleRate:number, detected:boolean, rescued:boolean}>}
+   * @returns {Promise<{buffer:AudioBuffer, sampleRate:number, detected:boolean,
+   *   rescued:boolean, path:('native-live'|'native-offline'|'ffmpeg'), contextClosed:boolean}>}
+   *   `path` is the decoder that produced the buffer; `contextClosed` is true
+   *   only when a temporary live context was created and closed for this file.
    */
   async function decodeFile(file, opts) {
     const o = opts || {};
@@ -175,34 +217,38 @@
     if (!sr) sr = 44100;
 
     try {
-      const buffer = await decodeArrayBuffer(buf, sr);
-      return { buffer, sampleRate: buffer.sampleRate || sr, detected, rescued: false };
+      const r = await decodeTracked(buf, sr);
+      return { buffer: r.buffer, sampleRate: r.buffer.sampleRate || sr, detected, rescued: false,
+        path: r.path, contextClosed: r.contextClosed };
     } catch (err1) {
       // second try at a universally supported rate, then the FFmpeg rescue
       try {
-        const buffer = await decodeArrayBuffer(buf, 48000);
-        return { buffer, sampleRate: buffer.sampleRate || 48000, detected, rescued: false };
+        const r = await decodeTracked(buf, 48000);
+        return { buffer: r.buffer, sampleRate: r.buffer.sampleRate || 48000, detected, rescued: false,
+          path: r.path, contextClosed: r.contextClosed };
       } catch (err2) {
         if (o.allowFFmpeg === false) throw err2;
         const buffer = await decodeWithFFmpeg(file, sr);
-        return { buffer, sampleRate: buffer.sampleRate || sr, detected, rescued: true };
+        return { buffer: buffer, sampleRate: buffer.sampleRate || sr, detected, rescued: true,
+          path: 'ffmpeg', contextClosed: false };
       }
     }
   }
 
   /** An AudioBuffer built from plain channel arrays (for the live monitor). */
-  let bufferCtx = null;
-  let bufferCtxRate = 0;
   function makeBuffer(channels, sampleRate) {
-    const Ctor = global.OfflineAudioContext || global.webkitOfflineAudioContext;
-    if (!Ctor) return null;
+    if (!channels || !channels.length) return null;
     const sr = Math.max(8000, Math.min(192000, Math.round(sampleRate || 44100)));
     try {
-      if (!bufferCtx || bufferCtxRate !== sr) {
-        bufferCtx = new Ctor(Math.max(1, Math.min(2, channels.length)), 128, sr);
-        bufferCtxRate = sr;
+      // the constructor needs no context at all — no instance is created for it
+      let buf = null;
+      if (typeof global.AudioBuffer === 'function') {
+        buf = new global.AudioBuffer({ length: channels[0].length, numberOfChannels: channels.length, sampleRate: sr });
+      } else {
+        const off = offlineContext(sr);
+        if (off) buf = off.createBuffer(channels.length, channels[0].length, sr);
       }
-      const buf = bufferCtx.createBuffer(channels.length, channels[0].length, sr);
+      if (!buf) return null;
       for (let c = 0; c < channels.length; c++) buf.copyToChannel(channels[c], c, 0);
       return buf;
     } catch (err) {
@@ -480,7 +526,7 @@
 
   const API = {
     MP3_RATES, mp3RateFor, toInt16, looksLikeMp3,
-    decodeArrayBuffer, decodeFile, decodeWithFFmpeg,
+    decodeArrayBuffer, decodeTracked, decodeFile, decodeWithFFmpeg, useLiveContext,
     encodeWav, encodeMp3, makeBuffer, readBlob, blobOf, mimeFor,
     zip, download,
     outputName, formatBytes, formatDuration, formatRate, formatDb,
