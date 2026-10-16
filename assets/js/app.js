@@ -78,6 +78,11 @@
     // has weights installed *and* a WebGPU or WASM session could be built —
     // never true just because the feature exists in this build.
     neuralAvailable: false,
+    // flips true the first time a render's neural call fails with a
+    // hardware-limit reason (OOM/device-lost/timeout — see initNeural()'s
+    // Neural.onHardwareFallback subscription); keeps the toast it triggers
+    // to exactly one per session instead of one per failed call in a batch.
+    _neuralFallbackToastShown: false,
   };
 
   /* ------------------------------------------------------- OPFS scratch I/O */
@@ -122,11 +127,31 @@
     toggle.checked = false;
     if (status) {
       if (State.neuralAvailable) {
-        const provider = probe.webgpu && probe.webgpu.available ? t('ctl.neuralWebgpu') : t('ctl.neuralWasm');
+        // WebNN > WebGPU > WASM only as a *status label* here — which EP a
+        // given model session actually landed on (mobile-first WebNN order
+        // included) is `neural-worker.js`'s own call per model; this is just
+        // the best single-line summary of what this device can reach at all.
+        const provider = (probe.webnn && probe.webnn.available) ? t('ctl.neuralWebnn')
+          : (probe.webgpu && probe.webgpu.available) ? t('ctl.neuralWebgpu') : t('ctl.neuralWasm');
         status.textContent = Object.keys(models).filter((k) => models[k] && models[k].available).join(', ') + ' · ' + provider;
       } else {
         status.textContent = t('ctl.neuralUnavailable');
       }
+    }
+    // One quiet, one-time-per-session toast when a render actually attempted
+    // neural inference and the hardware gave out mid-call (OOM/device-lost/
+    // timeout — see neural-worker.js's resolveInferenceFailure and
+    // neural-controller.js's HARDWARE_LIMIT_REASONS). The pure-DSP fallback
+    // itself needs no new code here: engine.js already treats any
+    // `{applied:false}` result as "proceed without the curve" — this is
+    // purely informational, so it never fires more than once even across a
+    // whole batch export full of repeated throttled calls.
+    if (Neural && typeof Neural.onHardwareFallback === 'function' && !State._neuralFallbackToastShown) {
+      Neural.onHardwareFallback(() => {
+        if (State._neuralFallbackToastShown) return;
+        State._neuralFallbackToastShown = true;
+        UI.toast(t('toast.neuralFallback'), 'warn', 6000);
+      });
     }
   }
 

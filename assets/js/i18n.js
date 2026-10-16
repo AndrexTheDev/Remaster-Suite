@@ -53,6 +53,7 @@
       'ctl.neuralUnavailable': 'Kein Modell gefunden — reine DSP-Kette aktiv',
       'ctl.neuralWebgpu': 'WebGPU',
       'ctl.neuralWasm': 'WASM',
+      'ctl.neuralWebnn': 'WebNN (NPU)',
 
       'preset.auto': 'Automatisch · pro Song analysiert',
       'preset.garage': 'Garage / Ein-Mikrofon (60er/70er)',
@@ -260,6 +261,7 @@
       'toast.tooBig': '„{name}“ ist größer als {mb} MB und wurde übersprungen.',
       'toast.mp3Slow': 'MP3 wird encodiert — das dauert etwas länger als WAV.',
       'toast.bigBatchMemory': 'Großer Stapel: Dieser Browser unterstützt kein Datei-Streaming (OPFS) — der Arbeitsspeicher könnte knapp werden. MP3 oder kleinere Stapel schonen ihn.',
+      'toast.neuralFallback': 'KI-Verarbeitung wegen begrenzter Geräteressourcen übersprungen — reine DSP-Kette wird verwendet.',
       'coi.reloading': 'Hochleistungsmodus wird aktiviert — Seite wird einmalig neu geladen …',
       'toast.needDecode': 'Die Datei ist noch nicht bereit.',
       'toast.renderFail': 'Rendern fehlgeschlagen: {msg}',
@@ -424,6 +426,7 @@
       'ctl.neuralUnavailable': 'No model found — pure DSP chain active',
       'ctl.neuralWebgpu': 'WebGPU',
       'ctl.neuralWasm': 'WASM',
+      'ctl.neuralWebnn': 'WebNN (NPU)',
 
       'preset.auto': 'Automatic · analysed per song',
       'preset.garage': 'Garage / one-mic (60s/70s)',
@@ -631,6 +634,7 @@
       'toast.tooBig': '“{name}” is larger than {mb} MB and was skipped.',
       'toast.mp3Slow': 'Encoding MP3 — this takes a bit longer than WAV.',
       'toast.bigBatchMemory': 'Large batch: this browser has no file streaming (OPFS) — memory may get tight. MP3 or smaller batches are easier on it.',
+      'toast.neuralFallback': 'AI processing skipped due to limited device resources — using the pure DSP chain.',
       'coi.reloading': 'Turning on the high-performance mode — reloading the page once …',
       'toast.needDecode': 'This file is not ready yet.',
       'toast.renderFail': 'Rendering failed: {msg}',

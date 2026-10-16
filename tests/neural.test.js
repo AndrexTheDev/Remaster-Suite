@@ -17,7 +17,15 @@
  *      neural-controller.js's main-thread wrapper (which also has no `Worker`
  *      global to talk to under plain Node, a second, independent reason the
  *      same contract has to hold).
- *   3. The worklet's Stage-7 coupling (`NeuralAirCurve` in
+ *   3. The mobile/NPU additions: `isMobileUA()`/`probeWebNN()` capability
+ *      detection, `selectVariant()`'s mobile-first quantised-weight
+ *      preference, `createSession()`'s WebNN-before-WebGPU execution-
+ *      provider order on mobile, and the thermal/memory throttle fallback
+ *      (`withTimeout`/`classifyInferenceError`/`resolveInferenceFailure` in
+ *      the worker, `onHardwareFallback()` in neural-controller.js) — all
+ *      exercised with fake `navigator.ml`/`ort`/`Worker` stand-ins, because
+ *      none of the real APIs exist under plain Node either.
+ *   4. The worklet's Stage-7 coupling (`NeuralAirCurve` in
  *      remaster-processor.js): default-off, additive-only, and inert on an
  *      all-zero or never-posted curve — run through the real worklet source
  *      with the same harness the DSP suite uses.
@@ -168,6 +176,9 @@ async function testProbeAndFallback() {
   ok(p && p.webgpu && typeof p.webgpu.available === 'boolean', 'reports a webgpu capability object');
   ok(p.webgpu.available === false, 'no WebGPU under plain Node — reported as such, not as a crash', JSON.stringify(p.webgpu));
   ok(p.wasmSimd === true, 'WASM-SIMD fallback is reported available (this worker always offers it)');
+  ok(p && p.webnn && typeof p.webnn.available === 'boolean', 'reports a webnn capability object');
+  ok(p.webnn.available === false, 'no navigator.ml under plain Node — reported as such, not as a crash', JSON.stringify(p.webnn));
+  ok(typeof p.mobile === 'boolean', 'reports a mobile flag', String(p.mobile));
   ok(!!(p.models && p.models.deepfilternet3 && p.models.bsroformer && p.models.audiosr),
     'reports all three model slots', Object.keys(p.models || {}).join(', '));
   for (const key of ['deepfilternet3', 'bsroformer', 'audiosr']) {
@@ -217,7 +228,216 @@ async function testProbeAndFallback() {
 }
 
 /* ====================================================================== *
- * 3 · the worklet's Stage-7 coupling (NeuralAirCurve)
+ * 3 · mobile/WebNN capability detection, mobile-optimised weight
+ * selection, and the thermal/memory throttle fallback (the three pieces
+ * the mobile/NPU brief adds on top of the WebGPU/WASM baseline above)
+ * ====================================================================== */
+
+async function testMobileAndWebNN() {
+  section('neural · isMobileUA() matches the brief\'s own detection regex');
+  const realNavigator = global.navigator;
+  function withUA(ua, fn) {
+    Object.defineProperty(global, 'navigator', { value: Object.assign({}, realNavigator, { userAgent: ua }), configurable: true });
+    try { return fn(); } finally { Object.defineProperty(global, 'navigator', { value: realNavigator, configurable: true }); }
+  }
+  ok(withUA('Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36', () => RSNeuralWorker.isMobileUA()) === true,
+    'an Android UA is detected as mobile');
+  ok(withUA('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15', () => RSNeuralWorker.isMobileUA()) === true,
+    'an iPhone UA is detected as mobile');
+  ok(withUA('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120', () => RSNeuralWorker.isMobileUA()) === false,
+    'a desktop Windows/Chrome UA is not detected as mobile');
+
+  section('neural · probeWebNN() never throws and reports the honest state of this environment');
+  const webnnOff = await RSNeuralWorker.probeWebNN();
+  ok(webnnOff && webnnOff.available === false && webnnOff.deviceType === null,
+    'no navigator.ml under plain Node — reported as unavailable, not a crash', JSON.stringify(webnnOff));
+  {
+    // simulate a browser that only accelerates on the NPU for 'npu' and
+    // 'gpu' but not 'cpu' — confirms the NPU-first, then-GPU, then-CPU probe
+    // order actually stops at the first device type that succeeds.
+    const tried = [];
+    Object.defineProperty(global, 'navigator', {
+      value: Object.assign({}, realNavigator, {
+        ml: { createContext: async ({ deviceType }) => { tried.push(deviceType); if (deviceType === 'cpu') throw new Error('no cpu backend'); return {}; } },
+      }),
+      configurable: true,
+    });
+    try {
+      const r = await RSNeuralWorker.probeWebNN();
+      ok(r.available === true && r.deviceType === 'npu', 'reports npu as soon as it succeeds, tries nothing further', JSON.stringify(r));
+      ok(tried.join(',') === 'npu', 'never even attempted gpu/cpu once npu worked', tried.join(','));
+    } finally { Object.defineProperty(global, 'navigator', { value: realNavigator, configurable: true }); }
+  }
+  {
+    // npu and gpu both fail (e.g. a WebNN implementation that only backs
+    // CPU) — probe falls through to cpu rather than reporting unavailable.
+    Object.defineProperty(global, 'navigator', {
+      value: Object.assign({}, realNavigator, {
+        ml: { createContext: async ({ deviceType }) => { if (deviceType !== 'cpu') throw new Error('unsupported device type'); return {}; } },
+      }),
+      configurable: true,
+    });
+    try {
+      const r = await RSNeuralWorker.probeWebNN();
+      ok(r.available === true && r.deviceType === 'cpu', 'falls through npu/gpu failures down to a working cpu context', JSON.stringify(r));
+    } finally { Object.defineProperty(global, 'navigator', { value: realNavigator, configurable: true }); }
+  }
+
+  section('neural · selectVariant() prefers the smallest quantised weight file on mobile, fp16/fp32 elsewhere');
+  const defAll = { files: { fp32: 'm.fp32.onnx', fp16: 'm.fp16.onnx', int8: 'm.int8.onnx', int4: 'm.int4.onnx' } };
+  const defNoQuant = { files: { fp32: 'm.fp32.onnx', fp16: 'm.fp16.onnx' } };
+  ok(RSNeuralWorker.selectVariant(defAll, { mobile: true, webgpu: { available: false, fp16: false } }) === 'int4',
+    'mobile with every variant published picks int4, the smallest');
+  ok(RSNeuralWorker.selectVariant({ files: { fp32: 'm.fp32.onnx', fp16: 'm.fp16.onnx', int8: 'm.int8.onnx' } },
+    { mobile: true, webgpu: { available: false, fp16: false } }) === 'int8',
+    'mobile without an int4 file falls back to int8, not straight to fp16/fp32');
+  ok(RSNeuralWorker.selectVariant(defNoQuant, { mobile: true, webgpu: { available: true, fp16: true } }) === 'fp16',
+    'mobile with no quantised files at all still gets fp16 when the adapter supports it, never straight to fp32');
+  ok(RSNeuralWorker.selectVariant(defNoQuant, { mobile: true, webgpu: { available: false, fp16: false } }) === 'fp32',
+    'mobile with neither quantised files nor fp16 support lands on fp32, same as desktop would');
+  ok(RSNeuralWorker.selectVariant(defAll, { mobile: false, webgpu: { available: true, fp16: true } }) === 'fp16',
+    'desktop ignores the quantised files even when published — fp16 wins on a capable adapter, unchanged baseline behaviour');
+  ok(RSNeuralWorker.selectVariant(defAll, { mobile: false, webgpu: { available: false, fp16: false } }) === 'fp32',
+    'desktop without WebGPU fp16 support still lands on fp32, never on a mobile-only quantised file');
+
+  section('neural · createSession() execution-provider ordering (WebNN > WebGPU > WASM on mobile, WebGPU > WebNN > WASM elsewhere)');
+  function fakeOrt(behaviour) {
+    const attempts = [];
+    return {
+      attempts,
+      InferenceSession: {
+        create: async (bytes, opts) => {
+          const ep = opts.executionProviders[0];
+          const name = typeof ep === 'string' ? ep : ep.name;
+          attempts.push(name);
+          const outcome = behaviour[name];
+          if (outcome === 'fail') throw new Error(name + ' unavailable');
+          return { __provider: name };
+        },
+      },
+    };
+  }
+  {
+    const ort = fakeOrt({ webnn: 'ok', webgpu: 'ok', wasm: 'ok' });
+    const r = await RSNeuralWorker.createSession(ort, new Uint8Array([1]),
+      { mobile: true, webnn: { available: true, deviceType: 'npu' }, webgpu: { available: true, fp16: false } });
+    ok(r.provider === 'webnn' && ort.attempts.join(',') === 'webnn', 'mobile with WebNN available tries WebNN first and stops there', ort.attempts.join(','));
+  }
+  {
+    const ort = fakeOrt({ webnn: 'fail', webgpu: 'ok', wasm: 'ok' });
+    const r = await RSNeuralWorker.createSession(ort, new Uint8Array([1]),
+      { mobile: true, webnn: { available: true, deviceType: 'npu' }, webgpu: { available: true, fp16: false } });
+    ok(r.provider === 'webgpu' && ort.attempts.join(',') === 'webnn,webgpu', 'mobile falls through a failed WebNN attempt to WebGPU, not straight to WASM', ort.attempts.join(','));
+  }
+  {
+    const ort = fakeOrt({ webnn: 'ok', webgpu: 'ok', wasm: 'ok' });
+    const r = await RSNeuralWorker.createSession(ort, new Uint8Array([1]),
+      { mobile: false, webnn: { available: true, deviceType: 'gpu' }, webgpu: { available: true, fp16: true } });
+    ok(r.provider === 'webgpu' && ort.attempts.join(',') === 'webgpu', 'desktop with both available still tries WebGPU first and stops there', ort.attempts.join(','));
+  }
+  {
+    const ort = fakeOrt({ webnn: 'fail', webgpu: 'fail', wasm: 'ok' });
+    const r = await RSNeuralWorker.createSession(ort, new Uint8Array([1]),
+      { mobile: true, webnn: { available: true, deviceType: 'npu' }, webgpu: { available: true, fp16: false } });
+    ok(r.provider === 'wasm' && ort.attempts.join(',') === 'webnn,webgpu,wasm', 'WASM is still the last-resort fallback when every accelerator fails', ort.attempts.join(','));
+  }
+  {
+    const ort = fakeOrt({ wasm: 'ok' });
+    const r = await RSNeuralWorker.createSession(ort, new Uint8Array([1]), { mobile: false, webnn: { available: false }, webgpu: { available: false } });
+    ok(r.provider === 'wasm' && ort.attempts.join(',') === 'wasm', 'neither accelerator available: goes straight to WASM with no failed attempts logged first', ort.attempts.join(','));
+  }
+
+  section('neural · inference watchdog timeout and OOM/device-lost classification (the thermal/memory throttle fallback)');
+  {
+    const fast = await RSNeuralWorker.withTimeout(Promise.resolve('done'), 50, 'x');
+    ok(fast === 'done', 'withTimeout resolves normally when the wrapped promise beats the clock');
+  }
+  {
+    let threwTimeout = null;
+    try { await RSNeuralWorker.withTimeout(new Promise((resolve) => setTimeout(() => resolve('late'), 500)), 20, 'slow-op'); }
+    catch (e) { threwTimeout = e; }
+    ok(threwTimeout && threwTimeout.name === 'InferenceTimeoutError', 'withTimeout rejects before a slow promise ever settles', String(threwTimeout && threwTimeout.message));
+    ok(RSNeuralWorker.classifyInferenceError(threwTimeout) === 'timeout', 'a timeout error classifies as the "timeout" hardware-limit reason');
+  }
+  const oomMessages = ['Out of memory', 'RESOURCE_EXHAUSTED: alloc failed', 'allocation failed for tensor', 'memory access out of bounds'];
+  for (const msg of oomMessages) {
+    ok(RSNeuralWorker.classifyInferenceError(new Error(msg)) === 'oom', 'classifies "' + msg + '" as oom');
+  }
+  ok(RSNeuralWorker.classifyInferenceError(Object.assign(new Error('array too large'), { name: 'RangeError' })) === 'oom',
+    'a RangeError (typed-array allocation failure) also classifies as oom');
+  ok(RSNeuralWorker.classifyInferenceError(new Error('WebGPU device was lost')) === 'device-lost', 'classifies a lost GPU device as device-lost');
+  ok(RSNeuralWorker.classifyInferenceError(new Error('WebGL context lost')) === 'device-lost', 'classifies a lost context as device-lost');
+  ok(RSNeuralWorker.classifyInferenceError(new Error('unexpected-output-shape')) === null,
+    'an unrelated error (e.g. a real shape bug) is not misclassified as a hardware limit');
+
+  section('neural · resolveInferenceFailure() evicts the cached session only for real hardware-limit reasons');
+  RSNeuralWorker.sessionCache.set('fake-model-oom', { unavailable: false, session: {} });
+  const reasonOom = RSNeuralWorker.resolveInferenceFailure('fake-model-oom', new Error('out of memory'));
+  ok(reasonOom === 'oom', 'reports the oom reason');
+  ok(RSNeuralWorker.sessionCache.has('fake-model-oom') === false, 'evicts the cached session after an oom failure — a retry re-probes instead of reusing a dead context');
+
+  RSNeuralWorker.sessionCache.set('fake-model-generic', { unavailable: false, session: {} });
+  const reasonGeneric = RSNeuralWorker.resolveInferenceFailure('fake-model-generic', new Error('unexpected-output-shape'));
+  ok(reasonGeneric === 'inference-error: unexpected-output-shape', 'a non-hardware error keeps the existing descriptive reason text', reasonGeneric);
+  ok(RSNeuralWorker.sessionCache.has('fake-model-generic') === true, 'a non-hardware error leaves the cached session in place — nothing wrong with the device itself');
+}
+
+/* ====================================================================== *
+ * 3b · neural-controller.js surfaces hardware-limit fallbacks through a
+ * dedicated pub/sub channel app.js uses for its one quiet UI toast, kept
+ * separate from the per-call {applied:false} result the render path itself
+ * already handles with no new code
+ * ====================================================================== */
+
+async function testHardwareFallbackNotification() {
+  section('neural · neural-controller.js onHardwareFallback() fires only for real hardware-limit reasons');
+
+  class FakeWorker {
+    constructor() { this.listeners = {}; }
+    addEventListener(type, cb) { (this.listeners[type] = this.listeners[type] || []).push(cb); }
+    postMessage(msg) {
+      const result = FakeWorker.nextResult(msg);
+      setTimeout(() => { for (const cb of (this.listeners.message || [])) cb({ data: { reqId: msg.reqId, result } }); }, 0);
+    }
+    terminate() {}
+  }
+  FakeWorker.nextResult = () => ({ applied: false, reason: 'weights-not-found' });
+
+  const realWorker = global.Worker;
+  global.Worker = FakeWorker;
+  try {
+    RSNeural.dispose(); // drop any cached worker reference from earlier tests so a fresh FakeWorker is constructed
+
+    const seen = [];
+    const unsubscribe = RSNeural.onHardwareFallback((reason) => seen.push(reason));
+
+    FakeWorker.nextResult = () => ({ applied: false, reason: 'weights-not-found' });
+    await RSNeural.denoise(new Float32Array(10));
+    ok(seen.length === 0, 'a benign "nothing installed" reason does not fire the hardware-fallback notification');
+
+    FakeWorker.nextResult = () => ({ applied: false, reason: 'oom' });
+    const oomResult = await RSNeural.separate(new Float32Array(10));
+    ok(oomResult.applied === false && oomResult.reason === 'oom', 'the call itself still resolves the normal {applied:false, reason} shape');
+    ok(seen.join(',') === 'oom', 'an oom reason fires exactly one notification', seen.join(','));
+
+    FakeWorker.nextResult = () => ({ applied: false, reason: 'device-lost' });
+    await RSNeural.superres(new Float32Array(10), [8000]);
+    FakeWorker.nextResult = () => ({ applied: false, reason: 'timeout' });
+    await RSNeural.denoise(new Float32Array(10));
+    ok(seen.join(',') === 'oom,device-lost,timeout', 'device-lost and timeout also fire the notification, in call order', seen.join(','));
+
+    unsubscribe();
+    FakeWorker.nextResult = () => ({ applied: false, reason: 'oom' });
+    await RSNeural.denoise(new Float32Array(10));
+    ok(seen.join(',') === 'oom,device-lost,timeout', 'unsubscribing stops further notifications', seen.join(','));
+  } finally {
+    RSNeural.dispose();
+    global.Worker = realWorker;
+  }
+}
+
+/* ====================================================================== *
+ * 4 · the worklet's Stage-7 coupling (NeuralAirCurve)
  * ====================================================================== */
 
 function runNeuralProcessor(sr, signal, airNeuralAmount, curve) {
@@ -356,6 +576,8 @@ async function main() {
   testFftAny();
   testStftRoundTrip();
   await testProbeAndFallback();
+  await testMobileAndWebNN();
+  await testHardwareFallbackNotification();
   testWorklet();
 
   console.log('\n' + '-'.repeat(60));

@@ -32,6 +32,24 @@
  *      convolutions in the ERB and band-split stages) require it, and a
  *      model that works on WASM and silently produces garbage on WebGPU over
  *      an unaligned input is a worse failure mode than either extreme.
+ *   4. Mobile is a first-class target, not an afterthought. On a phone or
+ *      tablet (`isMobileUA()`), the execution-provider order becomes WebNN
+ *      (NPU, then GPU, then CPU device type — `probeWebNN()`) *ahead of*
+ *      WebGPU, because reaching an NPU at all is only possible through
+ *      WebNN; `createSession()` still falls through to WebGPU and finally
+ *      WASM exactly as before if WebNN is unavailable or a given model's ops
+ *      are not WebNN-compatible. Mobile sessions also prefer the smallest
+ *      quantised weight file a model publishes (`selectVariant()`: int4 >
+ *      int8 > fp16 > fp32) to keep resident weights under the ~80 MB mobile
+ *      VRAM budget the brief asks for. And because phones throttle long
+ *      before desktops do, every `session.run()` call below is raced against
+ *      a short watchdog and its catch block pattern-matches OOM/device-lost
+ *      messages (`classifyInferenceError()`); either one evicts the cached
+ *      session (`sessionCache.delete`) so a retry does not keep re-hammering
+ *      a dead GPU/NPU context, and tags the result with a `reason` the main
+ *      thread (`neural-controller.js`) recognises as "hardware gave up, not
+ *      just absent" so it can surface exactly one quiet UI toast instead of
+ *      failing the render.
  *
  * Weight discovery: `loadWeights()` looks in two places, in order — the
  * Origin Private File System (`navigator.storage.getDirectory()`, so a model
@@ -120,20 +138,82 @@
     }
   }
 
+  /** `true` on phones/tablets — mirrors the brief's own detection regex exactly. */
+  function isMobileUA() {
+    const ua = (ctx.navigator && ctx.navigator.userAgent) || '';
+    return /Mobi|Android|iPhone/i.test(ua);
+  }
+
   /**
-   * Create a session, WebGPU first, WASM on any failure at all — a missing
-   * provider, an unsupported op, a device creation failure mid-session. The
-   * caller never sees the difference except in the returned `provider` name.
+   * Feature-detect WebNN the same cautious way `probeWebGpu()` feature-
+   * detects WebGpu: `navigator.ml` has to exist, and *creating* a context has
+   * to actually succeed, because a browser can expose the `ml` global behind
+   * a flag yet still throw on every `createContext()` call. Device types are
+   * tried most- to least-specialised — NPU (the whole point of WebNN: no
+   * other web API reaches it), then GPU, then CPU — and the first that
+   * succeeds is reported; this never throws, it degrades to `available:
+   * false` like every other capability probe in this file.
+   * See https://www.w3.org/TR/webnn/#dom-ml-createcontext and
+   * https://onnxruntime.ai/docs/tutorials/web/ep-webnn.html (deviceType:
+   * 'npu'|'gpu'|'cpu', default 'cpu').
+   */
+  async function probeWebNN() {
+    if (!(ctx.navigator && ctx.navigator.ml && typeof ctx.navigator.ml.createContext === 'function')) {
+      return { available: false, deviceType: null };
+    }
+    for (const deviceType of ['npu', 'gpu', 'cpu']) {
+      try {
+        await ctx.navigator.ml.createContext({ deviceType });
+        return { available: true, deviceType };
+      } catch (err) { /* try the next, less specialised device type */ }
+    }
+    return { available: false, deviceType: null };
+  }
+
+  /**
+   * Create a session. The execution-provider order depends on `caps.mobile`:
+   * on a phone/tablet with WebNN available, WebNN is tried *first* (its
+   * whole reason to exist is reaching an NPU that WebGPU cannot), then
+   * WebGPU, then WASM; everywhere else the order is WebGPU, WebNN, WASM —
+   * WebNN is still attempted opportunistically on desktop (e.g. Chrome/Edge
+   * with a DirectML-backed NPU) but never ahead of an already-proven WebGPU
+   * path there. Every provider is a try/catch of its own: a missing
+   * provider, an unsupported op, or a device creation failure mid-session
+   * all fall through to the next one, and the caller never sees the
+   * difference except in the returned `provider` name. WASM is the only
+   * provider that is never wrapped in a `try` — if it also throws, that is a
+   * genuine `createSession()` failure, caught one level up by `getSession()`.
    */
   async function createSession(ort, bytes, caps) {
-    if (caps.webgpu.available) {
-      try {
-        const session = await ort.InferenceSession.create(bytes, {
+    const attempts = [];
+    const webnnAttempt = (caps.webnn && caps.webnn.available)
+      ? {
+        provider: 'webnn',
+        fp16: false,
+        run: () => ort.InferenceSession.create(bytes, {
+          executionProviders: [{ name: 'webnn', deviceType: caps.webnn.deviceType, powerPreference: 'default' }],
+          graphOptimizationLevel: 'all',
+        }),
+      }
+      : null;
+    const webgpuAttempt = (caps.webgpu && caps.webgpu.available)
+      ? {
+        provider: 'webgpu',
+        fp16: caps.webgpu.fp16,
+        run: () => ort.InferenceSession.create(bytes, {
           executionProviders: [{ name: 'webgpu', deviceType: 'gpu', powerPreference: 'high-performance' }],
           graphOptimizationLevel: 'all',
-        });
-        return { session, provider: 'webgpu', fp16: caps.webgpu.fp16 };
-      } catch (err) { /* fall through to WASM below */ }
+        }),
+      }
+      : null;
+    if (caps.mobile) { if (webnnAttempt) attempts.push(webnnAttempt); if (webgpuAttempt) attempts.push(webgpuAttempt); }
+    else { if (webgpuAttempt) attempts.push(webgpuAttempt); if (webnnAttempt) attempts.push(webnnAttempt); }
+
+    for (const attempt of attempts) {
+      try {
+        const session = await attempt.run();
+        return { session, provider: attempt.provider, fp16: attempt.fp16 };
+      } catch (err) { /* fall through to the next provider, WASM last */ }
     }
     const session = await ort.InferenceSession.create(bytes, {
       executionProviders: ['wasm'],
@@ -360,23 +440,104 @@
     return { fwd, inv, edges, nBands, nBins };
   }
 
+  /* ------------------------------------------------------- inference resilience */
+
+  /**
+   * How long a single `session.run()` is allowed to take before it is
+   * treated as a thermal/scheduling stall rather than real work. This is
+   * deliberately much shorter than `neural-controller.js`'s own 120 s
+   * per-call ceiling: that outer timeout exists to bound a whole round trip
+   * (model load + run) from the main thread's point of view, while this one
+   * exists to catch a throttled GPU/NPU mid-inference, early enough that the
+   * session can be evicted and the *next* call gets a chance to pick a
+   * healthier provider instead of also waiting two full minutes to fail.
+   */
+  const INFERENCE_TIMEOUT_MS = 20000;
+
+  class InferenceTimeoutError extends Error {
+    constructor(label) { super('inference timed out' + (label ? ': ' + label : '')); this.name = 'InferenceTimeoutError'; }
+  }
+
+  /** Race `promise` against a timer; on expiry, reject with `InferenceTimeoutError` instead of hanging forever. */
+  function withTimeout(promise, ms, label) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new InferenceTimeoutError(label)), ms);
+      promise.then(
+        (v) => { clearTimeout(timer); resolve(v); },
+        (e) => { clearTimeout(timer); reject(e); },
+      );
+    });
+  }
+
+  /**
+   * Classify a thrown inference error into one of the hardware-limit reasons
+   * `neural-controller.js`/`app.js` treat as "worth a quiet toast" — as
+   * opposed to e.g. `weights-not-found`, which just means nothing was ever
+   * installed and is not a runtime failure at all. Matches the message
+   * patterns WebGPU/WASM/WebNN actually throw for these conditions
+   * (`RESOURCE_EXHAUSTED`/"out of memory" from WASM's linear-memory grower
+   * and from WebGPU allocation failures, "device lost"/"context lost" from a
+   * reset GPU/NPU driver after a thermal event) plus the timeout above.
+   * Returns `null` for anything else — a genuine bug or unexpected shape
+   * should keep its own descriptive `inference-error: ...` reason, not be
+   * silently relabelled.
+   */
+  function classifyInferenceError(err) {
+    if (err instanceof InferenceTimeoutError) return 'timeout';
+    const msg = String((err && err.message) || err || '').toLowerCase();
+    if (/device.*lost|context.*lost|gpu process.*lost/.test(msg)) return 'device-lost';
+    if (/out of memory|oom|resource_exhausted|allocation failed|memory access out of bounds/.test(msg)) return 'oom';
+    if (err && err.name === 'RangeError') return 'oom';
+    return null;
+  }
+
+  /**
+   * Handle a `session.run()` failure for `modelKey`: classify it, and when
+   * it is a hardware-limit condition (OOM/device-lost/timeout — a thermal or
+   * memory throttle event, exactly what the brief's requirement 3 describes)
+   * evict the cached session so the *next* call re-probes from scratch
+   * instead of handing the same now-unhealthy WebGPU/WebNN device straight
+   * back out. Returns the string `reason` the caller's `{applied:false,
+   * reason}` result carries; `neural-controller.js` treats the hardware-
+   * limit set specially (one quiet toast), everything else is just the
+   * existing generic `inference-error: ...` passthrough.
+   */
+  function resolveInferenceFailure(modelKey, err) {
+    const hwReason = classifyInferenceError(err);
+    if (hwReason) { sessionCache.delete(modelKey); return hwReason; }
+    return 'inference-error: ' + (err && err.message || String(err));
+  }
+
   /* ---------------------------------------------------------------- models */
 
   /**
    * Each entry documents a *real*, independently published ONNX export this
    * worker is wire-compatible with, not a contract invented for this repo —
-   * see the CHANGELOG for the sources. `fp32`/`fp16` are alternative weight
-   * files for the same graph; `fp16` is only requested when the WebGPU
-   * adapter has already confirmed `shader-f16` support, because a browser
-   * fp32→fp16 downcast does not happen for free at runtime — the two files
-   * are two different exports, same as every fp16 ONNX distribution found
-   * in the wild. Neither file ships with this repository.
+   * see the CHANGELOG for the sources. `fp32`/`fp16`/`int8`/`int4` are
+   * alternative weight files for the *same* graph, picked by
+   * `selectVariant()`: `fp16` is only requested when the WebGPU adapter has
+   * already confirmed `shader-f16` support (a browser fp32→fp16 downcast
+   * does not happen for free at runtime), and `int8`/`int4` are the mobile
+   * path — quantised exports (e.g. via onnxruntime's own dynamic/static
+   * quantisation tooling, or a vendor-published "-mobile"/"-quant" variant
+   * such as a DeepFilterNet-Mobile build) small enough to keep resident
+   * weights under the brief's ~80 MB mobile VRAM target. None of these files
+   * ship with this repository — see the CHANGELOG for why — so on mobile the
+   * lookup simply tries int4, then int8, then falls back exactly like
+   * desktop does; a project that *does* drop quantised weights next to a
+   * static deployment gets the VRAM saving with zero code changes.
    */
   const MODELS = {
     deepfilternet3: {
       kind: 'denoise',
       dir: 'models/deepfilternet3',
-      files: { fp32: 'deepfilter.onnx', fp16: 'deepfilter.fp16.onnx', aux: 'deepfilter-auxiliary.bin' },
+      files: {
+        fp32: 'deepfilter.onnx', fp16: 'deepfilter.fp16.onnx', aux: 'deepfilter-auxiliary.bin',
+        // "DeepFilterNet-Mobile"-class quantised exports the brief names
+        // explicitly: same graph/IO contract as fp32/fp16 above, just
+        // weight-quantised, so no DSP-side change is needed to use them.
+        int8: 'deepfilter.int8.onnx', int4: 'deepfilter.int4.onnx',
+      },
       // soniqo/DeepFilterNet3-ONNX and aufklarer/DeepFilterNet3-ONNX (Hugging
       // Face): feat_erb [1,1,T,32], feat_spec [1,2,T,96] in;
       // erb_mask [1,1,T,32], df_coefs [1,5,T,96,2] out.
@@ -387,7 +548,12 @@
     bsroformer: {
       kind: 'stems',
       dir: 'models/bsroformer',
-      files: { fp32: 'bs_roformer.onnx', fp16: 'bs_roformer_4stem_rhythm_fp16.onnx' },
+      files: {
+        fp32: 'bs_roformer.onnx', fp16: 'bs_roformer_4stem_rhythm_fp16.onnx',
+        // a compressed/quantised voice-vs-music separator variant, same
+        // host-STFT contract — see the `dsp` block below.
+        int8: 'bs_roformer.int8.onnx', int4: 'bs_roformer.int4.onnx',
+      },
       // silverdaw/bs-roformer-rhythm-onnx (Hugging Face): host computes the
       // STFT/iSTFT (torch.stft stripped from the graph for portability), the
       // graph consumes/returns real+imag spectrograms;
@@ -400,6 +566,9 @@
     audiosr: {
       kind: 'superres',
       dir: 'models/audiosr',
+      // already the lightweight, magnitude-curve-only path (see the comment
+      // below) — small enough on its own that no further mobile-specific
+      // quantised variant is needed to stay under the VRAM budget.
       files: { fp32: 'audiosr_lite.onnx', fp16: 'audiosr_lite.fp16.onnx' },
       // The brief explicitly allows "a lightweight model OR the matching
       // DSP/AI coupling" rather than the full ~6 GB AudioSR diffusion stack
@@ -447,21 +616,42 @@
   }
 
   /**
+   * Pick which weight file to ask for, given what the device can actually
+   * use. On mobile this prefers the smallest quantised export a model
+   * publishes — int4, then int8 — before ever considering fp16/fp32, which
+   * is what keeps resident weights under the brief's ~80 MB VRAM target;
+   * everywhere else the existing fp16-when-the-adapter-supports-it/fp32
+   * behaviour is unchanged. A variant is only chosen if `def.files` actually
+   * lists it — none do in this repository (see MODELS' own comment), so
+   * this always lands on `fp32` here, but it is exactly the lookup a project
+   * that *does* ship quantised weights needs with no further code changes.
+   */
+  function selectVariant(def, caps) {
+    const files = def.files;
+    const wantFp16 = !!(caps && caps.webgpu && caps.webgpu.available && caps.webgpu.fp16);
+    const order = (caps && caps.mobile)
+      ? ['int4', 'int8', wantFp16 ? 'fp16' : null, 'fp32']
+      : [wantFp16 ? 'fp16' : null, 'fp32'];
+    for (const key of order) { if (key && files[key]) return key; }
+    return 'fp32';
+  }
+
+  /**
    * Resolve a model's weights, OPFS first (a user-imported model persists
    * there with no repeat network cost) then a same-origin relative fetch
    * (the "local folder structure" the brief asks for). Returns `null` — never
    * throws — when neither source has the file; that `null` is the signal the
    * rest of this file treats as "fall back to the pure DSP path cleanly".
    */
-  async function loadWeights(modelKey, wantFp16) {
+  async function loadWeights(modelKey, caps) {
     const def = MODELS[modelKey];
     if (!def) return null;
-    const name = (wantFp16 && def.files.fp16) || def.files.fp32;
-    const rel = def.dir + '/' + name;
+    const variant = selectVariant(def, caps);
+    const rel = def.dir + '/' + def.files[variant];
     let bytes = await opfsBytes(rel);
-    if (bytes) return { bytes, source: 'opfs', file: rel, def };
+    if (bytes) return { bytes, source: 'opfs', file: rel, def, variant };
     bytes = await fetchBytes(rel);
-    if (bytes) return { bytes, source: 'fetch', file: rel, def };
+    if (bytes) return { bytes, source: 'fetch', file: rel, def, variant };
     return null;
   }
 
@@ -471,14 +661,14 @@
     if (sessionCache.has(modelKey)) return sessionCache.get(modelKey);
     let result;
     try {
-      const caps = { webgpu: await probeWebGpu() };
-      const weights = await loadWeights(modelKey, caps.webgpu.available && caps.webgpu.fp16);
+      const caps = { webgpu: await probeWebGpu(), webnn: await probeWebNN(), mobile: isMobileUA() };
+      const weights = await loadWeights(modelKey, caps);
       if (!weights) {
         result = { unavailable: true, reason: 'weights-not-found' };
       } else {
         const ort = await loadOrt();
         const created = await createSession(ort, weights.bytes, caps);
-        result = Object.assign({ unavailable: false, def: weights.def, source: weights.source, file: weights.file }, created);
+        result = Object.assign({ unavailable: false, def: weights.def, source: weights.source, file: weights.file, variant: weights.variant }, created);
       }
     } catch (err) {
       result = { unavailable: true, reason: 'init-failed: ' + (err && err.message || String(err)) };
@@ -530,7 +720,9 @@
 
       const erbTensor = new ort.Tensor('float32', featErb, [1, 1, Talign, erbBands]);
       const specTensor = new ort.Tensor('float32', featSpec, [1, 2, Talign, dfBins]);
-      const outputs = await sess.session.run({ feat_erb: erbTensor, feat_spec: specTensor });
+      const outputs = await withTimeout(
+        sess.session.run({ feat_erb: erbTensor, feat_spec: specTensor }), INFERENCE_TIMEOUT_MS, 'deepfilternet3',
+      );
       const mask = outputs.erb_mask ? outputs.erb_mask.data : null;
       if (!mask) return { applied: false, reason: 'unexpected-output-shape' };
 
@@ -554,7 +746,7 @@
       const output = istft(outRe, outIm, T, nfft, hop, win, signal.length);
       return { applied: true, output, provider: sess.provider, fp16: sess.fp16 };
     } catch (err) {
-      return { applied: false, reason: 'inference-error: ' + (err && err.message || String(err)) };
+      return { applied: false, reason: resolveInferenceFailure('deepfilternet3', err) };
     }
   }
 
@@ -581,7 +773,9 @@
 
       const reTensor = new ort.Tensor('float32', specRe, [1, 1, nBins, Talign]);
       const imTensor = new ort.Tensor('float32', specIm, [1, 1, nBins, Talign]);
-      const outputs = await sess.session.run({ in_spec_real: reTensor, in_spec_imag: imTensor });
+      const outputs = await withTimeout(
+        sess.session.run({ in_spec_real: reTensor, in_spec_imag: imTensor }), INFERENCE_TIMEOUT_MS, 'bsroformer',
+      );
       const outRe = outputs.out_spec_real ? outputs.out_spec_real.data : null;
       const outIm = outputs.out_spec_imag ? outputs.out_spec_imag.data : null;
       if (!outRe || !outIm) return { applied: false, reason: 'unexpected-output-shape' };
@@ -595,7 +789,7 @@
       }
       return { applied: true, stems: result, provider: sess.provider, fp16: sess.fp16 };
     } catch (err) {
-      return { applied: false, reason: 'inference-error: ' + (err && err.message || String(err)) };
+      return { applied: false, reason: resolveInferenceFailure('bsroformer', err) };
     }
   }
 
@@ -632,7 +826,7 @@
         }
       }
       const melTensor = new ort.Tensor('float32', mel, [1, 1, Talign, melBins]);
-      const outputs = await sess.session.run({ mel_in: melTensor });
+      const outputs = await withTimeout(sess.session.run({ mel_in: melTensor }), INFERENCE_TIMEOUT_MS, 'audiosr');
       const curve = outputs.mel_gain_db ? outputs.mel_gain_db.data : null;
       if (!curve) return { applied: false, reason: 'unexpected-output-shape' };
 
@@ -653,7 +847,7 @@
       });
       return { applied: true, gainsDb, provider: sess.provider, fp16: sess.fp16 };
     } catch (err) {
-      return { applied: false, reason: 'inference-error: ' + (err && err.message || String(err)) };
+      return { applied: false, reason: resolveInferenceFailure('audiosr', err) };
     }
   }
 
@@ -661,16 +855,20 @@
 
   async function probe() {
     const webgpu = await probeWebGpu();
+    const webnn = await probeWebNN();
+    const mobile = isMobileUA();
     const models = {};
     for (const key of Object.keys(MODELS)) {
       const sess = await getSession(key);
       models[key] = sess.unavailable
         ? { available: false, reason: sess.reason }
-        : { available: true, provider: sess.provider, fp16: sess.fp16, source: sess.source };
+        : { available: true, provider: sess.provider, fp16: sess.fp16, source: sess.source, variant: sess.variant };
     }
     return {
       webgpu: { available: webgpu.available, fp16: webgpu.fp16 },
+      webnn: { available: webnn.available, deviceType: webnn.deviceType },
       wasmSimd: true,
+      mobile,
       models,
     };
   }
@@ -704,8 +902,10 @@
   // opfs-manager.js's `buildWorkerSource` already uses.
   ctx.RSNeuralWorker = {
     MODELS, alignT, padRowsTo, trimRowsTo, buildErbFilterbank, stft, istft, fftAny,
-    vorbisWindow, hannWindow, probeWebGpu, createSession, loadOrt, loadWeights,
-    opfsBytes, fetchBytes, getSession, denoiseDFN3, separateBSR, superresCurve, probe,
+    vorbisWindow, hannWindow, probeWebGpu, probeWebNN, isMobileUA, createSession, loadOrt,
+    selectVariant, loadWeights, opfsBytes, fetchBytes, getSession, sessionCache,
+    withTimeout, classifyInferenceError, resolveInferenceFailure, INFERENCE_TIMEOUT_MS,
+    denoiseDFN3, separateBSR, superresCurve, probe,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = ctx.RSNeuralWorker;
 })(typeof self !== 'undefined' ? self : (typeof globalThis !== 'undefined' ? globalThis : this));

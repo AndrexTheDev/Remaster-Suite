@@ -11,6 +11,16 @@
  * as the same shape the worker itself uses, `{applied: false, reason}`, so a
  * call site (`engine.js`, `app.js`) needs exactly one `if (!result.applied)`
  * to fall back to the pure DSP path, never a try/catch.
+ *
+ * A subset of those reasons — `oom`, `device-lost`, `timeout` — are not just
+ * "nothing installed", they mean a call actually started on real hardware
+ * and that hardware gave up mid-inference: a memory/thermal throttle event,
+ * exactly what the mobile brief's requirement 3 describes. Those are
+ * reported twice: once in the resolved result (so the pure-DSP fallback it
+ * already triggers needs no new code), and once through
+ * `onHardwareFallback(cb)`, a tiny pub/sub `app.js` uses to surface exactly
+ * one quiet UI toast instead of leaving the user to wonder why a render
+ * "went plain" with no explanation.
  * ========================================================================== */
 (function (global) {
   'use strict';
@@ -18,9 +28,27 @@
   const WORKER_URL = 'assets/js/neural-worker.js';
   const CALL_TIMEOUT_MS = 120000; // inference can legitimately take a while on WASM
 
+  // Reasons that mean "a call was attempted and the hardware itself gave
+  // out" rather than "nothing was installed" (`weights-not-found`) or "the
+  // feature was turned off/torn down" (`disposed`, `worker-unavailable`).
+  const HARDWARE_LIMIT_REASONS = new Set(['oom', 'device-lost', 'timeout']);
+
   let worker = null;
   let reqSeq = 0;
   const pending = new Map();
+  const fallbackListeners = new Set();
+
+  /** Notify any `onHardwareFallback` subscribers when a result's reason is a hardware-limit one. */
+  function maybeNotifyFallback(result) {
+    if (!result || result.applied !== false || !HARDWARE_LIMIT_REASONS.has(result.reason)) return;
+    for (const cb of fallbackListeners) { try { cb(result.reason); } catch (e) { /* a bad listener must not break the pipeline */ } }
+  }
+
+  /** Resolve a pending call's promise, firing the hardware-fallback notification first if warranted. */
+  function settle(resolve, result) {
+    maybeNotifyFallback(result);
+    resolve(result);
+  }
 
   function resolveUrl(rel) {
     if (!global.location) return rel;
@@ -42,14 +70,14 @@
       if (!slot) return;
       pending.delete(reqId);
       global.clearTimeout(slot.timer);
-      slot.resolve(error ? { applied: false, reason: error } : result);
+      settle(slot.resolve, error ? { applied: false, reason: error } : result);
     });
     worker.addEventListener('error', () => {
       // a worker-level error (e.g. a syntax error reached production) fails
       // every outstanding call cleanly rather than hanging them forever
       for (const [id, slot] of pending) {
         global.clearTimeout(slot.timer);
-        slot.resolve({ applied: false, reason: 'worker-error' });
+        settle(slot.resolve, { applied: false, reason: 'worker-error' });
         pending.delete(id);
       }
     });
@@ -63,7 +91,7 @@
       const reqId = ++reqSeq;
       const timer = global.setTimeout(() => {
         pending.delete(reqId);
-        resolve({ applied: false, reason: 'timeout' });
+        settle(resolve, { applied: false, reason: 'timeout' });
       }, CALL_TIMEOUT_MS);
       pending.set(reqId, { resolve, timer });
       try {
@@ -77,6 +105,20 @@
   }
 
   const API = {
+    /**
+     * Subscribe to hardware-limit fallbacks (`oom`/`device-lost`/`timeout` —
+     * see HARDWARE_LIMIT_REASONS above). Returns an unsubscribe function.
+     * Fires at most once per failing call, after that call's own promise has
+     * already resolved `{applied:false, reason}` to its caller — this is
+     * purely a notification channel for UI feedback, never part of the
+     * render's own fallback logic, which needs no new code to keep working.
+     */
+    onHardwareFallback(cb) {
+      if (typeof cb !== 'function') return () => {};
+      fallbackListeners.add(cb);
+      return () => fallbackListeners.delete(cb);
+    },
+
     /** Terminate the worker (e.g. the user turned the feature off). */
     dispose() {
       if (worker) { try { worker.terminate(); } catch (e) { /* ignore */ } worker = null; }

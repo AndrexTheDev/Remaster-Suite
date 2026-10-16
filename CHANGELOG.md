@@ -6,6 +6,63 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Round 28 — the neural pipeline becomes mobile/NPU-aware: WebNN detection, quantised weights,
+### and a quiet toast when the hardware throttles mid-inference
+
+**Round 27's WebGPU/WASM pipeline gets a third rung, specifically for phones and tablets, without**
+touching the guarantee that made it safe to ship in the first place: every call still either produces a
+result or resolves `{applied: false, reason}`, never a thrown error. Three additions, matching the brief's
+own three requirements:
+
+**1 — WebNN capability detection, prioritised ahead of WebGPU on mobile.** `neural-worker.js` adds
+`probeWebNN()`, the same cautious shape as the existing `probeWebGpu()`: `navigator.ml` has to exist *and*
+`createContext({deviceType})` has to actually succeed, tried NPU → GPU → CPU in order, for `available` to
+ever come back true — a flag-gated `navigator.ml` that throws on every device type still degrades to
+`available: false` like every other probe here. `isMobileUA()` mirrors the brief's own detection regex
+(`/Mobi|Android|iPhone/i`) exactly. `createSession()`'s execution-provider order now depends on
+`isMobileUA()`: on a phone/tablet with WebNN available, WebNN is tried *first* — reaching an NPU at all is
+only possible through it — then WebGPU, then WASM; everywhere else WebGPU still goes first (WebNN is still
+tried opportunistically before WASM, never ahead of an already-proven WebGPU path). Each provider is its
+own try/catch, same pattern as the existing WebGPU→WASM fallback, so an unsupported op or a refused
+context falls through to the next provider rather than failing the call. `probe()`'s result (and
+`initNeural()`'s status line in `app.js`) now reports `webnn`/`mobile` alongside the existing
+`webgpu`/`wasmSimd`.
+
+**2 — mobile-optimised model configuration, targeting <80 MB of resident weights.** The `MODELS` manifest
+gains `int8`/`int4` file slots per model (DeepFilterNet3, BS-RoFormer — AudioSR's lightweight curve model
+is already small enough on its own) alongside the existing `fp32`/`fp16`; a new `selectVariant(def, caps)`
+picks, on mobile, the smallest quantised file a model actually publishes — int4, then int8, then fp16 (only
+if the adapter already supports it), then fp32 — while desktop behaviour is unchanged (fp16-when-supported,
+else fp32). None of these files ship with this repository any more than the fp32/fp16 ones already didn't
+(see Round 27's own note on why), so `loadWeights()` still resolves `null` cleanly by default; a deployment
+that *does* drop quantised weights next to its static files gets the VRAM saving with zero further code.
+
+**3 — a thermal/memory throttle fallback, with a quiet UI toast.** Every `session.run()` call
+(`denoiseDFN3`/`separateBSR`/`superresCurve`) is now raced against a 20 s watchdog
+(`withTimeout`/`InferenceTimeoutError`) — deliberately shorter than `neural-controller.js`'s own 120 s
+per-call ceiling, so a throttled GPU/NPU is caught mid-inference rather than only at the outer boundary —
+and its catch block runs the error through `classifyInferenceError()`, which pattern-matches the messages
+WebGPU/WASM/WebNN actually throw for out-of-memory and device-lost conditions (plus a `RangeError`, the
+classic symptom of a failed typed-array allocation). A classified hardware-limit error evicts the model's
+cached session (`sessionCache.delete`) so the next call re-probes instead of handing the same now-dead
+context straight back out, and tags the result with a dedicated `reason` (`oom`/`device-lost`/`timeout`) —
+distinct from the pre-existing `weights-not-found`, which is not a runtime failure at all. The render path
+itself needs no new code: `engine.js` already treats any `{applied: false}` as "proceed on the pure DSP
+path". What *is* new is `neural-controller.js`'s `onHardwareFallback(cb)`, a small pub/sub that fires only
+for that hardware-limit reason set (never for `weights-not-found`, `disposed`, or `worker-unavailable`);
+`app.js` subscribes once in `initNeural()` and shows exactly one `toast.neuralFallback` warning per
+session, however many calls in a batch export hit the same limit.
+
+New tests in `tests/neural.test.js` (87 checks total, up from 46) cover all three additions against fake
+`navigator.ml`/`ort`/`Worker` stand-ins — there is no more a real WebNN implementation under plain Node
+than there was a real WebGPU one.
+
+Changed: `assets/js/neural-worker.js` (`probeWebNN`, `isMobileUA`, `selectVariant`, `withTimeout`,
+`classifyInferenceError`, `resolveInferenceFailure`, extended `createSession`/`loadWeights`/`getSession`/
+`probe`), `assets/js/neural-controller.js` (`onHardwareFallback`), `assets/js/app.js` (`initNeural()`'s
+status line and the new toast subscription), `assets/js/i18n.js` (`ctl.neuralWebnn`,
+`toast.neuralFallback`, German and English), `tests/neural.test.js`.
+
 ### Round 27 — an optional neural pipeline: WebGPU inference, DeepFilterNet3, BS-RoFormer, and a
 ### Stage-7 coupling for the top end a lossy file never had
 

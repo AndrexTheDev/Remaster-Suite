@@ -338,17 +338,24 @@ execution provider. Nothing about the pure-DSP chain changes when it is off — 
 a different mode.
 
 * **Execution.** [`assets/js/neural-worker.js`](assets/js/neural-worker.js) runs `onnxruntime-web` in a
-  dedicated Worker, WebGPU first (with fp16 weights once the adapter confirms `shader-f16`), falling back
-  to WASM-SIMD automatically if WebGPU is unavailable or fails for any reason. The library itself is
-  fetched from a CDN only once a model is actually used (see [Privacy](#privacy)) — it is never bundled
-  (the npm package unpacks to ≈145 MB) and never loaded just because the toggle exists on the page.
+  dedicated Worker. On a phone or tablet (`/Mobi|Android|iPhone/i` against `navigator.userAgent`) with
+  WebNN available, it tries WebNN first — the only web API that can reach an on-device NPU, probed
+  NPU → GPU → CPU device type — then WebGPU (with fp16 weights once the adapter confirms `shader-f16`),
+  then WASM-SIMD; everywhere else WebGPU still goes first. Every provider is its own try/catch, so an
+  unsupported op or a refused context falls straight through to the next one, never to a failed call. The
+  library itself is fetched from a CDN only once a model is actually used (see [Privacy](#privacy)) — it
+  is never bundled (the npm package unpacks to ≈145 MB) and never loaded just because the toggle exists on
+  the page.
 * **Models.** Two restoration models — [DeepFilterNet3](https://github.com/Rikorose/DeepFilterNet)
   (noise suppression) and [BS-RoFormer](https://github.com/ZFTurbo/Music-Source-Separation-Training)
   (stem separation: vocals / drums / bass / other) — and the Stage-7 air coupling below are all wired to
   real, published ONNX export contracts, but **no weights ship with this repository.** Drop a model's
   `.onnx` file (and its auxiliary weights, where the export needs one) into OPFS or a same-origin
   `models/<name>/` folder to activate it; with nothing there, every call cleanly reports
-  `{applied: false, reason: 'weights-not-found'}` and the DSP chain runs exactly as it always has.
+  `{applied: false, reason: 'weights-not-found'}` and the DSP chain runs exactly as it always has. On
+  mobile, the smallest quantised variant a model publishes (int4, then int8) is preferred over fp16/fp32,
+  to keep resident weights under ≈80 MB of VRAM — the same clean "nothing installed" fallback applies
+  either way.
 * **Stage 7 coupling, not AudioSR.** A real AudioSR is a 258 M-parameter latent-diffusion model (UNet +
   VAE + HiFi-GAN, 50 sampling steps, over a gigabyte of weights) — nothing a browser tab can run at a
   usable speed. What ships instead keeps this project's existing, phase-correct `AirSynth` harmonic
@@ -358,6 +365,12 @@ a different mode.
   ±12 dB so a bad prediction can never do more than a gentle shelf could.
 * **When it runs.** Only on the final export render, never on the live preview or the A/B comparison
   window — both re-render on every slider nudge, and inference is not instant.
+* **Thermal/memory throttle fallback.** Every inference call is raced against a 20 s watchdog; if it times
+  out, or the error matches an out-of-memory/device-lost pattern, the model's cached session is dropped (so
+  the next call re-probes instead of reusing a dead GPU/NPU context) and the call resolves
+  `{applied: false, reason: 'oom'|'device-lost'|'timeout'}` — the render falls back to the pure DSP path
+  exactly as it does for `weights-not-found`, and a single quiet toast lets you know why, without
+  repeating itself for every call in a batch export that hits the same limit.
 
 ## Privacy
 
@@ -404,9 +417,11 @@ assets/
     analyzer.js                  file → measurements, diagnosis, waveform envelopes (RSAnalyzer)
     neural-controller.js         main-thread handle onto neural-worker.js — one Promise-returning
                                  call per model, never rejects (RSNeural)
-    neural-worker.js             optional, best-effort WebGPU/WASM inference: DeepFilterNet3,
-                                 BS-RoFormer, and the Stage-7 air super-resolution curve (worker-only,
-                                 loaded with `new Worker(...)`, not a <script> tag)
+    neural-worker.js             optional, best-effort WebNN/WebGPU/WASM inference: DeepFilterNet3,
+                                 BS-RoFormer, and the Stage-7 air super-resolution curve, with
+                                 mobile-first EP ordering, quantised-weight selection, and an
+                                 OOM/timeout throttle fallback (worker-only, loaded with
+                                 `new Worker(...)`, not a <script> tag)
     engine.js                    AudioContext + AudioWorklet, live monitor and offline render (RSEngine)
     ui.js                        DOM helpers, toasts, dialogs, interactive waveform (RSUI)
     app.js                       state, per-card logic, batch queue (RSApp)
