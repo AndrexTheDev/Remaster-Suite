@@ -478,7 +478,7 @@ tests/
                                  through a 128 kbit/s encoder)
   dsp.test.js                    DSP/engine suite: transparency, sub, air, exciter, de-hiss,
                                  de-click, measured hum/hiss repair, and the contract that a
-                                 broken file never becomes NaN parameters (160 checks)
+                                 broken file never becomes NaN parameters (173 checks)
   tuning.test.js                 the tuning contract: what the automatic mode may do to a file (17 checks)
   web.test.js                    static, DOM and app suite (137 checks)
   audit.test.js                  repository hygiene, markup, contrast, i18n, parameter,
@@ -486,7 +486,7 @@ tests/
                                  a rich-hum fixture, the effect budgets, the
                                  several-problems-at-once chain, and the chain-level
                                  scale-freedom row, the export's ceiling through the
-                                 codec, and the de-clicker's floor with its control (335
+                                 codec, and the de-clicker's floor with its control (338
                                  checks)
   e2e.test.js                    realistic journeys: five problem recordings, slider sweep,
                                  profile overrides, 10-file batch → ZIP, mono/32 k/96 k,
@@ -494,11 +494,27 @@ tests/
   opfs.test.js                   runs the actual shipped OPFS worker source in a Node vm
                                  against a simulated Origin Private File System: streaming
                                  writes, a multi-megabyte streamed ZIP cross-checked with
-                                 JSZip and unzip(1), and the in-memory fallback (28 checks)
+                                 JSZip and unzip(1), the oversized-batch guard, and the
+                                 in-memory fallback (39 checks)
+  neural.test.js                 the neural path with no model installed: the shipped
+                                 controller/worker contract (never throws, always resolves
+                                 `{applied: false, reason}`), the provider order, tensor
+                                 alignment and the timeout watchdog (87 checks)
+  memory-guard.test.js           the shipped heap watchdog without a `performance.memory`:
+                                 the honest no-signal default, the one-way shrink ramp and a
+                                 stop function that never leaks a timer (21 checks)
+  chunked-render.test.js         the chunked/streamed offline render: chunk boundaries and
+                                 level-preserving crossfades, the streaming WAV/MP3 encoders,
+                                 the mid-render shrink, and the abort path that a failing
+                                 onChunk triggers (50 checks)
+  mobile-ux.test.js              the carousel effect rack, the gold "AI Magic Fix" button and
+                                 the live A/B/C compare FAB: markup/CSS, navigator.vibrate
+                                 safety, switchBuffer() position preservation, the
+                                 desktop-arms vs phone-auto-processes split, tap/hold (48 checks)
   coi.test.js                    runs the shipped coi-serviceworker.js in a Node vm as both
                                  a Service Worker (COOP/COEP header rewrite) and a page
-                                 script (registration, the one-reload rule, no reload loop;
-                                 19 checks)
+                                 script (registration, the one-reload rule, and the guarantee
+                                 that a reload never loops) (19 checks)
   webaudio-stub.js               miniature Web Audio implementation for Node
   beta/
     beta.js                      the real-browser suite: every control on the page,
@@ -507,6 +523,26 @@ tests/
     cdp.js                       minimal Chrome DevTools Protocol client over the
                                  platform WebSocket — no dependency beyond Node ≥ 22
     chromium.js                  launcher for the packaged headless Chromium
+scripts/
+  validate-docs.js               documentation validator: tests/ ↔ README.md ↔ package.json
+                                 (suite count, per-suite check counts, the npm chain) plus the
+                                 JSDoc coverage audit of assets/js; `--run` re-runs every suite
+                                 and compares its own check count with the README
+tools/                           measurement probes, not part of the app — the evidence the
+                                 restoration claims rest on (see util.js)
+  util.js                        measurement toolkit: fixtures, renderers, spectrum meters
+  acceptance.js                  the acceptance matrix: one fixture per defect class through
+                                 the whole automatic chain, each row measured by the app's own
+                                 analyser and an independent time-domain meter side by side
+  workflow-check.js              the user's own loop end to end: bad file in → process →
+                                 export MP3 320 → re-upload the export → read the diagnosis
+  codec-sib.js                   the same loop measured link by link, for the sibilance case
+  top-end-check.js               which instrument fills which hole: the 7 kHz shelf against
+                                 the synthesiser, per material
+  fixture-check.js               the two fixtures whose statistic has to be right before a row
+                                 can mean anything (where the hiss sits, that the "s" bursts
+                                 are noise and not a tone)
+  setup.sh                       installs ffmpeg into the sandbox for the codec rows
 ```
 
 No bundler, no transpiler, no dependencies at runtime. The only `node_modules` in the project
@@ -516,30 +552,42 @@ belong to the test suite.
 
 ## Tests
 
+**11 dependency-free suites · 1037 checks.** Every count below is the suite's own
+(`ALL TESTS PASSED (n)`); `node scripts/validate-docs.js --run` re-runs them and
+fails if this file, `tests/` and `package.json` ever disagree.
+
+| Suite | File | Checks | Covers |
+| :-- | :-- | --: | :-- |
+| DSP & engine | `tests/dsp.test.js` | 173 | transparency, sub, air, exciter, de-hiss, de-click, de-resonator, level match, power scaling, WAV/MP3/ZIP, classification |
+| Tuning law | `tests/tuning.test.js` | 17 | what the automatic mode may do to a file: octave bands, loudness, the level match, the soft-clip guard, level-normalised synthesis, honest extremes |
+| Web & DOM | `tests/web.test.js` | 137 | static integrity, bilingual coverage, boot, drop → analyse → render → save → ZIP, error handling, resampling |
+| Audit | `tests/audit.test.js` | 338 | repository hygiene, markup, stylesheet, contrast, bilingual coverage, parameter ranges, DSP edge cases, the several-problems-at-once chain, codec round-trips, budgets |
+| End to end | `tests/e2e.test.js` | 108 | five problem recordings, slider sweep, profile overrides, 10-file batch → ZIP, mono/32 k/96 k, hostile input |
+| OPFS | `tests/opfs.test.js` | 39 | the shipped worker source against a simulated file system: streaming writes, a streamed ZIP cross-checked with JSZip and unzip(1), the oversized-batch guard, the in-memory fallback |
+| Cross-origin isolation | `tests/coi.test.js` | 19 | coi-serviceworker.js as a Service Worker and as a page script: the COOP/COEP rewrite, the one-reload rule, never a reload loop |
+| Neural | `tests/neural.test.js` | 87 | the model path with no weights installed: the controller/worker contract, T-frame alignment, STFT round-trips, the capability probe, provider order, quantised-variant selection, the watchdog and the Stage-7 coupling |
+| Memory guard | `tests/memory-guard.test.js` | 21 | the heap watchdog on a host without `performance.memory`: the honest no-signal default, the one-way shrink ramp, a stop function that never leaks a timer |
+| Chunked render | `tests/chunked-render.test.js` | 50 | chunk boundaries and level-preserving crossfades, the streaming WAV/MP3 encoders, the mid-render shrink, the abort a failing onChunk triggers |
+| Mobile UX | `tests/mobile-ux.test.js` | 48 | the carousel effect rack, the gold "AI Magic Fix" button, the live A/B/C compare FAB, navigator.vibrate safety, switchBuffer() position preservation, tap/hold |
+
 ```bash
 npm install          # only for the test suite (jsdom)
-npm test             # runs all seven dependency-free suites
-node tests/dsp.test.js     # engine: transparency, sub, air, exciter, de-hiss, de-click,
-                           # de-resonator, level match, power scaling, WAV/MP3/ZIP, classification
-node tests/web.test.js     # static integrity, bilingual coverage, boot, drop → analyse → render
-                           # → save → ZIP, error handling, resampling
-node tests/audit.test.js   # repository hygiene, markup, stylesheet, contrast, bilingual
-                           # coverage, parameter ranges, the several-problems-at-once
-                           # chain, DSP edge cases, codec round-trips, budgets
-node tests/e2e.test.js     # realistic journeys: five problem recordings, slider sweep, profile
-                           # overrides, 10-file batch → ZIP, mono/32 k/96 k, hostile input
-node tests/tuning.test.js  # the tuning contract: octave bands, loudness, the level match, the
-                           # soft-clip guard, level-normalised synthesis, honest extremes
-node tests/opfs.test.js    # the shipped OPFS worker source against a simulated file system:
-                           # streaming writes, a streamed ZIP cross-checked with JSZip and
-                           # unzip(1), the oversized-batch guard, the in-memory fallback
-node tests/coi.test.js     # the shipped coi-serviceworker.js as both a Service Worker
-                           # (COOP/COEP header rewrite) and a page script (the one-reload
-                           # rule, never a reload loop)
-node tests/mobile-ux.test.js  # the carousel effect rack, the gold "AI Magic Fix" button,
-                           # and the live A/B/C compare FAB: markup/CSS, navigator.vibrate
-                           # safety, engine.js's switchBuffer() position preservation,
-                           # the desktop-arms vs phone-auto-processes split, tap/hold
+npm test             # runs all eleven dependency-free suites
+node scripts/validate-docs.js        # README ↔ tests/ ↔ package.json consistency
+node scripts/validate-docs.js --run  # the same, and re-counts every suite
+
+node tests/dsp.test.js             # engine: transparency … classification
+node tests/web.test.js             # static integrity, boot, the whole journey, resampling
+node tests/audit.test.js           # repository, markup, contrast, i18n, parameters, codecs
+node tests/e2e.test.js             # realistic journeys, slider sweep, batch → ZIP
+node tests/tuning.test.js          # the automatic mode's tuning contract
+node tests/opfs.test.js            # the shipped OPFS worker against a simulated file system
+node tests/coi.test.js             # the shipped cross-origin-isolation bootstrap
+node tests/neural.test.js          # the neural path with no weights installed
+node tests/memory-guard.test.js    # the mobile heap watchdog, with no heap signal
+node tests/chunked-render.test.js  # the chunked/streamed offline render and its encoders
+node tests/mobile-ux.test.js       # carousel rack, Magic Fix button, A/B/C compare FAB
+
 node tests/beta/beta.js    # big beta: drives a real headless Chromium over the DevTools
                            # protocol — real clicks, real drops, real AudioWorklet, real
                            # dialogs and downloads, phone emulation at 390 and 320 px with
@@ -555,7 +603,7 @@ node tests/beta/beta.js    # big beta: drives a real headless Chromium over the 
 The beta writes `docs/BETA-REPORT.md` and the screenshot matrix to `docs/beta/`.
 It needs the optional dev dependency `@sparticuz/chromium` (a packaged headless
 Chromium, used because CI machines rarely ship a browser); `npm test` runs the
-five dependency-free suites and stays green everywhere.
+eleven dependency-free suites and stays green everywhere.
 
 Signals are simulated (garage session, cassette, vinyl rip, low-bitrate, clean — plus a vinyl
 transfer that was later pushed through a 128 kbit/s encoder, the file that needs more than one

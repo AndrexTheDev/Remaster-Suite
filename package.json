@@ -9,6 +9,7 @@
     "test:web": "node tests/web.test.js",
     "test:audit": "node tests/audit.test.js",
     "test:e2e": "node tests/e2e.test.js",
+    "test:tuning": "node tests/tuning.test.js",
     "test:opfs": "node tests/opfs.test.js",
     "test:coi": "node tests/coi.test.js",
     "test:neural": "node tests/neural.test.js",
@@ -16,7 +17,9 @@
     "test:chunked-render": "node tests/chunked-render.test.js",
     "test:mobile-ux": "node tests/mobile-ux.test.js",
     "serve": "python3 -m http.server 8080",
-    "test:beta": "node tests/beta/beta.js"
+    "test:beta": "node tests/beta/beta.js",
+    "validate:docs": "node scripts/validate-docs.js",
+    "validate:docs:run": "node scripts/validate-docs.js --run"
   },
   "devDependencies": {
     "jsdom": "^22.1.0"

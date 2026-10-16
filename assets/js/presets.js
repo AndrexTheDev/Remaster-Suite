@@ -22,15 +22,274 @@
  * that does need repair it never adds more than the missing amount, capped by a
  * published budget (see `doze`/`CAPS` below).
  * ========================================================================== */
+/**
+ * @fileoverview Problem presets and adaptive auto-tuning — exposed as the
+ * global `RSPresets` (`globalThis.RSPresets`).
+ *
+ * This module is where a measurement turns into a parameter map. A preset is a
+ * set of *ceilings*, not a set of amounts: the engine never applies a ceiling
+ * just because a profile was chosen — every value is dosed from what was
+ * measured on the actual file. A stage that repairs something is dosed by how
+ * strongly the problem was detected; a stage that synthesises something is
+ * dosed by how much was measured as missing, in dB. Nothing detected means
+ * nothing done, which is what keeps the automatic result transparent on
+ * material that needs no repair.
+ *
+ * The pipeline, in order: `classify()` names the file (and the scores behind
+ * that name), `chainOf()`/`mixAnchors()` turn several findings into one set of
+ * ceilings, `demand()` measures how much of each stage is actually needed,
+ * `adapt()` applies that demand to the ceilings, and `buildParams()` writes the
+ * flat {@link ParamMap} the AudioWorklet reads. `diagnose()` and `recipe()` are
+ * the human-readable half of the same numbers.
+ *
+ * @module RSPresets
+ */
 (function (global) {
   'use strict';
 
+  /**
+   * Clamp a number into an inclusive range.
+   * @param {number} x - value to clamp.
+   * @param {number} lo - lower bound.
+   * @param {number} hi - upper bound.
+   * @returns {number} the clamped value.
+   */
   const clamp = (x, lo, hi) => (x < lo ? lo : x > hi ? hi : x);
-  /** 0 below lo, 1 above hi, smooth in between (Hermite). */
+  /**
+   * Hermite smoothstep: exactly `0` at or below `lo`, exactly `1` at or above
+   * `hi`, smooth in between. Used as the "is this stage switched on at all"
+   * factor, which is why the exactness at the ends matters — at 0 % power the
+   * output has to be a bit-transparent copy, not a 0.001 of a stage.
+   * @param {number} lo - lower edge.
+   * @param {number} hi - upper edge.
+   * @param {number} x - the value to place.
+   * @returns {number} 0…1.
+   */
   const smoothstep = (lo, hi, x) => {
     const t = clamp((x - lo) / (hi - lo || 1e-9), 0, 1);
     return t * t * (3 - 2 * t);
   };
+
+  /**
+   * The full worklet parameter map — every name `RSPresets.buildParams()` can
+   * produce, with the range the AudioWorklet itself enforces (its own
+   * `parameterDescriptors`) and what the value means. `power` scales all of
+   * them together; `0 %` is bit-transparent because the "switched on" factor
+   * is exactly zero there.
+   *
+   * Ceilings for the automatic mode: the chain-level amounts a file is dosed
+   * within, at 100 % power and worst-case material.
+   *
+   * `*Hz`, `*F1/F2` are hertz, `tpCeil`/`refDb`/`declipLevel` decibels,
+   * everything with `0..1` is a normalised amount.
+   *
+   * @typedef {Object} ParamMap
+   * @property {number} power - 0…1 master intensity; scales every other
+   *   parameter of the map (0 = untouched original).
+   * @property {number} bypass - 0…1; 1 plays the pure dry signal (the A/B
+   *   switch), implemented inside the worklet so it cannot click.
+   * @property {number} sub - 0…1 sub-harmonic synthesis amount.
+   * @property {number} subSrc - 60…260 Hz, where the synthesiser looks for the
+   *   fundamental to derive its octave below from (95 Hz default; a recording
+   *   with an empty bottom needs it higher).
+   * @property {number} subRatio - 0.34…0.66 sub/main mix ratio.
+   * @property {number} exciter - 0…1 harmonic exciter amount.
+   * @property {number} air - 0…1 air synthesis around 8…16 kHz.
+   * @property {number} airNeural - 0…1 trust dial for the optional neural
+   *   Stage-7 curve; 0 (the default) ignores any curve posted over the port.
+   * @property {number} dehiss - 0…1 de-hisser depth (a repair, dosed by the
+   *   measured tilt step).
+   * @property {number} declip - 0…1 flat-top reconstruction amount.
+   * @property {number} declipLevel - −60…0 dBFS: the measured plateau level the
+   *   de-clipper looks for.
+   * @property {number} declick - 0…1 impulse repair depth.
+   * @property {number} reso - 0…1 dynamic de-resonating depth.
+   * @property {number} glue - 0…1 glue compression amount.
+   * @property {number} warmth - 0…1 saturation amount.
+   * @property {number} tilt - −1…1 tone tilt (dark to bright).
+   * @property {number} band0 - −15…15 dB, 60 Hz low shelf of the tone stage.
+   * @property {number} band1 - −15…15 dB, 200 Hz mud band.
+   * @property {number} band2 - −15…15 dB, 450 Hz boxiness band.
+   * @property {number} band3 - −15…15 dB, 1.3 kHz honk band.
+   * @property {number} band4 - −15…15 dB, 3.2 kHz presence band.
+   * @property {number} band5 - −15…15 dB, 7 kHz air shelf.
+   * @property {number} hum - 0…1 mains notch depth at the fundamental (a
+   *   repair: exactly as deep as the measured line).
+   * @property {number} hum2 - 0…1 second-harmonic notch depth.
+   * @property {number} hum3 - 0…1 third-harmonic notch depth.
+   * @property {number} humHz - 50…60 Hz: the mains frequency all three notches
+   *   sit on, PLL-tracked across the file by the worklet.
+   * @property {number} boxG1 - −12…0 dB: depth of the strongest measured
+   *   resonance's notch.
+   * @property {number} boxF1 - 80…2000 Hz: that resonance's frequency.
+   * @property {number} boxQ1 - 1…10: that resonance's sharpness.
+   * @property {number} boxG2 - −12…0 dB: the same three for the second-worst
+   *   measured resonance.
+   * @property {number} boxF2 - 80…2000 Hz.
+   * @property {number} boxQ2 - 1…10.
+   * @property {number} width - 0…1 stereo width restoration (M/S, above
+   *   200 Hz).
+   * @property {number} azimuth - 0…1 tape-azimuth sub-sample channel alignment
+   *   (a repair).
+   * @property {number} airRoom - 0.3…1.2: how much top end the synthesiser may
+   *   rebuild, relative to its own source band.
+   * @property {number} airF - 2000…8000 Hz: where the missing top end is
+   *   derived from.
+   * @property {number} noiseFloor - −100…−20 dBFS: the measured broadband noise
+   *   floor.
+   * @property {number} hissFloor - −110…−20 dBFS: the measured high-frequency
+   *   noise floor.
+   * @property {number} hissTilt - −40…40 dB: the measured HF-minus-mid tilt of
+   *   the programme.
+   * @property {number} hissMax - 0…24 dB: the measured tilt step, i.e. the top
+   *   end that is noise.
+   * @property {number} autoLevel - 0…1: 1 enables the level match that makes
+   *   the A/B honest.
+   * @property {number} infraHP - 0…80 Hz sub-sonic high-pass corner
+   *   (0 = the stage is off), set from this file's own rumble.
+   * @property {number} deess - 0…1 dynamic 5…9.5 kHz sibilance control, dosed
+   *   by this file's own sibilance.
+   * @property {number} bassMono - 0…1 mono-maker below 120 Hz, for
+   *   out-of-phase bass.
+   * @property {number} glueTime - 0…1 glue timing: 0 = fast and
+   *   percussive-safe, 1 = slow and smooth.
+   * @property {number} hissF - 2000…8000 Hz de-hisser crossover, measured per
+   *   file (where its noise actually starts).
+   * @property {number} tpCeil - −6…0 dBTP true-peak ceiling (0 = the stage is
+   *   off).
+   * @property {number} refDb - −60…12 dBFS: this file's own peak, which the
+   *   stages that are neither a repair nor an absolute target place their
+   *   thresholds against.
+   * @property {number} eq0 - −9…9 dB per-song corrective EQ at 50 Hz.
+   * @property {number} eq1 - at 80 Hz.
+   * @property {number} eq2 - at 125 Hz.
+   * @property {number} eq3 - at 200 Hz.
+   * @property {number} eq4 - at 320 Hz.
+   * @property {number} eq5 - at 500 Hz.
+   * @property {number} eq6 - at 800 Hz.
+   * @property {number} eq7 - at 1250 Hz.
+   * @property {number} eq8 - at 2000 Hz.
+   * @property {number} eq9 - at 3200 Hz.
+   * @property {number} eq10 - at 5000 Hz.
+   * @property {number} eq11 - at 8000 Hz.
+   */
+
+  /**
+   * A profile's ceilings at 100 % power, one entry per stage it is allowed to
+   * use. Values here are *permissions*, never doses: `adapt()` reads the
+   * measurement first and can only ever end up below them.
+   * @typedef {Object} Anchors
+   * @property {number[]} bands - six tone gains in dB, in the order of
+   *   {@link RSPresets.PROFILE_EQ} (60 Hz shelf, 200, 450, 1300, 3200, 7 kHz
+   *   shelf).
+   * @property {number} reso
+   * @property {number} sub
+   * @property {number} subRatio
+   * @property {number} exciter
+   * @property {number} air
+   * @property {number} dehiss
+   * @property {number} declick
+   * @property {number} [declip]
+   * @property {number} glue
+   * @property {number} warmth
+   * @property {number} tilt
+   */
+
+  /**
+   * One selectable profile: its id, the power it recommends when it is
+   * detected, and its ceilings.
+   * @typedef {Object} Profile
+   * @property {string} id - profile key, also the i18n key suffix for its name.
+   * @property {number} recommended - 0…1 restoration power this profile asks
+   *   for when the slider adopts a recommendation.
+   * @property {Anchors} anchors - its ceilings at 100 % power.
+   * @property {string} [label] - the i18n key naming the profile.
+   */
+
+  /**
+   * One profile's share of a multi-problem file, as produced by
+   * {@link RSPresets.chainOf} and {@link RSPresets.evidence}.
+   * @typedef {Object} ChainEntry
+   * @property {string} id - profile (or `'narrowband'`) id.
+   * @property {number} w - weight: a raw score from `evidence()`, a normalised
+   *   0…1 share from `chainOf()`.
+   */
+
+  /**
+   * The classification result — the file's `id`, the problems behind it and
+   * every score that led there. Every value is 0…1 unless the name says
+   * otherwise.
+   * @typedef {Object} Classification
+   * @property {string} id - winning profile id (`'general'` when nothing
+   *   scored above 0.40).
+   * @property {string[]} chain - the profile ids that carry evidence,
+   *   strongest first.
+   * @property {Object<string, number>} scores - every term's raw score.
+   * @property {number} confidence - the winning score.
+   * @property {number} crackle
+   * @property {number} hum
+   * @property {number} rumble
+   * @property {number} hiss
+   * @property {number} clean
+   * @property {number} dull
+   * @property {number} brick
+   * @property {number} thin
+   * @property {number} mud
+   * @property {number} harsh
+   * @property {number} analogNoise - the hiss term under its chain name.
+   * @property {number} flat - noise flatness (a codec/quantisation hint).
+   */
+
+  /**
+   * The plain-language diagnosis a card shows.
+   * @typedef {Object} Diagnosis
+   * @property {string} id - profile id, i.e. the preset to start from.
+   * @property {string[]} issues - issue keys (`issue.*` in i18n), strongest
+   *   first, capped at five for display.
+   * @property {string[]} chain - profile ids with evidence, strongest first.
+   * @property {number} confidence - the winning score, 0…1.
+   * @property {Object<string, number>} scores - every raw score, for the
+   *   per-song sections that read them.
+   */
+
+  /**
+   * The measured demand per stage — what this particular file needs, before
+   * any ceiling is applied. `need*` are 0…1 problem strengths, `*Db` the same
+   * numbers in decibels.
+   * @typedef {Object} DemandMap
+   * @property {number} needMud
+   * @property {number} needHarsh
+   * @property {number} needReso
+   * @property {number[]} bandExcess - six band excesses in dB, tone order.
+   * @property {number} confidence
+   * @property {number} [needHiss]
+   * @property {number} [needCrackle]
+   * @property {number} [needHum]
+   * @property {number} [needSub]
+   * @property {number} [needAir]
+   * @property {number} [needDehiss]
+   * @property {number} [needDeclick]
+   * @property {number} [needExciter]
+   * @property {number} [topDeficitDb]
+   * @property {number} [sibNeed]
+   * @property {number} [infraNeed]
+   * @property {number} [phaseNeed]
+   * @property {number} [widenNeed]
+   * @property {number} [needBoxDb]
+   * @property {number} [percussive]
+   */
+
+  /**
+   * The diagnosis recipe behind the findings list on a card: what was heard,
+   * how severe it is and which parameter the repair ends up setting.
+   * @typedef {Object} Recipe
+   * @property {Array<{key: string, sev: number, value: ?Object, act: ?Object}>} findings
+   *   one entry per finding, ready for `RSUI.findingsList()`.
+   * @property {{count: number, severe: number}} headline - how many findings, and
+   *   how many of them are severe.
+   * @property {string} character - `'percussive'`, `'dense'` or `'sustained'`,
+   *   from the material's own measurement.
+   */
 
   /* -------------------------------------------------------------------------
    * Hard ceilings for the automatic tuning (100 % power, worst case material).
@@ -43,6 +302,14 @@
    * plain-language contract is that the automatic result never sounds
    * "processed".
    * ---------------------------------------------------------------------- */
+  /**
+   * The automatic mode's ceilings — the numbers `tests/tuning.test.js`
+   * measures the *rendered* audio against. Deliberately lower than what the
+   * DSP can do (the worklet still accepts 0…1): the automatic mode has to
+   * sound believable on any recording, and a half-repaired top end is worth
+   * more than a fake one.
+   * @type {Anchors}
+   */
   const CEILING = {
     reso: 0.55,        // dynamic de-resonating depth
     sub: 0.45,         // sub-harmonic synthesis
@@ -96,6 +363,17 @@
    * worklet's own caps still hold). This is where the profiles stay audibly
    * different from each other instead of all converging on the same gentle
    * result. */
+  /**
+   * The same ceilings for a profile the user picked by hand. Automatic mode is
+   * the one that has to be safe on any file, so it works on the conservative
+   * budget above; a profile that was chosen explicitly is a promise —
+   * "vinyl", "cassette", "128 kbit/s" — and it may spend more of the chain to
+   * keep that promise. This is where the profiles stay audibly different from
+   * each other instead of all converging on the same gentle result. The repair
+   * ceilings are inherited rather than repeated: a manual profile spends more
+   * of the colour and the synthesis, not of a repair.
+   * @type {Anchors}
+   */
   const MANUAL = Object.assign({}, CEILING, {
     reso: 0.80, sub: 0.80, exciter: 0.70, air: 0.80,
     dehiss: 0.95, declip: 0.95, declick: 0.95, glue: 0.55, warmth: 0.65, tilt: 0.50,
@@ -123,6 +401,12 @@
    *   dehiss / declick  restoration amounts (0..1)
    *   glue / warmth / tilt  finishing (0..1 / -1..1)
    * ---------------------------------------------------------------------- */
+  /**
+   * The six profiles: what the tool offers in the profile selector, one entry
+   * per `PRESET_ORDER` id. `auto` is not a sound of its own — it resolves to
+   * whatever the file turned out to be.
+   * @type {Object<string, Profile>}
+   */
   const PRESETS = {
     auto: {
       id: 'auto',
@@ -181,15 +465,15 @@
   };
 
   /** Order used by the preset <select> / chips in the UI. */
+  /**
+   * The profiles in menu order, `auto` first — the order the selector and the
+   * audit's own profile sweep both use.
+   * @type {string[]}
+   */
   const PRESET_ORDER = ['auto', 'garage', 'vinyl', 'cassette', 'lowbitrate', 'general'];
 
   /* ---------------------------------------------------------------- analysis */
 
-  /**
-   * Automatic problem detection.
-   * @param {object} m metrics from RSDSP.measure()
-   * @returns {{id:string, scores:object}} best matching preset + raw scores
-   */
   /**
    * The score at which a profile is *named* in the diagnosis. Below it the
    * evidence is real but faint (every vinyl rip is a little boxy, every
@@ -202,10 +486,19 @@
    * The score at which a profile starts to colour the *tone* and the taste
    * amounts. Lower than CHAIN_MIN on purpose: a hint of garage in a vinyl rip is
    * still a hint, and below this line the number is noise.
+   * @type {number}
    */
   const TONE_MIN = 0.12;
 
-  /** The evidence each profile carries, in score order. */
+  /**
+   * The evidence each profile carries, strongest first — the raw material both
+   * `chainOf()` and `mixAnchors()` work from. A band-limited source has no
+   * profile of its own, so its `narrowband` score is carried under
+   * `lowbitrate`, the profile whose top-end rebuild is what such a file needs.
+   * @param {Classification} diag - a classification (a diagnosis will do too).
+   * @returns {ChainEntry[]} one entry per profile with a positive score,
+   *   sorted by weight, ties broken by declaration order.
+   */
   function evidence(diag) {
     const scores = (diag && diag.scores) || {};
     const list = [];
@@ -234,6 +527,13 @@
    * restored. The chain is the list of profiles that carry evidence, weighted
    * by how much evidence each one carries; a file with a single problem gets a
    * chain of one and behaves exactly as it always did.
+   * @param {Object<string, number>} scores - the raw scores from `classify()`.
+   * @param {string} winner - the winning profile id; always present in the
+   *   result, so a chain is never empty.
+   * @param {number} confidence - the winner's score, used as its weight when it
+   *   did not appear in `scores` under its own name.
+   * @returns {ChainEntry[]} profiles carrying evidence above `CHAIN_MIN`,
+   *   normalised to sum to 1, strongest first.
    */
   function chainOf(scores, winner, confidence) {
     const list = [];
@@ -256,9 +556,19 @@
     return list;
   }
 
-  /** Stage budgets a profile is allowed to *unlock*: permission, not dose. */
+  /**
+   * Stage budgets a profile is allowed to *unlock*: for these, two detected
+   * profiles are combined as a union (the most any of them allows), because
+   * the amount actually applied is still dosed from the measurement — so a
+   * wider permission can only ever be used by evidence that is already there.
+   * @type {string[]}
+   */
   const CHAIN_PERMISSION = ['reso', 'sub', 'exciter', 'air', 'dehiss', 'declick'];
-  /** Stages that are taste rather than repair: those are mixed, not unioned. */
+  /**
+   * Stages that are taste rather than repair. Two personalities do not add up,
+   * so these are *mixed* by evidence weight like the tone curve.
+   * @type {string[]}
+   */
   const CHAIN_TASTE = ['glue', 'warmth', 'tilt'];
 
   /**
@@ -279,6 +589,11 @@
    *     being capped by the vinyl one;
    *   · taste amounts (glue, warmth, tilt) are mixed like the tone, because
    *     nobody needs the *sum* of two personalities.
+   * @param {string} id - the winning profile, the one that *is* the diagnosis.
+   * @param {Classification} diag - the classification to read evidence from.
+   * @returns {Anchors} one set of ceilings: mixed tone and taste, unioned
+   *   permissions. A single-problem file gets its profile's own anchors
+   *   unchanged.
    */
   function mixAnchors(id, diag) {
     const base = PRESETS[id] || PRESETS.auto;
@@ -324,6 +639,10 @@
    *
    * Below this point the loss is real and the chain that rebuilds the top
    * octave is the right answer; above it there is nothing missing to rebuild.
+   * @param {RSDSP.Metrics} m - the measurement.
+   * @returns {boolean} `true` when a lossy stage provably removed something
+   *   audible — a cliff inside the top octave, or a bandwidth ceiling below
+   *   17 kHz that the programme's own dullness does not explain.
    */
   function codecLoss(m) {
     // Two ways a lossy stage can have removed something audible, and the
@@ -377,6 +696,15 @@
     return cut > 0 && cut < 17000 && dull < 0.6 && (m.cutDropDb || 0) >= 32;
   }
 
+  /**
+   * Name the file: score every profile against the measurement and return the
+   * winner plus all the evidence behind it. Nothing above 0.40 means the file
+   * is `'general'` — the honest answer for material with no particular defect,
+   * which is most good material.
+   * @param {RSDSP.Metrics} m - a complete measurement.
+   * @returns {Classification} the id, the chain, every score and the
+   *   confidence.
+   */
   function classify(m) {
     const cut = m.hfCutoff || 0;
     const crackle = clamp(m.crackleIndex, 0, 1);
@@ -455,12 +783,25 @@
    * `need` values are the *problems* (0 = nothing wrong, 1 = as bad as measured
    * can get); `*Db` are the same numbers expressed in decibels.
    *
-   * @param {object} m metrics from RSDSP.measure()
-   * @param {object} [d] classification (recomputed when omitted)
+   * @param {RSDSP.Metrics} m - a complete measurement.
+   * @param {Classification} [d] - the classification; recomputed when omitted,
+   *   so a caller with several questions can pass it once.
+   * @param {{manual?: boolean}} [opts] - `manual: true` for a hand-picked
+   *   profile, where the dose may follow the profile's promise rather than the
+   *   automatic mode's conservative budget.
+   * @returns {DemandMap} the per-stage problem strengths, in dB where it
+   *   applies.
    */
   function demand(m, d, opts) {
     const c = d || classify(m);
     const manual = !!(opts && opts.manual);
+    /**
+     * The measured excess of one of the six tone bands, clamped to ±12 dB
+     * (the widest dose the law can use) and `0` when the analysis predates
+     * the six-band measurement.
+     * @param {number} i - band index, 0 = 60 Hz … 5 = 7 kHz.
+     * @returns {number} the excess in dB.
+     */
     const band = (i) => (m.bandExcess && m.bandExcess.length === 6 ? clamp(m.bandExcess[i], -12, 12) : 0);
 
     // how much of the top end is missing, in dB — two independent measures:
@@ -833,6 +1174,8 @@
    * (chain 1) so the per-song correction can be computed *net* of what the
    * profile already does — the one thing that keeps two stages from correcting
    * the same problem twice.
+   * @type {Array<Array<(string|number)>>} `[type, frequencyHz, Q]` per band,
+   *   in the same order as `ParamMap.band0…band5` and the worklet's chain 1.
    */
   const PROFILE_EQ = [
     ['lowshelf', 60, 0.70], ['peak', 200, 0.80], ['peak', 450, 1.00],
@@ -843,6 +1186,13 @@
    * Magnitude of one RBJ biquad at frequency `f`, in dB — built from exactly
    * the coefficients the worklet's Biquad computes, so "the profile already
    * does +3 dB here" is a measurement and not an estimate.
+   * @param {string} type - `'lowshelf'`, `'peak'` or `'highshelf'`.
+   * @param {number} sr - sample rate in Hz, clamped into 5 Hz…0.49·sr.
+   * @param {number} f0 - the filter's centre/corner frequency in Hz.
+   * @param {number} q - its Q.
+   * @param {number} gainDb - its gain in dB.
+   * @param {number} f - the frequency to evaluate at, in Hz.
+   * @returns {number} the magnitude at `f` in dB.
    */
   function biquadDb(type, sr, f0, q, gainDb, f) {
     const w0 = 2 * Math.PI * clamp(f0, 5, sr * 0.49) / sr;
@@ -877,7 +1227,14 @@
     return 20 * Math.log10(Math.max(num, 1e-9) / Math.max(den, 1e-9));
   }
 
-  /** What the profile's six bands already do at `f`, in dB. */
+  /**
+   * What the profile's six tone bands already do at one frequency, in dB —
+   * the reference the per-song EQ is computed *net* of.
+   * @param {number[]} bands - the six tone gains in dB.
+   * @param {number} sr - sample rate in Hz.
+   * @param {number} f - the frequency to evaluate at, in Hz.
+   * @returns {number} the summed magnitude in dB.
+   */
   function profileDb(bands, sr, f) {
     let sum = 0;
     for (let i = 0; i < PROFILE_EQ.length; i++) {
@@ -889,7 +1246,12 @@
     return sum;
   }
 
-  /** 3-point smoothing that keeps the ends in place. */
+  /**
+   * 3-point smoothing with the ends held in place: `(a + 2b + c) / 4`. Applied
+   * to a per-band curve so a single band cannot produce a one-band step.
+   * @param {number[]} v - the curve, one value per band.
+   * @returns {number[]} a new, smoothed curve of the same length.
+   */
   function smoothCurve(v) {
     const out = v.slice();
     for (let i = 1; i < v.length - 1; i++) out[i] = (v[i - 1] + 2 * v[i] + v[i + 1]) / 4;
@@ -900,9 +1262,19 @@
    * Wide (5-point) trend with mirrored ends: what the curve would look like if
    * the band under test were removed and the surrounding bands were asked what
    * belongs between them.
+   * @param {number[]} v - the per-band values (dB).
+   * @returns {number[]} the trend, same length; the ends are mirrored rather
+   *   than wrapped, so the first and last bands are not pulled by a phantom
+   *   neighbour.
    */
   function wideTrend(v) {
     const n = v.length, out = new Array(n);
+    /**
+     * Clamped lookup into the curve, so a sample beyond either end is
+     * repeated rather than `undefined`.
+     * @param {number} i - the index to read.
+     * @returns {number} the value at the nearest valid index.
+     */
     const at = (i) => v[Math.max(0, Math.min(n - 1, i))];
     for (let i = 0; i < n; i++) {
       out[i] = (at(i - 2) + at(i - 1) + at(i) + at(i + 1) + at(i + 2)) / 5;
@@ -942,7 +1314,14 @@
    *   · no bass cut without measured excess in the bottom octave — the one
    *     correction that can make a record sound small.
    *
-   * @returns {number[]} twelve gains in dB, in EQ_CENTERS order
+   * @param {RSDSP.Metrics} m - the measurement (its own `eqCenters` are used
+   *   when it carries twelve of them).
+   * @param {number[]} bands - the profile's six tone gains in dB, so the curve
+   *   can be computed net of what the profile already does.
+   * @param {boolean} manual - `true` for a hand-picked profile, which may
+   *   correct up to 9 dB per band instead of the automatic 6 dB.
+   * @returns {number[]} twelve gains in dB, in the centre-frequency order of
+   *   `ParamMap.eq0…eq11` (50 Hz … 8 kHz).
    */
   function eqCurve(m, bands, manual) {
     const centers = (m.eqCenters && m.eqCenters.length === 12) ? m.eqCenters : [50, 80, 125, 200, 320, 500, 800, 1250, 2000, 3200, 5000, 8000];
@@ -1011,7 +1390,17 @@
     return curve;
   }
 
-  /** What the per-song curve does at one frequency, in dB (real biquads). */
+  /**
+   * What the per-song EQ curve actually does at one frequency, in dB — summed
+   * from real peaking biquads rather than from the nominal band gains, because
+   * overlapping bands add up and a caller wants the sum.
+   * @param {number[]} curve - twelve gains in dB.
+   * @param {number[]} centers - their centre frequencies in Hz.
+   * @param {number} q - the Q every band is built with.
+   * @param {number} sr - sample rate in Hz.
+   * @param {number} f - the frequency to evaluate at, in Hz.
+   * @returns {number} the summed magnitude in dB.
+   */
   function curveDb(curve, centers, q, sr, f) {
     let sum = 0;
     for (let i = 0; i < centers.length; i++) {
@@ -1024,10 +1413,15 @@
   /**
    * Dose every stage of the chain from the measurements.
    *
-   * @param {object} anchors the profile's ceilings (100 % power)
-   * @param {object} m       metrics from RSDSP.measure()
-   * @param {object} [diag]  classification
-   * @returns {object} the amounts this file actually gets (before the power slider)
+   * @param {Anchors} anchors - the profile's ceilings (100 % power).
+   * @param {RSDSP.Metrics} m - a complete measurement.
+   * @param {Classification} [diag] - the classification; recomputed when
+   *   omitted.
+   * @param {{manual?: boolean}} [opts] - `manual: true` for a hand-picked
+   *   profile, which is what decides between the two budgets.
+   * @returns {Anchors} the amounts this file actually gets, before the power
+   *   slider — every value at or below its ceiling, and zero wherever nothing
+   *   was measured.
    */
   function adapt(anchors, m, diag, opts) {
     const d = diag || classify(m);
@@ -1398,6 +1792,17 @@
    * @param {number} [kbps] the chosen MP3 bitrate
    * @returns {number} dB to subtract from the ceiling
    */
+  /**
+   * How much headroom to leave for the encoder that will follow the render:
+   * an MP3 export at a low bitrate adds its own overshoot on top of the
+   * render's true-peak ceiling, so the ceiling is lowered by this amount when
+   * the user asked for MP3. Zero for WAV — there is no encoder to leave room
+   * for — and the same 0.5 dB above 256 kbit/s, where the encoder's overshoot
+   * stops depending on the bitrate.
+   * @param {string} format - the export format (`'wav'`, `'mp3'`).
+   * @param {number} kbps - the requested MP3 bitrate.
+   * @returns {number} decibels to subtract from the true-peak ceiling.
+   */
   function codecMargin(format, kbps) {
     if (format !== 'mp3') return 0;
     const k = kbps || 320;
@@ -1408,25 +1813,47 @@
   }
 
   /**
-   * Build the flat parameter map consumed by the AudioWorklet.
-   * @param {string} presetId
-   * @param {object} metrics
-   * @param {number} power 0..1
-   * @param {object} [overrides] manual tweaks
+   * What a parameter means when the measurement could not provide a value —
+   * the last line of defence against a parameter that was never measured. A
+   * fixture whose scan failed still has to produce a map the worklet accepts.
+   * @type {Object<string, number>}
    */
-  /** Last line of defence against a parameter that was never measured. */
-  /** What a parameter means when the measurement could not provide a value. */
   const NEUTRAL = {
     autoLevel: 1, noiseFloor: -70, hissFloor: -80, airRoom: 0.5, airF: 6000, subRatio: 0.5,
     humHz: 50, boxF1: 120, boxF2: 240, boxQ1: 3, boxQ2: 3, refDb: 0,
     hissF: 3200, glueTime: 0.5, infraHP: 0,
   };
 
+  /**
+   * Coerce a value to a finite number, or fall back to a default. Every value
+   * that reaches the worklet goes through here: `clamp(x, 0, undefined)`
+   * returns `x`, and `undefined * n` is `NaN`, so a single missing measurement
+   * used to be able to switch a whole stage off (or worse) silently.
+   * @param {*} v - the value to coerce.
+   * @param {number} dflt - the fallback.
+   * @returns {number} a finite number.
+   */
   function num(v, dflt) {
     const x = Number(v);
     return isFinite(x) ? x : dflt;
   }
 
+  /**
+   * Build the flat parameter map the AudioWorklet consumes — the one place a
+   * measurement becomes audio settings. `'auto'` is resolved first, the
+   * profile's ceilings are mixed and dosed, and every value is finally scaled
+   * by the power slider with a slightly concave curve (`on` is *exactly* zero
+   * at 0 % and *exactly* one from 10 % upwards, so 0 % is a bit-transparent
+   * copy and the rest of the curve is unchanged).
+   * @param {string} presetId - a {@link RSPresets.PRESET_ORDER} id, or
+   *   `'auto'`/unknown to let the measurement decide.
+   * @param {RSDSP.Metrics} metrics - the measurement of the dry file.
+   * @param {number} power - 0…1 restoration power.
+   * @param {Object<string, number>} [overrides] - manual tweaks applied last,
+   *   as the one place a caller may deliberately overrule the automatic dose.
+   * @returns {ParamMap} the flat map — every name the worklet declares, every
+   *   value finite and inside its declared range.
+   */
   function buildParams(presetId, metrics, power, overrides) {
     const diag = classify(metrics);
     // "auto" is not a sound of its own: it resolves to whatever was detected
@@ -1449,6 +1876,13 @@
     const wet = smoothstep(0, 0.06, p);
     // repair stages (de-hiss, de-click) engage a little earlier than the
     // creative ones — but never before the slider has left zero
+    /**
+     * The repair-dose curve for the gate-and-dose stages (de-hiss,
+     * de-click): they engage a little earlier than the creative stages, but
+     * never before the slider has left zero.
+     * @param {number} x - the measured amount, 0…1.
+     * @returns {number} the amount to apply.
+     */
     const repair = (x) => x * (0.35 + 0.65 * amt) * on;
     /* The de-hisser's amount is a *measurement*, not a taste: the law already
      * hands it the tilt step it found (capped by the card) and zero when the
@@ -1508,6 +1942,14 @@
     // hum, boxiness and a collapsed image are fixed by the *measurement* — a
     // mains notch shallower than the hum leaves the hum, and one deeper than it
     // cuts the bass. These are gated, never scaled down.
+    /**
+     * The gate for the *measured* defects (hum, boxiness, a collapsed
+     * image): zero until the slider has left zero, the full measurement above
+     * 20 %. A mains notch shallower than the hum would leave the hum, so
+     * these are gated rather than scaled down.
+     * @param {number} x - the measured correction, in dB or amount.
+     * @returns {number} the correction to apply.
+     */
     const fix = (x) => x * smoothstep(0, 0.20, p);
 
     // bands are an amount like every other: they follow the same curve as the
@@ -1621,23 +2063,53 @@
    * description of the profile. A file with nothing wrong produces a short,
    * honest list instead of a shopping list.
    *
-   * @param {object} m metrics from RSDSP.measure()
-   * @param {object} [params] the built parameter map (for the doses)
-   * @param {number} [power] 0..1
-   * @returns {{findings:Array, headline:{count:number,severe:number}, character:string}}
+   * @param {RSDSP.Metrics} m - a complete measurement.
+   * @param {ParamMap} [params] - the built parameter map, so each action can
+   *   print the dose this file will really get.
+   * @param {number} [power] - 0…1, for the wording that depends on it.
+   * @returns {Recipe} the findings, their headline counts and the material's
+   *   character.
    */
   function recipe(m, params, power) {
     const p = params || {};
     const D = demand(m);
     const st = m.stereo || {};
     const out = [];
+    /**
+     * Record one finding: what was found, how strong it is, the number that
+     * justified it and, where one applies, the action that goes with it.
+     * @param {string} key - the finding's dictionary key.
+     * @param {number} sev - severity, 0…1 (clamped).
+     * @param {?MeasuredValue} [value] - the measured number behind it.
+     * @param {?Object} [act] - the action entry, if any.
+     * @returns {void}
+     */
     const add = (key, sev, value, act) => {
       out.push({ key, sev: clamp(sev, 0, 1), value: value || null, act: act || null });
     };
+    /**
+     * Wrap a number as a dB-valued read-out.
+     * @param {number} n - the value in dB.
+     * @returns {MeasuredValue} the value with its unit.
+     */
     const dbv = (n) => ({ n, unit: 'db' });
+    /**
+     * Wrap a number as a percentage-valued read-out.
+     * @param {number} n - the fraction, 0…1.
+     * @returns {MeasuredValue} the value with its unit.
+     */
     const pct = (n) => ({ n, unit: 'pct' });
     // an action carries the parameter it ends up setting, in its own unit, so
     // the UI can print the dose the file will really get
+    /**
+     * An action for a finding: the key the UI shows and the parameter value
+     * the action ends up setting, in its own unit — so the interface can
+     * print the dose this file will really get.
+     * @param {string} key - the action's dictionary key.
+     * @param {?number} n - the value it sets, or `null` for none.
+     * @param {string} [unit] - `'db'`, `'hz'`, `'ms'` or `'pct'` (default).
+     * @returns {{key:string, value: ?MeasuredValue}} the action.
+     */
     const act = (key, n, unit) => ({ key, value: n === null || n === undefined ? null : { n, unit: unit || 'pct' } });
 
     /* ── noise and surface defects ─────────────────────────────────────── */
@@ -1772,12 +2244,23 @@
   }
 
   /**
-   * Build the plain-language diagnosis shown on each file card.
-   * @returns {{id:string, issues:string[], confidence:number}}
+   * Build the plain-language diagnosis shown on each file card: the profile's
+   * id, the issues found (weighted, capped at five for display) and the
+   * confidence. The demand-based findings are ordered with the profile's own,
+   * so the sentence and the card cannot disagree about what matters most.
+   * @param {RSDSP.Metrics} m - a complete measurement.
+   * @returns {Diagnosis} the diagnosis.
    */
   function diagnose(m) {
     const d = classify(m);
     const issues = [];
+    /**
+     * Add one weighted finding to the diagnosis, in the order the checks run
+     * — the UI lists them as they are, strongest evidence first.
+     * @param {string} key - the finding's dictionary key.
+     * @param {number} weight - how strongly it applies, 0…1.
+     * @returns {void}
+     */
     const push = (key, weight) => issues.push({ key, weight });
     if (d.thin > 0.3) push('weakBass', d.thin);
     if (d.mud > 0.35) push('boxyMids', d.mud);
@@ -1825,13 +2308,49 @@
     };
   }
 
-  /** Resolve "auto" to the profile that was actually detected. */
+  /**
+   * Resolve `'auto'` (or anything unknown) to the profile that was actually
+   * detected, without building a parameter map. Used by the UI to label the
+   * selector and by the tests to compare the two halves of the decision.
+   * @param {string} presetId - the requested profile id.
+   * @param {RSDSP.Metrics} metrics - the measurement to classify when needed.
+   * @returns {string} a real profile id from {@link RSPresets.PRESET_ORDER}.
+   */
   function resolve(presetId, metrics) {
     if (presetId && presetId !== 'auto' && PRESETS[presetId]) return presetId;
     return classify(metrics).id;
   }
 
+  /**
+   * The public surface, assigned to `global.RSPresets` below.
+   * @typedef {Object} RSPresetsApi
+   * @property {Object<string, Profile>} PRESETS
+   * @property {string[]} PRESET_ORDER
+   * @property {Anchors} CEILING - the automatic mode's ceilings.
+   * @property {Anchors} MANUAL - the hand-picked profiles' ceilings.
+   * @property {Array<Array<(string|number)>>} PROFILE_EQ
+   * @property {number} CHAIN_MIN
+   * @property {number} TONE_MIN
+   * @property {function(RSDSP.Metrics): Classification} classify
+   * @property {function(Object, string, number): ChainEntry[]} chainOf
+   * @property {function(Classification): ChainEntry[]} evidence
+   * @property {function(string, Classification): Anchors} mixAnchors
+   * @property {function(RSDSP.Metrics, Classification=, Object=): DemandMap} demand
+   * @property {function(Anchors, RSDSP.Metrics, Classification=, Object=): Anchors} adapt
+   * @property {function(string, RSDSP.Metrics): string} resolve
+   * @property {function(string, RSDSP.Metrics, number, Object=): ParamMap} buildParams
+   * @property {function(RSDSP.Metrics): Diagnosis} diagnose
+   * @property {function(RSDSP.Metrics, ParamMap=, number=): Recipe} recipe
+   * @property {function(RSDSP.Metrics, number[], boolean): number[]} eqCurve
+   * @property {function(number[], number[], number, number, number): number} curveDb
+   * @property {function(string, number, number, number, number, number): number} biquadDb
+   * @property {function(number[], number, number): number} profileDb
+   * @property {function(string, number): number} codecMargin
+   */
+
+  /** @type {RSPresetsApi} */
   const API = { PRESETS, PRESET_ORDER, CEILING, MANUAL, PROFILE_EQ, CHAIN_MIN, TONE_MIN, classify, chainOf, evidence, mixAnchors, demand, adapt, resolve, buildParams, diagnose, recipe, eqCurve, curveDb, biquadDb, profileDb, codecMargin };
+  /** @type {RSPresetsApi} */
   global.RSPresets = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

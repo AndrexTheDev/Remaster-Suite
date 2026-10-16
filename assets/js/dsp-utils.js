@@ -9,23 +9,59 @@
  * with <script src>, via importScripts() in a worker, or through vm.runInContext
  * in Node tests.
  * ========================================================================== */
+
+/**
+ * @fileoverview Shared DSP utilities — exposed as the global `RSDSP`. Measurement
+ * (FFT, spectra, loudness, noise floor, crackle, hum, inter-sample peaks, stereo
+ * correlation), content classification helpers, sample-rate sniffing and WAV
+ * reading/writing.
+ *
+ * Every heavy pass is written as a *step*: a range-addressable loop whose
+ * accumulators survive between calls plus a `value()` that turns them into the
+ * answer, so the same code can run in one go (`measure()`) or in slices that
+ * yield to the event loop (`measureAsync()`). The synchronous entry points are
+ * what the tuning law and the Node suites depend on; the sliced ones are what
+ * keeps a phone responsive while a ten-minute file is measured.
+ *
+ * Classic script (no ES-module syntax), so the same file loads through a
+ * `<script src>`, through `importScripts()` in a worker and through `require()`
+ * in the Node suites alike.
+ *
+ * @module RSDSP
+ */
+
 (function (global) {
   'use strict';
 
   const TWO_PI = Math.PI * 2;
 
+  /** Clamp `x` into the closed range `[lo, hi]`. */
   const clamp = (x, lo, hi) => (x < lo ? lo : x > hi ? hi : x);
+  /** Linear amplitude → dBFS, floored at −240 dB so silence stays finite. */
   const db = (lin) => 20 * Math.log10(Math.max(lin, 1e-12));
+  /** dBFS → linear amplitude (the inverse of {@link db}). */
   const lin = (d) => Math.pow(10, d / 20);
 
   /* ---------------------------------------------------------------- windows */
 
+  /**
+   * Periodic Hann window of `n` points, with the denominator the FFT passes
+   * here expect (`n`, not `n-1`).
+   * @param {number} n - window length in samples.
+   * @returns {Float32Array} the window, `n` long.
+   */
   function hann(n) {
     const w = new Float32Array(n);
     for (let i = 0; i < n; i++) w[i] = 0.5 - 0.5 * Math.cos(TWO_PI * i / n);
     return w;
   }
 
+  /**
+   * Blackman window of `n` points — the low-sidelobe window the flat-top
+   * and sibilance passes use.
+   * @param {number} n - window length in samples.
+   * @returns {Float32Array} the window, `n` long.
+   */
   function blackman(n) {
     const w = new Float32Array(n);
     const a = TWO_PI / (n - 1);
@@ -192,6 +228,17 @@
    * on different frequencies than it is applied to.
    */
   const EQ_CENTERS = [50, 80, 125, 200, 320, 500, 800, 1250, 2000, 3200, 5000, 8000];
+  /**
+   * Median level inside one band of a spectrum — the workhorse for tonal
+   * diagnosis, because a median ignores the narrow tones (hum, resonances)
+   * that would drag a mean around.
+   * @param {RSDSP.Spectrum} spec - a spectrum from {@link spectrum}.
+   * @param {number} f1 - lower band edge in Hz (inclusive).
+   * @param {number} f2 - upper band edge in Hz (inclusive).
+   * @param {number[]} [excludeHz] - frequencies to skip, defaulting to
+   *   {@link HUM_HZ}: a band that contains the mains grid must not measure it.
+   * @returns {number} the median level in dB, or −120 when the band is empty.
+   */
   function bandMedian(spec, f1, f2, excludeHz) {
     const ex = excludeHz || HUM_HZ;
     const vals = [];
@@ -350,6 +397,7 @@
    */
   const nextTask = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+  /** Monotonic-ish timer in milliseconds, `performance.now()` where it exists and `Date.now()` otherwise. */
   const clock = () => (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now());
 
   /**
@@ -421,12 +469,27 @@
 
   /* --- peak ---------------------------------------------------------------- */
 
+  /**
+   * Sample peak as a step — one of the cheapest passes in `measurePlan`, and
+   * the one that feeds both the peak read-out and the true-peak stage's
+   * starting point.
+   * @param {Float32Array[]} channels - the channels to scan.
+   * @returns {{step:RSDSP.Step, value:function():number}} the step and a
+   *   `value()` returning the peak in dBFS (a silent input reports the
+   *   −240 dB floor, never −Infinity).
+   */
   function peakStep(channels) {
     return scanStep('peak', channels, 1.5, () => ({ p: 0 }),
       (st, c, ch, i) => { const a = ch[i] < 0 ? -ch[i] : ch[i]; if (a > st.p) st.p = a; },
       (st) => db(st.p));
   }
 
+  /**
+   * Sample peak of one or more channels, in dBFS.
+   * @param {Float32Array[]} channels - the channels to scan.
+   * @returns {number} the largest absolute sample value in dB (a silent or
+   *   empty input reports the −240 dB floor, never −Infinity).
+   */
   function peakDb(channels) {
     const st = peakStep(channels);
     st.slice(0, st.units);
@@ -435,6 +498,15 @@
 
   /* --- filtering primitives ------------------------------------------------ */
 
+  /**
+   * Coefficients of a high-pass biquad (RBJ, constant peak gain) as a plain
+   * array — the same five numbers the worklet's inlined biquads are built
+   * from, which is why the analyser and the renderer can never disagree.
+   * @param {number} sr - sample rate in Hz.
+   * @param {number} f - corner frequency in Hz, clamped to 5 Hz…0.49·sr.
+   * @param {number} [q] - resonance; default 0.707 (Butterworth).
+   * @returns {number[]} `[b0, b1, b2, a1, a2]`, normalised by `a0`.
+   */
   function biquadHP(sr, f, q) {
     const w = TWO_PI * clamp(f, 5, sr * 0.49) / sr;
     const c = Math.cos(w), s = Math.sin(w), al = s / (2 * (q || 0.707));
@@ -442,6 +514,13 @@
     return [(1 + c) / 2 / a0, -(1 + c) / a0, (1 + c) / 2 / a0, -2 * c / a0, (1 - al) / a0];
   }
 
+  /**
+   * Run one biquad over a signal, one sample at a time, into a new buffer.
+   * @param {Float32Array} signal - the samples to filter.
+   * @param {number[]} coef - `[b0, b1, b2, a1, a2]`, as produced by
+   *   {@link biquadHP}, {@link RSWorklet} or {@link RSDSP.Biquad}.
+   * @returns {Float32Array} the filtered copy; the input is left untouched.
+   */
   function applyBiquad(signal, coef) {
     const [b0, b1, b2, a1, a2] = coef;
     let z1 = 0, z2 = 0;
@@ -458,6 +537,15 @@
 
   /* --- loudness (ITU-R BS.1770 flavour) ------------------------------------ */
 
+  /**
+   * Gated loudness (ITU-R BS.1770 flavour) as a step: K-weighting, 400 ms
+   * blocks with 75 % overlap, absolute and relative gating.
+   * @param {Float32Array[]} channels - the decoded channels.
+   * @param {number} sr - sample rate in Hz.
+   * @returns {{step:RSDSP.Step, value:function():number}} the step and a
+   *   `value()` returning the integrated loudness in LUFS (approximately
+   *   ±1.5 LU against a reference implementation; `−70` for silence).
+   */
   function loudnessStep(channels, sr) {
     const nCh = channels.length;
     const len = nCh && channels[0] ? channels[0].length : 0;
@@ -634,6 +722,16 @@
    * ratio stands above its median — gated to frames where the reference band has
    * real level, so a quiet frame (where both bands are noise) cannot answer.
    * ----------------------------------------------------------------------- */
+  /**
+   * Sibilance as a step: how far the p95 of a per-10-ms-frame 7 kHz / 3 kHz
+   * band ratio stands above that ratio's own median — the "harsh s" signal,
+   * as opposed to a merely bright recording, which is a tilt and is handled
+   * by the tilt term.
+   * @param {Float32Array[]} channels - the decoded channels.
+   * @param {number} sr - sample rate in Hz.
+   * @returns {{step:RSDSP.Step, value:function():object}} the step and a
+   *   `value()` returning `{sibPeakDb, sibRawDb, sibSustained, sibFrames}`.
+   */
   function sibStep(channels, sr) {
     const idle = () => ({ step: stepRange('sib', 0, 0, () => {}), value: () => ({ sibPeakDb: 0, sibSustained: 0, sibFrames: 0 }) });
     if (!channels.length || !channels[0].length) return idle();
@@ -757,6 +855,18 @@
     };
   }
 
+  /**
+   * Flat-top detection as a step: runs of consecutive samples that are equal
+   * to the file's own resolution (a clipped or limited passage), with a
+   * silence gate relative to the file's peak so digital silence is not
+   * mistaken for clipping.
+   * @param {Float32Array[]} channels - the decoded channels.
+   * @param {number} sr - sample rate in Hz; used by the per-run duration
+   *   estimate, not by the detection itself.
+   * @returns {{step:object, value:function():object}} the step and its value
+   *   getter (`flatRatio`, `levelDb`, `runCount`, `runMedian`, `overshootDb`,
+   *   `maxRun`, `evidence`).
+   */
   function flatTopStep(channels, sr) {
     const nCh = channels.length;
     const len = nCh && channels[0] ? channels[0].length : 0;
@@ -1393,6 +1503,15 @@
     };
   }
 
+  /**
+   * Crackle metrics for a whole file, in one call.
+   * @param {Float32Array[]} channels - the decoded channels.
+   * @param {number} sr - sample rate in Hz.
+   * @param {number} [winSec] - analysis window in seconds, forwarded to
+   *   {@link crackleStep}.
+   * @returns {object} the crackle picture (`crackleIndex`, `spikeRate`,
+   *   `spikeLevelDb`, `spikeWideShare`, …).
+   */
   function crackleDetect(channels, sr, winSec) {
     const c = crackleStep(channels, sr, winSec);
     c.step.slice(0, c.step.units);
@@ -1421,6 +1540,19 @@
   const HISS_MID_HZ = 1450;
   const HISS_MID_Q = 0.63;
 
+  /**
+   * The noise & surface-noise stage as a sliceable step: quiet-frame
+   * selection, the spectrum of those frames only, the slope that tells hiss
+   * from rumble, and the fluctuation of the high-frequency envelope that
+   * separates steady hiss from crackle.
+   * @param {Float32Array[]} channels - the decoded channels, all the same
+   *   length.
+   * @param {number} sr - sample rate in Hz.
+   * @returns {{steps:object[], value:function():object, index:object}} the
+   *   step list to run, the `value()` that returns the whole noise picture
+   *   (floors, slope, rumble, crackle, hum and its follow) and the named
+   *   sub-steps for callers that need a single number out of it.
+   */
   function noiseStep(channels, sr) {
     const fftSize = 2048, hop = 1024, half = fftSize / 2;
     const win = hann(fftSize);
@@ -1931,6 +2063,13 @@
     };
   }
 
+  /**
+   * Dynamic range (95th minus 10th percentile of the per-window RMS), in dB.
+   * @param {Float32Array[]} channels - the decoded channels.
+   * @param {number} sr - sample rate in Hz.
+   * @returns {number} the range in dB; a file too short to have four windows
+   *   reports `20`, the neutral value the profile maths expects.
+   */
   function dynamicRange(channels, sr) {
     const d = dynamicRangeStep(channels, sr);
     d.step.slice(0, d.step.units);
@@ -1955,6 +2094,11 @@
     return { step, value: () => (st.total ? st.clipped / st.total : 0) };
   }
 
+  /**
+   * Fraction of samples sitting at digital full scale (clipping / limiting).
+   * @param {Float32Array[]} channels - the decoded channels.
+   * @returns {number} clipped fraction, `0…1`.
+   */
   function clipRatio(channels) {
     const st = clipStep(channels);
     st.slice(0, st.units);
@@ -2341,6 +2485,13 @@
     };
   }
 
+  /**
+   * Correlation between the first two channels, `−1…1` — the mono
+   * compatibility check.
+   * @param {Float32Array[]} channels - the decoded channels; a mono file
+   *   reports `1` by definition.
+   * @returns {number} the Pearson correlation of the two channels.
+   */
   function stereoCorrelation(channels) {
     const c = correlationStep(channels);
     c.step.slice(0, c.step.units);
@@ -2481,6 +2632,13 @@
     return t;
   }
 
+  /**
+   * Inter-sample peak as a step: a 4-phase, 32-tap oversampled walk over the
+   * samples that can reach full scale between sample instants.
+   * @param {Float32Array[]} channels - the decoded channels.
+   * @returns {{step:object, value:function():number}} the step and a `value()`
+   *   that returns the true peak in dBTP (`−70` for an empty input).
+   */
   function ispStep(channels) {
     const flat = { step: stepRange('isp', 0, 0, () => {}), value: () => -70 };
     if (!channels.length || !channels[0].length) return flat;
@@ -2568,6 +2726,13 @@
       nt.steps[0], nt.steps[1], nt.steps[2], nt.steps[3], humExact, isp.step, fin,
     ];
 
+    /**
+     * Assemble the one and only metrics object: everything the profile maths,
+     * the diagnosis and the UI read, derived from the step accumulators of
+     * this plan.
+     * @returns {object} the full measurement (levels, noise, hum, crackle,
+     *   spectrum-based shape numbers, per-band levels and the quality score).
+     */
     function result() {
       const spec = sp.value();
       const na = nt.value();
@@ -3141,8 +3306,28 @@
 
   /* ------------------------------------------------------- tiny biquad class */
 
+  /**
+   * A single direct-form-II biquad with the coefficients the analysis paths
+   * need: low pass, high pass, constant-peak-gain band pass and RBJ notch.
+   * State (`z1`, `z2`) lives on the instance, so a filter can be run across
+   * buffer boundaries — which is what `sibStep` and the band scans do.
+   * @example
+   *   const b = new RSDSP.Biquad().setHighpass(sr, 60, 0.5);
+   *   const y = b.process(x);
+   */
   class Biquad {
+    /**
+     * An identity filter with zeroed state — configure it with one of the
+     * `set*()` methods before processing anything.
+     */
     constructor() { this.b0 = 1; this.b1 = 0; this.b2 = 0; this.a1 = 0; this.a2 = 0; this.z1 = 0; this.z2 = 0; }
+    /**
+     * Configure as a low pass.
+     * @param {number} sr - sample rate in Hz; `f` is clamped to 0.49·sr.
+     * @param {number} f - corner frequency in Hz.
+     * @param {number} [q] - resonance; default 0.707.
+     * @returns {RSDSP.Biquad} `this`, for chaining.
+     */
     setLowpass(sr, f, q) {
       const w = TWO_PI * clamp(f, 5, sr * 0.49) / sr;
       const c = Math.cos(w), s = Math.sin(w), al = s / (2 * (q || 0.707)), a0 = 1 + al;
@@ -3150,6 +3335,13 @@
       this.a1 = -2 * c / a0; this.a2 = (1 - al) / a0;
       return this;
     }
+    /**
+     * Configure as a high pass.
+     * @param {number} sr - sample rate in Hz; `f` is clamped to 0.49·sr.
+     * @param {number} f - corner frequency in Hz.
+     * @param {number} [q] - resonance; default 0.707.
+     * @returns {RSDSP.Biquad} `this`, for chaining.
+     */
     setHighpass(sr, f, q) {
       const w = TWO_PI * clamp(f, 5, sr * 0.49) / sr;
       const c = Math.cos(w), s = Math.sin(w), al = s / (2 * (q || 0.707)), a0 = 1 + al;
@@ -3173,6 +3365,11 @@
       this.a1 = -2 * c / a0; this.a2 = (1 - al) / a0;
       return this;
     }
+    /**
+     * Filter one sample and advance the state.
+     * @param {number} x - the input sample.
+     * @returns {number} the filtered sample.
+     */
     process(x) {
       const y = this.b0 * x + this.z1;
       this.z1 = this.b1 * x - this.a1 * y + this.z2;
@@ -3183,6 +3380,79 @@
 
   /* ----------------------------------------------------------------- exports */
 
+  /**
+   * The data structures this module exchanges with its callers.
+   *
+   * @typedef {Object} RSDSP.Step
+   * @property {string} label - stage name, shown in the progress line.
+   * @property {number} units - total work units (samples, frames, windows).
+   * @property {number} estCost - estimated cost in relative units, used to
+   *   slice the work into even time budgets.
+   * @property {function(number, number): void} slice - run the work for the
+   *   half-open range `[from, to)` of `units`.
+   * @property {function(): *} [value] - the step's answer once the whole
+   *   range has been visited.
+   * @property {Object} [state] - the raw accumulators, for callers that want
+   *   a single number without a second walk.
+   *
+   * @typedef {Object} RSDSP.Spectrum
+   * @property {number[]} freq - bin centre frequencies in Hz.
+   * @property {number[]} db - averaged magnitude per bin in dB.
+   * @property {number} n - number of bins.
+   * @property {number} sr - sample rate the spectrum was measured at.
+   * @property {number} binHz - bin width in Hz.
+   * @property {number} frameCount - how many frames were averaged.
+   * @property {number[]} frameRms - per-frame RMS, the envelope a waveform
+   *   drawing can use.
+   *
+   * @typedef {Object} RSDSP.NoiseInfo
+   * @property {RSDSP.Spectrum} spec - the spectrum of the quiet frames only.
+   * @property {number} floorDb - broadband noise floor in dBFS.
+   * @property {number} hfFloorDb - noise floor above 4 kHz.
+   * @property {number} midFloorDb - noise floor around 1 kHz.
+   * @property {number} noiseSlope - dB/octave of the noise floor: negative
+   *   means rumble-heavy, flat means tape or digital hiss.
+   * @property {number} flatness - how flat the noise spectrum is, 0…1.
+   * @property {number} rumble - low-frequency noise excess, 0…1.
+   * @property {number} crackleIndex - burst evidence in the quiet parts.
+   * @property {number} musicTiltDb - HF-minus-mid tilt of the music itself.
+   * @property {number} hissTiltDb - the same tilt measured on the noise.
+   * @property {number} hissDeficitDb - how much quieter the top end is than
+   *   its own music implies — the de-hisser's reason to exist.
+   * @property {number} hfFollowDb - how far the HF envelope follows the music.
+   * @property {number} confidence - how much the quiet frames prove, 0…1.
+   * @property {number} total - frames examined.
+   * @property {number} frameRms - per-frame RMS of the whole file.
+   * @property {number} spikeFrames - frames flagged as impulsive.
+   *
+   * @typedef {Object} RSDSP.Measurement
+   * @property {number} peakDb - sample peak in dBFS.
+   * @property {number} loudness - integrated loudness in LUFS.
+   * @property {number} dynamicRangeDb - 95th-minus-10th percentile RMS spread.
+   * @property {number} snrDb - music level minus noise floor.
+   * @property {number} correlation - inter-channel correlation, −1…1.
+   * @property {number} ispDb - inter-sample peak in dBTP.
+   * @property {number} hissAmount - 0…1 de-hiss depth the evidence supports.
+   * @property {number} crackleIndex - 0…1 vinyl-crackle evidence.
+   * @property {number} humScore - 0…1 mains-hum evidence.
+   * @property {Array<{hz:number, excessDb:number, q:number}>} resonances - measured
+   *   box resonances, loudest first.
+   * @property {number[]} bandDb - the twelve measured EQ-band levels.
+   * @property {number[]} bandSnrDb - each band's level above its own noise.
+   * @property {number} score - the 0…100 quality score.
+   * @property {RSDSP.Spectrum} spec - the averaged spectrum behind all of it.
+   *
+   * @typedef {Object} RSDSPApi
+   * @property {function(Float32Array[], number): RSDSP.Measurement} measure
+   * @property {function(Float32Array[], number, ?function(number, string): void, ?Object): Promise<RSDSP.Measurement>} measureAsync
+   * @property {function(number): number} qualityScore
+   * @property {function(Float32Array[], number, ?Object): RSDSP.Spectrum} spectrum
+   * @property {function(new: RSDSP.Biquad)} Biquad
+   * @property {function(number, number, number): number[]} biquadHP
+   * @property {function(Float32Array, number[]): Float32Array} applyBiquad
+   * @property {function(ArrayBuffer): ({channels: Float32Array[], sampleRate: number}|null)} decodeWav
+   * @property {function(Float32Array[], number, ?number): ArrayBuffer} encodeWav
+   */
   const API = {
     flatTopStep,
     TWO_PI, clamp, db, lin,

@@ -61,8 +61,131 @@
  * failure of either lookup.
  * ========================================================================== */
 /* eslint-disable no-restricted-globals */
+/**
+ * @fileoverview Neural inference worker — runs `onnxruntime-web` off the
+ * audio thread. Not a `<script>` tag: `neural-controller.js` loads this file
+ * with `new Worker(...)`, and `tests/neural.test.js` loads it into a Node
+ * context directly. Everything it exports on `ctx.RSNeuralWorker` exists for
+ * that second audience.
+ *
+ * The states this worker can be in, and why each one exists:
+ *
+ *   - **no weights** — the shipped state. `.onnx` files are not vendored (they
+ *     run from tens of megabytes to several gigabytes), so `loadWeights()`
+ *     finds nothing in OPFS and nothing next to the deployment, and every call
+ *     answers `{applied:false, reason:'weights-not-found'}`. The caller falls
+ *     back to the pure-DSP chain; nothing throws.
+ *   - **init failed** — weights existed but the session could not be built
+ *     (`reason: 'init-failed: …'`), cached as unavailable so a broken file is
+ *     not re-read on every call.
+ *   - **ready** — a session exists with a named execution provider
+ *     (`webnn` → `webgpu` → `wasm`, in the order {@link NeuralWorker.createSession}
+ *     decides from the device profile).
+ *   - **hardware gave out** — an inference threw an OOM, a lost device or hit
+ *     the per-run watchdog. Those three (`'oom'`, `'device-lost'`, `'timeout'`)
+ *     evict the cached session so the next call re-probes from scratch, and are
+ *     the only reasons `neural-controller.js` turns into a user-visible toast.
+ *
+ * Four guarantees hold across all of them, because they are the four ways a
+ * neural upgrade usually breaks a working audio app:
+ *
+ *   1. WebGPU is *preferred*, never *required*. A missing `navigator.gpu`, an
+ *      adapter that is refused or an unsupported op all route to the next
+ *      provider instead of failing the pipeline.
+ *   2. A missing model is not an error — see the first state above.
+ *   3. Tensor time axes are rounded up to a multiple of 4 before they reach
+ *      `onnxruntime-web` ({@link NeuralWorker.alignT}): several WebGPU kernels
+ *      these models rely on require it, and "works on WASM, silently wrong on
+ *      WebGPU" is the worst of the available outcomes.
+ *   4. Mobile is a first-class target: WebNN/NPU is tried ahead of WebGPU on a
+ *      phone, the smallest quantised weight file a model publishes is chosen,
+ *      and every `session.run()` is raced against a short watchdog.
+ *
+ * Weight discovery happens in two places, in order: the Origin Private File
+ * System (a model the user imported once survives reloads) and a same-origin
+ * relative fetch of `models/<name>/…` (dropping files next to a static
+ * deployment works with no build step). Neither ships with this repository.
+ *
+ * @module RSNeuralWorker
+ */
 (function (ctx) {
   'use strict';
+
+  /**
+   * The execution provider a session was built with.
+   * @typedef {('webnn'|'webgpu'|'wasm')} OrtProvider
+   */
+
+  /**
+   * What a capability probe answers about WebGPU.
+   * @typedef {Object} WebGpuCapability
+   * @property {boolean} available - an adapter was obtained.
+   * @property {boolean} fp16 - the adapter advertises `shader-f16`; fp16
+   *   weights are only ever requested when this is `true`.
+   * @property {*} [adapter] - the adapter itself, never sent anywhere.
+   */
+
+  /**
+   * What {@link NeuralWorker.probeWebNN} answers: whether a WebNN context could
+   * really be created, and on which device type.
+   * @typedef {Object} WebNnCapability
+   * @property {boolean} available - `createContext()` succeeded for some type.
+   * @property {('npu'|'gpu'|'cpu'|null)} deviceType - the most specialised type
+   *   that worked, or `null` when none did.
+   */
+
+  /**
+   * The device profile one call is planned from — every provider and variant
+   * decision is derived from this, never from the browser's own defaults.
+   * @typedef {Object} DeviceCaps
+   * @property {WebGpuCapability} webgpu - WebGPU probe result.
+   * @property {WebNnCapability} webnn - WebNN probe result.
+   * @property {boolean} mobile - a phone/tablet user agent, which reorders the
+   *   providers (WebNN first) and prefers quantised weights.
+   */
+
+  /**
+   * One model this worker is wire-compatible with: its graph file per weight
+   * variant, whether it denoises, separates or predicts a curve, and the DSP
+   * contract its tensors follow (`sr`, window, hop, band layout).
+   * @typedef {Object} ModelDefinition
+   * @property {('denoise'|'stems'|'superres')} kind - what a successful run
+   *   produces.
+   * @property {string} dir - folder the weight file lives in, relative to the
+   *   site root (`models/<name>`).
+   * @property {Object<string, string>} files - weight file name per variant
+   *   key (`fp32`, `fp16`, `int8`, `int4`); a missing key means that variant is
+   *   not published for this model.
+   * @property {Object} dsp - the tensor geometry and rates: sample rate,
+   *   `nfft`, `hop`, band counts and the like, documented per model below.
+   */
+
+  /**
+   * A cached session, or the cached memory that there will not be one. The
+   * second shape is what keeps a missing model from being looked up again on
+   * every single call.
+   * @typedef {(Object|UnavailableSession)} CachedSession
+   */
+
+  /**
+   * The negative cache entry: no session, and the reason to report.
+   * @typedef {Object} UnavailableSession
+   * @property {true} unavailable
+   * @property {string} reason - `'weights-not-found'` or `'init-failed: …'`.
+   */
+
+  /**
+   * A live session plus how it was built.
+   * @typedef {Object} ReadySession
+   * @property {false} unavailable
+   * @property {*} session - the `ort.InferenceSession`.
+   * @property {OrtProvider} provider - what it actually runs on.
+   * @property {boolean} fp16 - whether fp16 weights were used.
+   * @property {ModelDefinition} def - the model definition behind it.
+   * @property {('opfs'|'fetch')} source - where the weights came from.
+   * @property {string} file - the relative weight file that was loaded.
+   * @property {string} variant - the weight variant chosen.
+   */
 
   /* ------------------------------------------------------------ onnxruntime */
 
@@ -72,6 +195,9 @@
    * to WASM" requirement costs one load, not two. No bundled local copy is
    * shipped (~140 MB unpacked, see library-loader.js) — this list is CDN-only
    * and is only ever touched once a neural feature is actually invoked.
+   * @returns {string[]} candidate URLs, in try order — the library loader's
+   *   own list when it is reachable in this worker (a worker has no document)
+   *   and a hard-coded pair otherwise.
    */
   function ortCandidates() {
     try {
@@ -86,8 +212,21 @@
     ];
   }
 
+  /**
+   * The one in-flight (or settled) load of onnxruntime-web. Cached so the
+   * runtime is imported once per worker, no matter how many models ask.
+   * @type {Promise<*>|null}
+   */
   let ortPromise = null;
-  /** Load onnxruntime-web once, trying each CDN candidate in order. */
+  /**
+   * Load onnxruntime-web once, trying each CDN candidate in order, and
+   * configure the WASM provider while doing it: `wasmPaths` pointed at the
+   * same folder as the bundle, SIMD on, and a thread count that leaves the
+   * main work a core (`hardwareConcurrency - 1`, clamped to 1…4).
+   * @returns {Promise<*>} the `ort` namespace.
+   * @throws {Error} the last load error, or `'onnxruntime-web: no CDN
+   *   candidate loaded'` when no candidate produced `ctx.ort`.
+   */
   function loadOrt() {
     if (ortPromise) return ortPromise;
     ortPromise = (async () => {
@@ -121,6 +260,8 @@
    * that cannot be created are all distinguishable "no WebGPU here" cases
    * that should route straight to WASM rather than surface as a session
    * creation error further down.
+   * @returns {Promise<WebGpuCapability>} availability, the fp16 feature flag,
+   *   and the adapter when one was obtained. Never rejects.
    */
   async function probeWebGpu() {
     if (!(ctx.navigator && ctx.navigator.gpu)) return { available: false, fp16: false };
@@ -138,7 +279,14 @@
     }
   }
 
-  /** `true` on phones/tablets — mirrors the brief's own detection regex exactly. */
+  /**
+   * Whether this is a phone or tablet, from the user agent — the one signal
+   * that reorders execution providers (WebNN/NPU first) and prefers quantised
+   * weights. Deliberately a plain regex and not a capability check: it is the
+   * form the project brief specifies, and a misdetection only changes which
+   * provider is *tried first*.
+   * @returns {boolean} `true` for a mobile user agent.
+   */
   function isMobileUA() {
     const ua = (ctx.navigator && ctx.navigator.userAgent) || '';
     return /Mobi|Android|iPhone/i.test(ua);
@@ -156,6 +304,10 @@
    * See https://www.w3.org/TR/webnn/#dom-ml-createcontext and
    * https://onnxruntime.ai/docs/tutorials/web/ep-webnn.html (deviceType:
    * 'npu'|'gpu'|'cpu', default 'cpu').
+   * @returns {Promise<WebNnCapability>} availability and the most specialised
+   *   device type that really created a context. Never rejects: a browser that
+   *   exposes `navigator.ml` but throws on every `createContext()` reports
+   *   `{available: false, deviceType: null}` here instead of failing later.
    */
   async function probeWebNN() {
     if (!(ctx.navigator && ctx.navigator.ml && typeof ctx.navigator.ml.createContext === 'function')) {
@@ -183,6 +335,13 @@
    * difference except in the returned `provider` name. WASM is the only
    * provider that is never wrapped in a `try` — if it also throws, that is a
    * genuine `createSession()` failure, caught one level up by `getSession()`.
+   * @param {*} ort - the loaded `onnxruntime-web` namespace.
+   * @param {Uint8Array} bytes - the model's `.onnx` bytes.
+   * @param {DeviceCaps} caps - the device profile that decides the order.
+   * @returns {Promise<{session: *, provider: OrtProvider, fp16: boolean}>}
+   *   the first provider that worked, or WASM.
+   * @throws {Error} only when the WASM provider also fails — a genuine
+   *   session-creation failure, reported as `'init-failed: …'` by callers.
    */
   async function createSession(ort, bytes, caps) {
     const attempts = [];
@@ -191,6 +350,12 @@
         provider: 'webnn',
         fp16: false,
         run: () => ort.InferenceSession.create(bytes, {
+          /**
+           * Create the session on the WebNN provider (the NPU where a browser has
+           * one).
+           * @returns {Promise<Object>} the ORT inference session, or a rejection
+           *   that `createSession` turns into the next attempt.
+           */
           executionProviders: [{ name: 'webnn', deviceType: caps.webnn.deviceType, powerPreference: 'default' }],
           graphOptimizationLevel: 'all',
         }),
@@ -201,6 +366,12 @@
         provider: 'webgpu',
         fp16: caps.webgpu.fp16,
         run: () => ort.InferenceSession.create(bytes, {
+          /**
+           * Create the session on the WebGPU provider, with fp16 kernels when the
+           * adapter reported support for them.
+           * @returns {Promise<Object>} the ORT inference session, or a rejection
+           *   that `createSession` turns into the next attempt.
+           */
           executionProviders: [{ name: 'webgpu', deviceType: 'gpu', powerPreference: 'high-performance' }],
           graphOptimizationLevel: 'all',
         }),
@@ -224,12 +395,27 @@
 
   /* ------------------------------------------------------------- tensor T-alignment */
 
-  /** Round a time-frame count up to the nearest multiple of 4. */
+  /**
+   * Round a time-frame count up to the nearest multiple of 4 — the alignment
+   * several WebGPU kernels in these graphs require, applied to every tensor
+   * before it is handed to the runtime.
+   * @param {number} n - the frame count to align.
+   * @returns {number} the smallest multiple of 4 that is at least `n` (and at
+   *   least 4).
+   */
   function alignT(n) { return Math.ceil(Math.max(1, n) / 4) * 4; }
 
   /**
    * Pad a row-major [T, cols] matrix with trailing zero rows up to `Talign`.
-   * @returns {Float32Array} length `Talign * cols`
+   * The padding rows are zeros, and the model's output is trimmed back to `T`
+   * again by {@link NeuralWorker.trimRowsTo} — a zero row contributes nothing
+   * to a strided convolution's kept region.
+   * @param {Float32Array} flat - the matrix, row-major, `T * cols` long.
+   * @param {number} T - rows actually present.
+   * @param {number} cols - row width.
+   * @param {number} Talign - the aligned row count, from `alignT()`.
+   * @returns {Float32Array} a `Talign * cols` matrix (the same object when no
+   *   padding is needed).
    */
   function padRowsTo(flat, T, cols, Talign) {
     if (Talign === T) return flat;
@@ -238,7 +424,15 @@
     return out;
   }
 
-  /** Trim a row-major [Talign, cols] matrix back down to its first `T` rows. */
+  /**
+   * Trim a row-major [Talign, cols] matrix back down to its first `T` rows,
+   * undoing {@link NeuralWorker.padRowsTo}.
+   * @param {Float32Array} flat - the padded matrix.
+   * @param {number} Talign - its current row count.
+   * @param {number} cols - row width.
+   * @param {number} T - the row count to keep.
+   * @returns {Float32Array} a view (or copy) of the first `T` rows.
+   */
   function trimRowsTo(flat, Talign, cols, T) {
     if (Talign === T) return flat;
     return flat.subarray ? flat.subarray(0, T * cols) : flat.slice(0, T * cols);
@@ -246,6 +440,13 @@
 
   /* ------------------------------------------------------------------- DSP */
 
+  /**
+   * The shared DSP utilities, imported on first use: `importScripts` in the
+   * browser, `require` in the Node suites. Both load the *same* classic
+   * script, so the FFT here and the analyser's FFT are one implementation.
+   * @returns {Object|null} `RSDSP`, or `null` when it could not be loaded —
+   *   callers that cannot work without it throw a descriptive error instead.
+   */
   function getDsp() {
     if (ctx.RSDSP) return ctx.RSDSP;
     try {
@@ -282,7 +483,23 @@
    * spectrum depend only on `n`, so they are cached per length and the steady
    * state cost of an already-cached length is the same two FFTs every call.
    */
+  /**
+   * Cached Bluestein chirp parameters per transform length. A length that is
+   * not a power of two needs the same chirp and the same padded FFT of it on
+   * every call, so computing it once is what keeps a per-frame non-power-of-two
+   * transform affordable.
+   * @type {Map<number, Object>}
+   */
   const bluesteinCache = new Map();
+  /**
+   * Chirp and pre-transformed chirp for a Bluestein FFT of length `n`, built
+   * on first use: `exp(-i·π·k²/n)` computed from `k² mod 2n` so the angle
+   * stays small and the cosine stays accurate.
+   * @param {number} n - transform length.
+   * @param {Object} dsp - `RSDSP`, for its power-of-two `fft`.
+   * @returns {{m: number, wr: Float32Array, wi: Float32Array, Br: Float32Array,
+   *   Bi: Float32Array}} the padded FFT length and the chirp tables.
+   */
   function getBluestein(n, dsp) {
     let c = bluesteinCache.get(n);
     if (c) return c;
@@ -306,6 +523,17 @@
     return c;
   }
   /** In-place-equivalent forward FFT of any length `n` (power of two or not). */
+  /**
+   * A complex FFT of *any* length: the radix-2 path straight through for a
+   * power of two, Bluestein's chirp-z algorithm otherwise. Everything in this
+   * worker goes through it, so no model's window size is ever rounded to fit
+   * the FFT.
+   * @param {Float32Array} re - real parts, transformed in place.
+   * @param {Float32Array} im - imaginary parts, transformed in place.
+   * @param {Object} dsp - `RSDSP`.
+   * @param {number} [n=re.length] - transform length.
+   * @returns {void}
+   */
   function fftAny(re, im, dsp, n) {
     n = n || re.length;
     // power-of-two fast path: dsp.fft handles it directly, exactly, no chirp
@@ -335,11 +563,26 @@
     }
   }
 
+  /**
+   * The Vorbis window DeepFilterNet3 was trained with — `sin(π/2 ·
+   * sin²(π(i+½)/n))`, which satisfies the Princen-Bradley condition, so an
+   * STFT/ISTFT pair using it reconstructs without a scale factor. Using any
+   * other window here would bias the model's input relative to its training.
+   * @param {number} n - window length in samples.
+   * @returns {Float32Array} the window.
+   */
   function vorbisWindow(n) {
     const w = new Float32Array(n);
     for (let i = 0; i < n; i++) w[i] = Math.sin((Math.PI / 2) * Math.pow(Math.sin((Math.PI * (i + 0.5)) / n), 2));
     return w;
   }
+  /**
+   * A periodic Hann window, for the STFT of the models that were trained with
+   * one (the band-split separator). Periodic, not symmetric: the overlap-add
+   * identity the iSTFT relies on needs the periodic form.
+   * @param {number} n - window length in samples.
+   * @returns {Float32Array} the window.
+   */
   function hannWindow(n) {
     const w = new Float32Array(n);
     for (let i = 0; i < n; i++) w[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / n);
@@ -351,6 +594,14 @@
    * bins, row-major [frame, bin]. Pure real-input FFT via RSDSP.fft (shared
    * with the analyser — one FFT implementation, one set of rounding
    * behaviours, for everything in this project that takes one).
+   * @param {Float32Array} signal - mono samples, −1…1.
+   * @param {number} nfft - window length in samples.
+   * @param {number} hop - advance between frames in samples.
+   * @param {Float32Array} window - analysis window (`vorbisWindow`/`hannWindow`).
+   * @returns {{re: Float32Array, im: Float32Array}} row-major [frame, bin]
+   *   spectra, `nfft/2 + 1` bins per frame.
+   * @throws {Error} when `RSDSP` could not be loaded — without it there is no
+   *   FFT, and a silent zero spectrum would be worse than a loud failure.
    */
   function stft(signal, nfft, hop, window) {
     const dsp = getDsp();
@@ -375,6 +626,23 @@
   }
 
   /** Inverse STFT by overlap-add, the exact inverse of `stft` above. */
+  /**
+   * Inverse of {@link NeuralWorker.stft}: overlap-add with the same window and
+   * the complementary window sum, so a signal that passes through an STFT and
+   * straight back out comes out at the same level it went in. The inverse FFT
+   * itself is a conjugated forward FFT scaled by `1/nfft`, which reuses the
+   * one FFT implementation.
+   * @param {Float32Array} re - real parts, row-major [frame, bin].
+   * @param {Float32Array} im - imaginary parts, same layout.
+   * @param {number} frames - frame count.
+   * @param {number} nfft - window length in samples.
+   * @param {number} hop - advance between frames in samples.
+   * @param {Float32Array} window - synthesis window (the analysis one).
+   * @param {number} length - samples to produce; the tail beyond the last
+   *   analysed frame is discarded rather than zero-padded.
+   * @returns {Float32Array} the reconstructed mono signal.
+   * @throws {Error} when `RSDSP` could not be loaded.
+   */
   function istft(re, im, frames, nfft, hop, window, length) {
     const dsp = getDsp();
     if (!dsp) throw new Error('RSDSP (dsp-utils.js) unavailable — cannot run an ISTFT');
@@ -408,6 +676,21 @@
    * notes on `denoiseDFN3` for where the exact bin/band counts come from.
    * Returns a forward matrix (average pooling, [nBands, nBins] flat
    * row-major) and an inverse matrix (replication, [nBins, nBands] flat).
+   */
+  /**
+   * Build an ERB-spaced filterbank over an STFT's bins — the band layout
+   * DeepFilterNet3's `feat_erb` input expects (32 bands), including the
+   * mid-band upscaling the original implementation applies. Bin edges are
+   * chosen from the ERB-rate scale, never narrower than `minBins`, and never
+   * so wide that the remaining bands would be starved.
+   * @param {number} nBins - bins available (`nfft/2 + 1`).
+   * @param {number} nBands - bands to produce.
+   * @param {number} sr - sample rate in Hz, to convert bins to hertz.
+   * @param {number} nfft - window length, to convert back.
+   * @param {number} [minBins=2] - narrowest band, in bins.
+   * @returns {{fwd: Float32Array, inv: Float32Array, edges: number[],
+   *   nBands: number, nBins: number}} the band-summing and band-spreading
+   *   matrices plus the bin edges they were built from.
    */
   function buildErbFilterbank(nBins, nBands, sr, nfft, minBins) {
     const minW = minBins || 2;
@@ -452,13 +735,39 @@
    * session can be evicted and the *next* call gets a chance to pick a
    * healthier provider instead of also waiting two full minutes to fail.
    */
+  /**
+   * How long one `session.run()` may take before it is treated as a thermal or
+   * scheduling stall rather than real work, in milliseconds. Deliberately far
+   * below `neural-controller.js`'s 120 s per-call ceiling: that outer timeout
+   * bounds a whole round trip, while this one catches a throttled GPU/NPU
+   * early enough to evict the session and let the *next* call pick a healthier
+   * provider.
+   * @type {number}
+   */
   const INFERENCE_TIMEOUT_MS = 20000;
 
+  /**
+   * The error a watchdog expiry throws, kept as its own class so
+   * {@link NeuralWorker.classifyInferenceError} can recognise it by type
+   * instead of by message text.
+   */
   class InferenceTimeoutError extends Error {
+    /**
+     * @param {string} [label] - what timed out (the model key), appended to
+     *   the message and used in the toast-free log line.
+     */
     constructor(label) { super('inference timed out' + (label ? ': ' + label : '')); this.name = 'InferenceTimeoutError'; }
   }
 
-  /** Race `promise` against a timer; on expiry, reject with `InferenceTimeoutError` instead of hanging forever. */
+  /**
+   * Race a promise against a timer; on expiry, reject with
+   * {@link InferenceTimeoutError} instead of hanging forever. The timer is
+   * always cleared, so a settled promise leaves nothing behind.
+   * @param {Promise<*>} promise - the work to bound (a `session.run()`).
+   * @param {number} ms - the budget in milliseconds.
+   * @param {string} [label] - what the work is, for the error message.
+   * @returns {Promise<*>} the work's value, or a rejection.
+   */
   function withTimeout(promise, ms, label) {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new InferenceTimeoutError(label)), ms);
@@ -481,6 +790,9 @@
    * Returns `null` for anything else — a genuine bug or unexpected shape
    * should keep its own descriptive `inference-error: ...` reason, not be
    * silently relabelled.
+   * @param {*} err - the thrown value from a `session.run()`.
+   * @returns {('timeout'|'device-lost'|'oom'|null)} the hardware-limit reason,
+   *   or `null` when the error is not a hardware limit.
    */
   function classifyInferenceError(err) {
     if (err instanceof InferenceTimeoutError) return 'timeout';
@@ -501,6 +813,12 @@
    * reason}` result carries; `neural-controller.js` treats the hardware-
    * limit set specially (one quiet toast), everything else is just the
    * existing generic `inference-error: ...` passthrough.
+   * @param {string} modelKey - the model whose session failed (`'deepfilternet3'`,
+   *   `'bsroformer'`, `'audiosr'`).
+   * @param {*} err - the thrown value.
+   * @returns {string} `'oom'`, `'device-lost'` or `'timeout'` when the session
+   *   was evicted, otherwise `'inference-error: <message>'` — the vocabulary
+   *   `neural-controller.js` and `app.js` branch on.
    */
   function resolveInferenceFailure(modelKey, err) {
     const hwReason = classifyInferenceError(err);
@@ -526,6 +844,8 @@
    * lookup simply tries int4, then int8, then falls back exactly like
    * desktop does; a project that *does* drop quantised weights next to a
    * static deployment gets the VRAM saving with zero code changes.
+   * @type {Object<string, ModelDefinition>} keyed by model key, which is also
+   *   the folder name under `models/` and the string every reason refers to.
    */
   const MODELS = {
     deepfilternet3: {
@@ -589,6 +909,14 @@
 
   /* ------------------------------------------------------------- weight I/O */
 
+  /**
+   * Fetch a weight file over HTTP, same-origin and relative. Swallows every
+   * failure on purpose: for a model that was not installed, "could not fetch"
+   * and "not there" are the same answer, and it is the caller's ordinary
+   * fallback case.
+   * @param {string} url - relative path such as `models/audiosr/audiosr_lite.onnx`.
+   * @returns {Promise<Uint8Array|null>} the bytes, or `null`.
+   */
   async function fetchBytes(url) {
     try {
       if (typeof fetch !== 'function') return null;
@@ -598,6 +926,15 @@
     } catch (err) { return null; }
   }
 
+  /**
+   * Read a weight file out of the Origin Private File System, walking the path
+   * one directory at a time and giving up quietly when any segment is missing.
+   * This is the first place `loadWeights()` looks, so a model a user imported
+   * once keeps working across reloads with no network traffic at all.
+   * @param {string} path - slash-separated path under the OPFS root.
+   * @returns {Promise<Uint8Array|null>} the file's bytes, or `null` when the
+   *   host has no OPFS or the path does not resolve.
+   */
   async function opfsBytes(path) {
     try {
       if (!(ctx.navigator && ctx.navigator.storage && ctx.navigator.storage.getDirectory)) return null;
@@ -625,6 +962,11 @@
    * lists it — none do in this repository (see MODELS' own comment), so
    * this always lands on `fp32` here, but it is exactly the lookup a project
    * that *does* ship quantised weights needs with no further code changes.
+   * @param {ModelDefinition} def - the model definition (its `files` map is
+   *   the set of published variants).
+   * @param {DeviceCaps} caps - the device profile.
+   * @returns {string} the variant key to load; `'fp32'` when nothing smaller
+   *   is published.
    */
   function selectVariant(def, caps) {
     const files = def.files;
@@ -642,6 +984,11 @@
    * (the "local folder structure" the brief asks for). Returns `null` — never
    * throws — when neither source has the file; that `null` is the signal the
    * rest of this file treats as "fall back to the pure DSP path cleanly".
+   * @param {string} modelKey - the model to load.
+   * @param {DeviceCaps} caps - the device profile, for the variant choice.
+   * @returns {Promise<{bytes: Uint8Array, source: ('opfs'|'fetch'), file: string,
+   *   def: ModelDefinition, variant: string}|null>} the weights and their
+   *   provenance, or `null`.
    */
   async function loadWeights(modelKey, caps) {
     const def = MODELS[modelKey];
@@ -655,8 +1002,24 @@
     return null;
   }
 
-  const sessionCache = new Map();  // modelKey -> {session, provider, fp16, def} | {unavailable:true, reason}
+  /**
+   * One session (or one negative answer) per model, for the worker's whole
+   * lifetime. Positive entries are evicted by `resolveInferenceFailure()` on a
+   * hardware limit; negative entries are kept, because re-reading a file that
+   * is not there costs a failed fetch on every call.
+   * @type {Map<string, CachedSession>}
+   */
+  const sessionCache = new Map();
 
+  /**
+   * Get the session for a model, building it on first use: probe the device,
+   * find weights, load the runtime, create the session — with every failure
+   * cached as an {@link UnavailableSession} carrying the reason the caller
+   * reports. This is the only place a session is ever created.
+   * @param {string} modelKey - the model to prepare.
+   * @returns {Promise<CachedSession>} a {@link ReadySession} or an
+   *   {@link UnavailableSession}; never rejects.
+   */
   async function getSession(modelKey) {
     if (sessionCache.has(modelKey)) return sessionCache.get(modelKey);
     let result;
@@ -683,6 +1046,11 @@
    * Denoise `signal` (mono, resampled by the caller to the model's own
    * 48 kHz if needed) with DeepFilterNet3. Falls back cleanly — `{applied:
    * false}` — when the weights are not present, or on any inference error.
+   * @param {Float32Array} signal - mono samples, −1…1; the caller resamples to
+   *   the model's own rate when needed.
+   * @returns {Promise<{applied: boolean, output?: Float32Array, reason?: string}>}
+   *   `{applied:true, output}` on success, otherwise `applied:false` with a
+   *   reason from {@link NeuralWorker.resolveInferenceFailure}.
    */
   async function denoiseDFN3(signal) {
     const sess = await getSession('deepfilternet3');
@@ -758,6 +1126,17 @@
    * layout) into drums/bass/other/vocals. Falls back cleanly when the
    * weights are absent.
    */
+  /**
+   * Split `signal` (mono, at the model's own rate) into stems with
+   * BS-RoFormer: the host computes the STFT, the graph transforms the
+   * real/imag spectrograms, the host runs the inverse — the model's time axis
+   * is aligned to a multiple of 4 on the way in and trimmed back on the way
+   * out, exactly like `denoiseDFN3()`.
+   * @param {Float32Array} signal - mono samples, −1…1.
+   * @returns {Promise<{applied: boolean, stems?: Object<string, Float32Array>,
+   *   reason?: string}>} one equally long buffer per stem name from the model
+   *   definition (`drums`, `bass`, `other`, `vocals`) on success.
+   */
   async function separateBSR(signal) {
     const sess = await getSession('bsroformer');
     if (sess.unavailable) return { applied: false, reason: sess.reason };
@@ -803,6 +1182,18 @@
    * contribute is *how much* top end belongs there, which keeps the result
    * phase-accurate by construction (the phase never comes from the model).
    */
+  /**
+   * Predict a per-band gain curve for the bandwidth extension stage: how much
+   * of each high band should survive. The model is magnitude-only by design —
+   * the waveform itself still comes from the phase-coherent exciter in the
+   * worklet, so the curve only reshapes level, never phase.
+   * @param {Float32Array} signal - mono samples, −1…1 (a downmix of the dry
+   *   source, computed once for the whole file by `engine.js`).
+   * @param {number[]} bandsHz - band centre frequencies, low to high; the
+   *   returned curve has exactly one gain per entry.
+   * @returns {Promise<{applied: boolean, gainsDb?: number[], reason?: string}>}
+   *   gains in dB, or the fallback result.
+   */
   async function superresCurve(signal, bandsHz) {
     const sess = await getSession('audiosr');
     if (sess.unavailable) return { applied: false, reason: sess.reason };
@@ -836,6 +1227,12 @@
       // frame-accurate one.
       const avg = new Float32Array(melBins);
       for (let f = 0; f < T; f++) for (let band = 0; band < melBins; band++) avg[band] += curve[f * melBins + band] / T;
+      /**
+       * Centre frequency of one mel band, in Hz, from the filterbank's bin
+       * edges.
+       * @param {number} fIdx - mel band index, `0 … melBins-1`.
+       * @returns {number} the band's centre frequency in Hz.
+       */
       const hzPerBand = (fIdx) => ((fb.edges[fIdx] + fb.edges[fIdx + 1]) / 2) * (sr / nfft);
       const gainsDb = bandsHz.map((hz) => {
         let best = 0, bestD = Infinity;
@@ -853,6 +1250,17 @@
 
   /* ---------------------------------------------------------------- probe */
 
+  /**
+   * The capability report the main thread asks for before showing a neural
+   * control: what the device offers, and per model whether it is actually
+   * usable. Asking also *populates* the session cache, so the first real call
+   * does not pay for a second probe round.
+   * @returns {Promise<{webgpu: {available: boolean, fp16: boolean},
+   *   webnn: {available: boolean, deviceType: (string|null)}, wasmSimd: boolean,
+   *   mobile: boolean, models: Object<string, *>}>} the report; `models[key]`
+   *   is `{available:false, reason}` or `{available:true, provider, fp16,
+   *   source, variant}`.
+   */
   async function probe() {
     const webgpu = await probeWebGpu();
     const webnn = await probeWebNN();
@@ -875,13 +1283,52 @@
 
   /* ------------------------------------------------------------- messaging */
 
+  /**
+   * The message protocol, one entry per request type the main thread sends.
+   * Each handler resolves a plain result object; it never throws across the
+   * thread boundary, because the dispatcher below would have no way to settle
+   * the caller's promise.
+   * @type {Object<string, function(Object): Promise<Object>>}
+   */
   const handlers = {
+    /**
+     * Report the worker's capabilities (providers, wasm paths, versions).
+     * @returns {Promise<Object>} the probe result; never rejects.
+     */
     probe: async () => probe(),
+    /**
+     * Run the DeepFilterNet-style denoiser over one signal.
+     * @param {Object} msg - message with the `signal` field (channel-major
+     *   `Float32Array[]`).
+     * @returns {Promise<Object>} `{applied, post, reason?}`.
+     */
     denoise: async (msg) => denoiseDFN3(msg.signal),
+    /**
+     * Split one signal into the "music" and "everything else" stems.
+     * @param {Object} msg - message with the `signal` field.
+     * @returns {Promise<Object>} `{applied, foreground, background, reason?}`.
+     */
     separate: async (msg) => separateBSR(msg.signal),
+    /**
+     * Predict a per-band high-frequency gain curve for the air-repair stage
+     * — deliberately a *curve*, not audio: it is small enough to post back
+     * cheaply and the DSP side owns what to do with it.
+     * @param {Object} msg - message with `signal` and the optional
+     *   `bandsHz` band centres to sample the prediction at.
+     * @returns {Promise<Object>} `{applied, gainsDb, bandsHz, reason?}`.
+     */
     superres: async (msg) => superresCurve(msg.signal, msg.bandsHz || []),
   };
 
+  /**
+   * The worker's message loop: dispatch by `type`, answer with
+   * `{reqId, result}`, and turn any escaping error into a
+   * `{applied:false, reason:'handler-error: …'}` result instead of letting it
+   * become an unhandled rejection (which would leave the main thread's promise
+   * pending until its own 120 s timeout). Only installed when the host really
+   * is a worker — the Node suites import the module and call the handlers
+   * directly.
+   */
   if (typeof ctx.addEventListener === 'function' && ctx.postMessage) {
     ctx.addEventListener('message', async (ev) => {
       const msg = ev.data || {};
@@ -896,10 +1343,13 @@
     });
   }
 
-  // Exported for tests/neural.test.js (and for anything else that wants to
-  // exercise this worker's own logic without a real Worker/postMessage round
-  // trip) — the same "export the shipped internals" convention
-  // opfs-manager.js's `buildWorkerSource` already uses.
+  /**
+   * The shipped internals, exposed for `tests/neural.test.js` (and anything
+   * else that wants to exercise this worker's logic without a real
+   * Worker/postMessage round trip) — the same "export the shipped internals"
+   * convention `RSOPFS.buildWorkerSource` already uses.
+   * @type {Object}
+   */
   ctx.RSNeuralWorker = {
     MODELS, alignT, padRowsTo, trimRowsTo, buildErbFilterbank, stft, istft, fftAny,
     vorbisWindow, hannWindow, probeWebGpu, probeWebNN, isMobileUA, createSession, loadOrt,

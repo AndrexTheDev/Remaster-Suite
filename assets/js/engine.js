@@ -14,13 +14,152 @@
  * at 48 kHz while it is engaged — the same in both paths, and the A/B crossfade
  * delays its dry side with it, so nothing about the comparison changes.
  * ========================================================================== */
+/**
+ * @fileoverview The audio engine — exported as the constructor
+ * `global.RSAudioEngine` *and* as the ready-made singleton
+ * `global.RSEngine`, which is what the app actually uses.
+ *
+ * Runs the one DSP chain in the one worklet, two ways: live (`AudioContext` +
+ * `AudioWorkletNode`, for the A/B monitor) and offline (`OfflineAudioContext`,
+ * for the file the user saves). The chain is minimum-phase throughout, so both
+ * paths are sample-for-sample identical — what is heard is what is saved. The
+ * single stage that delays is the de-clicker, whose look-ahead shifts the
+ * output by 65 samples at 48 kHz while it is engaged; that is the same in both
+ * paths, and the A/B crossfade delays its dry side with it, so nothing about
+ * the comparison changes.
+ *
+ * `render()` is the whole-file offline path. `renderChunked()` is its
+ * bounded-memory sibling for long files and phones: independent spans, joined
+ * with a level-preserving crossfade, streaming each finished chunk out through
+ * `onChunk` instead of holding the whole file in memory.
+ *
+ * @module RSEngine
+ */
 (function (global) {
   'use strict';
 
+  /**
+   * Repository-relative path of the AudioWorklet module both paths load.
+   * @type {string}
+   */
   const WORKLET = 'assets/worklets/remaster-processor.js';
-  const SMOOTH = 0.02;                       // AudioParam glide, seconds
+  /**
+   * AudioParam glide for live parameter changes, in seconds. Short enough to
+   * feel immediate, long enough not to click when a slider moves.
+   * @type {number}
+   */
+  const SMOOTH = 0.02;
 
+  /**
+   * A flat parameter map, as the worklet's `parameterDescriptors` expects it:
+   * name → value, one entry per AudioParam. Names and ranges are the
+   * worklet's own (`assets/worklets/remaster-processor.js`), and the map is
+   * built by `RSPresets` — see its `ParamMap` typedef for the full list, the
+   * units and the ceilings each profile may set.
+   * @typedef {Object<string, number>} EngineParams
+   */
+
+  /**
+   * One state notification from the monitor, emitted on every transport change
+   * (play, pause, seek, bypass flip).
+   * @typedef {Object} EngineState
+   * @property {boolean} playing - whether audio is currently running.
+   * @property {number} position - playback position in seconds.
+   * @property {boolean} bypass - `true` while the untouched original is heard.
+   */
+
+  /**
+   * Where a render puts its result. `onProgress` is called with a monotonic
+   * 0…1 share; the *rate* of those calls is what `progressSteps` controls.
+   * @typedef {Object} RenderOptions
+   * @property {function(number): void} [onProgress] - progress callback, 0…1.
+   * @property {number} [progressSteps] - how many progress reports a render of
+   *   this length may send; defaults to one per eight seconds, clamped to
+   *   2…30. Only affects reporting, never the audio.
+   * @property {Object} [neural] - optional Stage-7 coupling: when present and
+   *   `RSNeural` is loaded, the network predicts a per-band dB gain curve
+   *   *before* the graph starts. `bandsHz` selects the bands (default: the six
+   *   from 8 kHz up) and `amount` scales the curve (default 1). Any failure
+   *   leaves the curve out and the render identical to the pure-DSP path.
+   */
+
+  /**
+   * The whole-file render result.
+   * @typedef {Object} RenderResult
+   * @property {Float32Array[]} channels - one channel per array, full length.
+   * @property {number} sampleRate - the rate the graph rendered at.
+   * @property {AudioBuffer} buffer - the same audio as an `AudioBuffer`, which
+   *   the live monitor can be handed without a copy.
+   */
+
+  /**
+   * The progress report a chunked render makes once per chunk.
+   * @typedef {Object} ChunkInfo
+   * @property {number} startSample - first sample of this chunk, in the
+   *   *output* domain (0 = start of the file).
+   * @property {number} endSample - one past this chunk's last output sample;
+   *   the next chunk starts here, so `end - start` is exactly this chunk's
+   *   length and the chunks tile the file without overlap.
+   * @property {number} totalSamples - the whole file's output length, so a
+   *   sink can size a header before the last chunk arrives.
+   * @property {boolean} isLast - `true` for the final chunk; a streaming writer
+   *   uses it to finalise the container.
+   */
+
+  /**
+   * Options for `renderChunked()`. Everything here is optional; the defaults
+   * are tuned for a phone rendering a long file.
+   * @typedef {Object} ChunkedRenderOptions
+   * @property {number} [chunkSeconds=10] - nominal chunk length in seconds.
+   * @property {number} [crossfadeMs=50] - length of the crossfade that joins
+   *   two independently rendered chunks. Linear (gain-preserving) weights, not
+   *   equal-power: the two sides are two renders of the *same* input, so
+   *   equal-power would add up to +3 dB at the seam.
+   * @property {number} [prerollSeconds=1] - extra audio rendered *before* each
+   *   chunk and thrown away, so the chain's stateful stages (hum PLL, detectors,
+   *   resampler) settle before the kept audio starts.
+   * @property {number} [minChunkSeconds=2] - floor for the chunk length when
+   *   the memory guard asks for something smaller.
+   * @property {{suggestChunkSeconds: Function}} [memoryGuard] - override for
+   *   `RSMemoryGuard` (tests pass a fake); defaults to the global when loaded.
+   * @property {function(Float32Array[], ChunkInfo): (void|Promise<void>)} [onChunk]
+   *   - streaming sink, called once per finished chunk. Passing it is what
+   *   keeps `channels` out of the result — that is the whole point of the
+   *   streaming path. A promise returned here is awaited before the next chunk
+   *   renders, so a disk write throttles the render.
+   * @property {function(number): void} [onProgress] - progress callback, 0…1,
+   *   called once per chunk.
+   * @property {Object} [neural] - same Stage-7 coupling as {@link RenderOptions},
+   *   computed once for the whole file, never per chunk.
+   */
+
+  /**
+   * The chunked render result. `channels` is only populated when the caller
+   * did *not* pass `onChunk` — kept so the method doubles as a drop-in,
+   * memory-saving alternative without a sink (the test suites rely on it).
+   * @typedef {Object} ChunkedRenderResult
+   * @property {Float32Array[]} [channels] - the assembled file, only without
+   *   an `onChunk` sink.
+   * @property {number} sampleRate - the rate the spans rendered at.
+   * @property {number} samples - total output length, in samples.
+   * @property {number} chunks - how many chunks the file was rendered in; the
+   *   number the scale rows report.
+   */
+
+  /**
+   * The engine: one live monitor and, per offline call, its own render graph.
+   *
+   * Lifetime rule that matters: the worklet module is registered *per context*
+   * (`_loaded` is a `WeakSet`), so a new `OfflineAudioContext` per chunk and a
+   * long-lived live context can coexist without a double `addModule`.
+   */
   class AudioEngine {
+    /**
+     * Create the engine with nothing connected: no context, no node, no
+     * buffer, no handlers. `init()` is what opens the audio context, so an
+     * engine can be constructed (and its API used) on a page that never gets
+     * one — the Node suites rely on exactly that.
+     */
     constructor() {
       this.ctx = null;
       this.node = null;
@@ -43,7 +182,15 @@
 
     /* ------------------------------------------------------------ plumbing */
 
-    /** Create the live context and load the processor. Needs a user gesture. */
+    /**
+     * Create (or reuse) the live context and install the processor in it. Must
+     * be called from a user gesture on iOS/Safari, which is why the UI calls it
+     * from the play button and never on page load. Idempotent: a second call
+     * returns the same context.
+     * @returns {Promise<AudioContext>} the running context.
+     * @throws {Error} `'Web Audio unavailable'` when the browser has no
+     *   `AudioContext` constructor at all.
+     */
     async init() {
       if (this.ctx && this._loaded.has(this.ctx)) return this.ctx;
       const Ctor = global.AudioContext || global.webkitAudioContext;
@@ -68,6 +215,16 @@
       return this.ctx;
     }
 
+    /**
+     * Register the processor module with one context, at most once per context.
+     * @private
+     * @param {BaseAudioContext} ctx - the context to load into (live or offline).
+     * @returns {Promise<void>} resolves once `addModule` settled or the context
+     *   was already marked as loaded.
+     * @throws {Error} `'AudioWorklet unavailable'` when the browser lacks
+     *   `audioWorklet` (old Safari), or `'worklet-load-failed'` when `addModule`
+     *   rejects — with the original error attached as `.cause`.
+     */
     async _loadWorklet(ctx) {
       if (this._loaded.has(ctx)) return;
       if (!ctx.audioWorklet) throw new Error('AudioWorklet unavailable');
@@ -82,11 +239,26 @@
       }
     }
 
+    /**
+     * Sample rate of the live context, or the 48000 Hz default before `init()`
+     * ran — callers use it to convert between seconds and samples without
+     * waiting for a context to exist.
+     * @type {number}
+     */
     get sampleRate() { return this.ctx ? this.ctx.sampleRate : 48000; }
 
     /* --------------------------------------------------------------- params */
 
-    /** Apply a full parameter set (flat name → value map). */
+    /**
+     * Apply a parameter set to the live node. The map is merged into the last
+     * one applied, so a caller can send a single changed value without
+     * resending everything. Unknown names are skipped (the worklet owns the
+     * list), non-finite values are skipped (a broken file must never reach a
+     * k-rate parameter), and each value glides rather than jumping.
+     * @param {EngineParams} params - the values to apply.
+     * @param {number} [glide=0.02] - time constant for the glide, in seconds.
+     * @returns {void}
+     */
     applyParams(params, glide) {
       this.params = Object.assign({}, this.params || {}, params || {});
       if (!this.node) return;
@@ -101,7 +273,15 @@
       }
     }
 
-    /** A/B: true = play untouched original, false = play the restoration. */
+    /**
+     * A/B switch: `true` plays the untouched original, `false` the
+     * restoration. Implemented inside the worklet (`bypass` parameter), so the
+     * flip happens in the audio thread at a known place in the chain and never
+     * clicks.
+     * @param {boolean} on - `true` for the original.
+     * @param {number} [glide=0.01] - glide time constant in seconds.
+     * @returns {void}
+     */
     setBypass(on, glide) {
       this.bypass = !!on;
       const p = this.node && this.node.parameters.get('bypass');
@@ -109,7 +289,14 @@
       this._notifyState();
     }
 
-    /** Auto A/B: flip every `seconds` so the ear stays honest. */
+    /**
+     * Auto A/B: flip the comparison every `seconds` so the ear keeps its
+     * bearings and a long listening session cannot be fooled by its own
+     * adaptation. Calling it again restarts the timer; `on === false` stops it.
+     * @param {boolean} on - whether to keep flipping.
+     * @param {number} [seconds=4] - flip period, floored at one second.
+     * @returns {void}
+     */
     setCompare(on, seconds) {
       if (this.compareTimer) { global.clearInterval(this.compareTimer); this.compareTimer = null; }
       if (!on) return;
@@ -117,13 +304,28 @@
       this.compareTimer = global.setInterval(() => this.setBypass(!this.bypass, 0.012), period);
     }
 
+    /**
+     * Set the monitor's output gain — a listening level, not part of the
+     * rendered file (the render graph never sees this node).
+     * @param {number} v - linear gain, clamped to `0…2`.
+     * @returns {void}
+     */
     setVolume(v) {
       if (this.gain) this.gain.gain.setTargetAtTime(Math.max(0, Math.min(2, v)), this.ctx.currentTime, 0.02);
     }
 
     /* ---------------------------------------------------------- monitoring */
 
-    /** Hand the engine a decoded buffer for live A/B monitoring. */
+    /**
+     * Hand the engine a freshly decoded buffer for live monitoring. Stops any
+     * playback first and parks at the start of the preview window — correct for
+     * "a new file was dropped", and the reason `switchBuffer()` exists for the
+     * other case.
+     * @param {AudioBuffer} buffer - the decoded audio.
+     * @param {RSAnalyzer.PreviewWindow} [window] - the window to monitor;
+     *   defaults to the whole file.
+     * @returns {void}
+     */
     setBuffer(buffer, window) {
       this.stop();
       this.buffer = buffer;
@@ -140,6 +342,10 @@
      * for "load a new file" but wrong for "keep listening, just change which
      * render this is"; this is the one call that keeps going from exactly
      * where the ear already was.
+     * @param {AudioBuffer} buffer - the other render of the same material.
+     * @param {RSAnalyzer.PreviewWindow} [window] - bounds to keep; defaults to
+     *   the current ones, or the whole new buffer.
+     * @returns {void}
      */
     switchBuffer(buffer, window) {
       if (!buffer) return;
@@ -158,6 +364,13 @@
       }
     }
 
+    /**
+     * Start (or resume) monitoring. Initialises the context if needed, loops
+     * within the preview window when `setLoop(true)` asked for it, and starts
+     * the position tick. A no-op when no buffer was handed over, and while
+     * something is already playing.
+     * @returns {Promise<void>} resolves once playback has started.
+     */
     async play() {
       if (!this.buffer) return;
       await this.init();
@@ -187,6 +400,11 @@
       this._startTick();
     }
 
+    /**
+     * Pause and remember the position, so `play()` continues from there rather
+     * than from the window start. A no-op when nothing is playing.
+     * @returns {void}
+     */
     pause() {
       if (!this.playing) return;
       this.offset = this.position;
@@ -195,12 +413,24 @@
       this._notifyState();
     }
 
+    /**
+     * Stop playback and rewind to the start of the preview window. Used before
+     * loading a new buffer and when the card is closed.
+     * @returns {void}
+     */
     stop() {
       this._stopSource();
       this.playing = false;
       this._notifyState();
     }
 
+    /**
+     * Release the running source node and the position tick, ignoring errors
+     * from an already-stopped node — `stop()` on a finished source throws in
+     * some browsers, and that must never reach the UI.
+     * @private
+     * @returns {void}
+     */
     _stopSource() {
       if (this.src) {
         try { this.src.onended = null; this.src.stop(); } catch (e) { /* already stopped */ }
@@ -210,8 +440,13 @@
       if (this._raf) { global.cancelAnimationFrame(this._raf); this._raf = 0; }
     }
 
+    /**
+     * Jump to a position, resuming playback there when something was playing
+     * (the source node cannot be repositioned, so it is replaced).
+     * @param {number} seconds - target position, clamped to the file.
+     * @returns {void}
+     */
     seek(seconds) {
-      const dur = this.buffer ? this.buffer.duration : 0;
       const t = Math.max(0, Math.min(dur, seconds));
       this.offset = t;
       if (this.playing) {
@@ -223,8 +458,21 @@
       }
     }
 
+    /**
+     * Loop within the preview window (`true`) or run through it once and park
+     * (`false`). Applied to a running source immediately.
+     * @param {boolean} on - whether to loop.
+     * @returns {void}
+     */
     setLoop(on) { this.loop = !!on; if (this.src) { this.src.loop = !!on && !!this.bounds; } }
 
+    /**
+     * Current playback position in seconds, derived from the audio clock
+     * rather than from a timer (drift-free, and correct after a seek). Wraps
+     * inside the bounds while looping, and is clamped to the file either way.
+     * Reads `0` before a buffer exists.
+     * @type {number}
+     */
     get position() {
       if (!this.buffer) return 0;
       if (!this.playing || !this.ctx) return this.offset;
@@ -237,12 +485,45 @@
       return Math.max(0, Math.min(dur, t));
     }
 
+    /**
+     * Subscribe to per-frame position updates while something is playing — one
+     * call per animation frame, which is what the playhead is drawn from.
+     * @param {function(number, number): void} fn - `(position, duration)` in
+     *   seconds.
+     * @returns {function(): void} `unsubscribe()`.
+     */
     onTick(fn) { this._tickHandlers.add(fn); return () => this._tickHandlers.delete(fn); }
+    /**
+     * Subscribe to transport changes (play, pause, seek, bypass, end of
+     * window) — the events a button's label is derived from, rather than
+     * polled.
+     * @param {function(EngineState): void} fn - called with the new state.
+     * @returns {function(): void} `unsubscribe()`.
+     */
     onState(fn) { this._stateHandlers.add(fn); return () => this._stateHandlers.delete(fn); }
 
+    /**
+     * Emit the current transport state to every subscriber. Never throws out:
+     * a subscriber with a bug must not stop the transport.
+     * @private
+     * @returns {void}
+     */
     _notifyState() { for (const fn of this._stateHandlers) fn({ playing: this.playing, position: this.position, bypass: this.bypass }); }
 
+    /**
+     * Start the animation-frame loop that reports positions, and end playback
+     * cleanly when a non-looping window has been played out.
+     * @private
+     * @returns {void}
+     */
     _startTick() {
+      /**
+       * One animation frame: report the current position to every tick
+       * listener, and — when a non-looping window has just run out — park the
+       * transport back at the window's start, stop the source and announce it.
+       * Re-armed from inside itself for as long as playback lasts.
+       * @returns {void}
+       */
       const step = () => {
         if (!this.playing) return;
         const pos = this.position;
@@ -267,8 +548,18 @@
      * @param {Float32Array[]} channels source audio
      * @param {number} sampleRate source/target sample rate
      * @param {object} params parameter map (see presets.buildParams)
-     * @param {{onProgress?:(p:number)=>void, progressSteps?:number}} [opts]
-     * @returns {Promise<{channels:Float32Array[], sampleRate:number}>}
+     * @param {(Float32Array[]|AudioBuffer)} source - audio to render;
+     *   channels[0] must be the longest of the channels, and every channel the
+     *   same length.
+     * @param {number} sampleRate - target sample rate in Hz, clamped to
+     *   8000…192000; a source `AudioBuffer` contributes its own rate as the
+     *   input side.
+     * @param {EngineParams} params - the parameter map (`RSPresets`).
+     * @param {RenderOptions} [opts] - progress and the optional neural curve.
+     * @returns {Promise<RenderResult>} channels, their rate, and the same audio
+     *   as an `AudioBuffer`.
+     * @throws {Error} `'OfflineAudioContext unavailable'` when the browser has
+     *   no offline context, and the worklet-load errors of `init()` otherwise.
      */
     async render(source, sampleRate, params, opts) {
       const o = opts || {};
@@ -357,6 +648,13 @@
 
       // OfflineAudioContext.suspend() is the only way to report progress during a
       // render — it must be scheduled *before* rendering starts.
+      /**
+       * Queue the next progress suspension, and the one after it:
+       * `OfflineAudioContext.suspend()` only works when it is called *before*
+       * the render starts, so the whole ladder is arranged up front and each
+       * slot reports its position as it is reached.
+       * @returns {void}
+       */
       const schedule = () => {
         if (!steps || next > steps) return;
         const when = (duration * next) / (steps + 1);
@@ -427,6 +725,9 @@
      *   (kept so the method is still usable as a drop-in, memory-saving
      *   alternative without a sink — tests rely on this). The entire point
      *   of `onChunk`/a streaming sink is to never need that full array.
+     * @throws {Error} `'OfflineAudioContext unavailable'` on a browser without
+     *   one; otherwise the chunk size, the crossfade and the preroll all have
+     *   safe defaults and cannot throw.
      */
     async renderChunked(source, sampleRate, params, opts) {
       const o = opts || {};
@@ -566,6 +867,19 @@
      * setup/param-apply/startRendering sequence exactly, just scoped to a
      * slice of the source instead of all of it.
      * @private
+     * @param {Float32Array[]} spanSrcChans - input slice, at `inRate`.
+     * @param {number} inRate - sample rate of the input slice in Hz (the graph
+     *   resamples when it differs from `sr`).
+     * @param {number} sr - rate the span is rendered at, in Hz.
+     * @param {number} nCh - channel count, 1 or 2.
+     * @param {EngineParams} params - parameters for this span.
+     * @param {number} spanOutLen - length of the span to render, in samples at
+     *   `sr`.
+     * @param {{bandsHz: number[], gainsDb: (number[]|Float64Array)}|null} neuralCurve
+     *   - the optional pre-computed Stage-7 curve, posted to the worklet before
+     *   the graph starts.
+     * @returns {Promise<Float32Array[]>} the rendered span, one array per
+     *   channel.
      */
     async _renderSpan(spanSrcChans, inRate, sr, nCh, params, spanOutLen, neuralCurve) {
       const Ctor = global.OfflineAudioContext || global.webkitOfflineAudioContext;
@@ -604,7 +918,18 @@
     }
   }
 
+  /**
+   * The constructor is exported too, so the tests can build an engine with a
+   * stubbed Web Audio layer per case; the app itself only ever uses the
+   * singleton below.
+   */
   global.RSAudioEngine = AudioEngine;
+  /**
+   * The application's one live engine instance. Rendering does not use it —
+   * `render()`/`renderChunked()` are stateless per call — so a long render can
+   * run while this instance keeps monitoring.
+   * @type {AudioEngine}
+   */
   global.RSEngine = new AudioEngine();
   if (typeof module !== 'undefined' && module.exports) module.exports = AudioEngine;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

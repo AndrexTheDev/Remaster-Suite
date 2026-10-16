@@ -11,9 +11,52 @@
  *   RSi18n.t('meta.line', {d:'3:12', ...})   → "3:12 · Stereo · 44,1 kHz · 7,2 MB"
  *   RSi18n.setLang('en')                     → re-applies every [data-i18n*]
  * ========================================================================== */
+/**
+ * @fileoverview Bilingual UI text (DE / EN) — exposed as the global `RSi18n`
+ * (`globalThis.RSi18n`).
+ *
+ * Every visible word of the application comes from here: labels, hints,
+ * tooltips, the plain-language diagnosis, status pills, error messages and the
+ * legal overlays. `RSi18n.t()` is the only way text enters the page, and the
+ * tests hold the two dictionaries to the same key set — a missing translation
+ * is a failing check, not a German word in the English UI.
+ *
+ * Keys are namespaced by area (`ctl.*`, `drop.*`, `chip.*`, `find.*`,
+ * `diag.*`, `err.*`, `legal.*`, …, plus the dynamic `find.act.*` family that is
+ * completed at runtime). Values may contain `{placeholder}` slots filled by
+ * {@link RSi18n.t}, and the small number of values that carry markup are
+ * marked with an `html: true` sibling in {@link RSi18n.DICT}, which
+ * {@link RSi18n.isHtml} reports.
+ *
+ * Usage
+ *   RSi18n.t('ctl.power')                    → "Restaurationskraft"
+ *   RSi18n.t('meta.line', {d:'3:12', ...})   → "3:12 · Stereo · 44,1 kHz · 7,2 MB"
+ *   RSi18n.setLang('en')                     → re-applies every [data-i18n*]
+ *
+ * @module RSi18n
+ */
 (function (global) {
   'use strict';
 
+  /**
+   * One language's table: dictionary key → text. Values are plain strings; a
+   * handful of `legal.*` and `help.*` entries carry markup and are only ever
+   * written into `[data-i18n-html]` nodes.
+   * @typedef {Object<string, string>} LangTable
+   */
+
+  /**
+   * Both tables, keyed by language. Every key exists in both — the suites
+   * compare the key sets and fail on a one-sided entry.
+   * @typedef {Object} Dictionary
+   * @property {LangTable} de - German, the source language of the project.
+   * @property {LangTable} en - English.
+   */
+
+  /**
+   * The dictionaries themselves.
+   * @type {Dictionary}
+   */
   const DICT = {
     /* --------------------------------------------------------------- German */
     de: {
@@ -784,26 +827,54 @@
     },
   };
 
+  /**
+   * The languages the app offers, in menu order. `de` first because it is the
+   * fallback language of every lookup.
+   * @type {string[]}
+   */
   const LANGS = ['de', 'en'];
+  /**
+   * The language currently in effect. Only {@link RSi18n.setLang} may change
+   * it, so a caller never has to reason about a half-applied language.
+   * @type {string}
+   */
   let lang = 'de';
 
   /* ------------------------------------------------------------------ helpers */
 
+  /**
+   * Whether a key's value in the current language carries markup. Callers use
+   * it to decide between `textContent` and a reviewed `[data-i18n-html]`
+   * assignment — never as a licence to inject anything.
+   * @param {string} key - dictionary key.
+   * @returns {boolean} `true` when the current value contains `<`.
+   */
   function isHtml(key) {
     const v = DICT[lang][key];
     return typeof v === 'string' && v.indexOf('<') !== -1;
   }
 
-  /** Interpolate {placeholders}. */
+  /**
+   * Interpolate `{placeholder}` slots in a template. A placeholder with no
+   * matching variable is left *visible* on purpose — an empty gap in a
+   * sentence is worse than seeing `{v}` and reporting it.
+   * @param {string} str - the template, as stored in the dictionary.
+   * @param {Object<string, (string|number)>} [vars] - the values to fill in.
+   * @returns {string} the filled string, or `str` unchanged when `vars` is
+   *   missing (the common case for a static label).
+   */
   function fill(str, vars) {
     if (!vars) return str;
     return str.replace(/\{(\w+)\}/g, (m, k) => (vars[k] === undefined ? m : String(vars[k])));
   }
 
   /**
-   * Translate a key.
-   * @param {string} key
-   * @param {object} [vars] placeholder values
+   * Translate a key in the current language, falling back to German and then to
+   * the key itself — so a missing translation is a visible key, never an empty
+   * label or a crash.
+   * @param {string} key - dictionary key, e.g. `'ctl.power'`.
+   * @param {Object<string, (string|number)>} [vars] - placeholder values.
+   * @returns {string} the translated text.
    */
   function t(key, vars) {
     const table = DICT[lang] || DICT.de;
@@ -813,7 +884,13 @@
     return fill(s, vars);
   }
 
-  /** Pick the best starting language: stored choice → browser → German. */
+  /**
+   * Pick the best starting language from the browser's own preference list:
+   * anything starting with `de` gets German, everything else English (a
+   * Spanish browser reads the English UI, not the German one). Never throws —
+   * a hostile `navigator` getter falls back to German.
+   * @returns {string} `'de'` or `'en'`.
+   */
   function detect() {
     try {
       const nav = (global.navigator && (global.navigator.language || (global.navigator.languages || [])[0])) || 'de';
@@ -821,7 +898,16 @@
     } catch (e) { return 'de'; }
   }
 
-  /** Apply every translation to a DOM subtree (defaults to the whole document). */
+  /**
+   * Apply every translation to a DOM subtree, by attribute: `data-i18n` →
+   * `textContent`, `data-i18n-html` → reviewed markup, `data-i18n-title` →
+   * `title`, `data-i18n-aria` → `aria-label`. Also sets the document's `lang`
+   * attribute, which is what makes a screen reader pronounce the German page
+   * in German. IDs, classes and structure are never touched.
+   * @param {(Document|Element)} [root=document] - subtree to re-render; a card
+   *   built after a language switch can be translated on its own.
+   * @returns {void}
+   */
   function apply(root) {
     const scope = root || global.document;
     if (!scope || !scope.querySelectorAll) return;
@@ -841,7 +927,12 @@
     if (global.document && global.document.documentElement) global.document.documentElement.lang = lang;
   }
 
-  /** Localised date for the legal overlays. */
+  /**
+   * Today's date, written the way each language writes dates (`16. Oktober
+   * 2026` versus `October 16, 2026`) — used where the legal texts have to name
+   * the day they were shown.
+   * @returns {string} the localised date.
+   */
   function today() {
     const d = new Date();
     const months = lang === 'de'
@@ -852,7 +943,18 @@
       : `${months[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
   }
 
-  /** Switch language and re-render every tagged node. */
+  /**
+   * Switch the language and re-render every tagged node. An unknown language
+   * falls back to German rather than leaving the app in a language it has no
+   * strings for.
+   * @param {string} next - `'de'` or `'en'`.
+   * @param {{apply?: boolean}} [opts] - `apply: false` switches the variable and
+   *   the document title without walking the DOM, for callers that re-render
+   *   themselves.
+   * @returns {string} the language actually set.
+   * @fires CustomEvent - `'rs:lang'` on `global`, with `{detail: {lang}}`, so
+   *   the app can repaint what it derives from the language without polling.
+   */
   function setLang(next, opts) {
     if (LANGS.indexOf(next) === -1) next = 'de';
     lang = next;
@@ -866,10 +968,33 @@
     return lang;
   }
 
-  /** All keys of a language — used by the test suite for completeness checks. */
+  /**
+   * Every key of a language, for completeness checks and for callers that
+   * translate a list of keys in one go.
+   * @param {string} [l=current language] - `'de'` or `'en'`.
+   * @returns {string[]} the language's keys, in declaration order.
+   */
   function keys(l) { return Object.keys(DICT[l || lang]); }
 
+  /**
+   * The public surface, assigned to `global.RSi18n` below.
+   * @typedef {Object} RSi18nApi
+   * @property {string[]} LANGS
+   * @property {Dictionary} DICT - both tables, exposed because the tests and
+   *   the audit read keys directly.
+   * @property {function(string, Object=): string} t
+   * @property {function((Document|Element)=): void} apply
+   * @property {function(string, {apply?: boolean}=): string} setLang
+   * @property {function(): string} detect
+   * @property {function(string=): string[]} keys
+   * @property {function(string): boolean} isHtml
+   * @property {string} lang - the current language (getter; no setter, so the
+   *   only way to change it is `setLang`).
+   */
+
+  /** @type {RSi18nApi} */
   const API = { LANGS, DICT, t, apply, setLang, detect, keys, isHtml, get lang() { return lang; } };
+  /** @type {RSi18nApi} */
   global.RSi18n = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
