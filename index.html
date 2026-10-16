@@ -7,6 +7,7 @@
 <meta name="description" content="Harmonic Restoration — Remaster Suite. Repariert alte, dumpfe oder verrauschte Aufnahmen direkt im Browser: Signalverarbeitung direkt auf dem Gerät, keine Uploads, kein Server. / Restores old, muffled or noisy recordings right in your browser: 100 % client-side, no uploads, no server.">
 <meta name="theme-color" content="#0d0f12">
 <meta name="color-scheme" content="dark">
+<script src="coi-serviceworker.js"></script>
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -77,6 +78,14 @@
       <li><span class="n">2</span><span class="t" data-i18n="steps.2">Automatisch prüfen</span></li>
       <li><span class="n">3</span><span class="t" data-i18n="steps.3">Vergleichen &amp; speichern</span></li>
     </ol>
+
+    <button type="button" class="btn-magic" id="btnMagicFix" data-i18n-title="magic.hint" title="Wendet automatisch die beste Kombination an und verarbeitet alles — ganz ohne Regler.">
+      <span class="btn-magic-ico" aria-hidden="true">✨</span>
+      <span class="btn-magic-text">
+        <strong data-i18n="magic.cta">KI Magic-Fix</strong>
+        <small data-i18n="magic.sub">Ein Tipp: Profil erkennen, sanft entrauschen, entklippen, Höhen synthetisieren — fertig.</small>
+      </span>
+    </button>
   </section>
 
   <!-- ═════════════════════════════════════════ dropzone ═════════════════════ -->
@@ -106,6 +115,7 @@
   <!-- ═════════════════════════════════════ control bar ══════════════════════ -->
   <section class="controls-wrap" id="controls" hidden>
     <div class="wrap controls">
+    <div class="ctl-rack" id="ctlRack">
       <div class="ctl-group">
         <label class="ctl" for="power">
           <span class="ctl-label" data-i18n="ctl.power">Restaurationskraft</span>
@@ -162,6 +172,16 @@
           <option value="32">WAV 32 Bit</option>
         </select>
       </div>
+
+      <div class="ctl-group" id="neuralGroup">
+        <label class="ctl-check" id="neuralLabel" data-i18n-title="ctl.neuralHint" title="Nutzt ein neuronales Modell, um bei stark komprimierten Dateien die abgeschnittenen Höhen über die DSP-Luftsynthese präziser wiederherzustellen.">
+          <input type="checkbox" id="neuralToggle">
+          <span data-i18n="ctl.neural">KI-Höhenrekonstruktion</span>
+        </label>
+        <span class="ctl-hint" id="neuralStatus" data-i18n="ctl.neuralUnavailable">Kein Modell gefunden — reine DSP-Kette aktiv</span>
+      </div>
+    </div>
+    <div class="ctl-dots" id="ctlDots" aria-hidden="true"></div>
 
       <div class="job" id="globalProgress" hidden>
         <div class="job-head">
@@ -368,6 +388,15 @@
   <form method="dialog"><button class="btn btn-primary" data-i18n="ui.close">Schließen</button></form>
 </dialog>
 
+<!-- ═════════════════════════════ live A/B/C compare FAB ═══════════════════ -->
+<div class="fab-ab" id="fabAB" hidden>
+  <span class="fab-ab-tip" id="fabABTip" data-i18n="fab.tip">Tippen wechselt · Halten hört Original</span>
+  <button type="button" class="fab-ab-btn" id="fabABBtn" aria-label="Original">
+    <span class="fab-ab-ring" aria-hidden="true"></span>
+    <span class="fab-ab-label" id="fabABLabel">B</span>
+  </button>
+</div>
+
 <div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>
 
 <noscript>
@@ -379,8 +408,11 @@
 <script src="assets/js/presets.js"></script>
 <script src="assets/js/i18n.js"></script>
 <script src="assets/js/library-loader.js"></script>
+<script src="assets/js/opfs-manager.js"></script>
 <script src="assets/js/codecs.js"></script>
 <script src="assets/js/analyzer.js"></script>
+<script src="assets/js/neural-controller.js"></script>
+<script src="assets/js/memory-guard.js"></script>
 <script src="assets/js/engine.js"></script>
 <script src="assets/js/ui.js"></script>
 <script src="assets/js/app.js"></script>

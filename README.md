@@ -79,7 +79,8 @@ The suite is built to be used in a phone browser:
   keep clear of the gesture area.
 * **Smaller memory budget** (420 MB instead of 900 MB estimated output) so a ZIP full of WAVs
   cannot blow up a mobile browser, and a **screen wake lock** keeps the tab alive during a long
-  render.
+  render. When the browser offers the [Origin Private File System](#streaming-batch-exports-opfs),
+  that budget stops being a hard ceiling at all — see below.
 * Verified in a real browser at 320, 360, 390, 414 and 768 px wide — no horizontal scrolling
   anywhere, in `tests/beta/beta.js` and the screenshot matrix in [`docs/beta/`](docs/beta).
 
@@ -203,6 +204,62 @@ Drop as many files as you like. They are processed **one after another** (memory
 the browser stays responsive), every file gets its own card, and *Download ZIP* bundles all
 finished results — with a `README.txt` describing what was done.
 
+#### Streaming batch exports (OPFS)
+
+A dozen 24-bit WAV masters held as plain `ArrayBuffer`s would blow past a tab's soft memory
+budget (420 MB on a phone, 900 MB on a desktop — see [On a phone](#on-a-phone)) long before the
+ZIP is even built. When the browser supports the **Origin Private File System**, the suite avoids
+that entirely instead of just warning about it:
+
+* `assets/js/opfs-manager.js` (`RSOPFS`) opens a `FileSystemSyncAccessHandle` **inside a
+  dedicated Worker** — the one place the spec allows it — and every rendered WAV/MP3 is written
+  there in ~4 MB chunks as it is encoded, never assembled as one in-memory buffer first.
+* *Download ZIP* then assembles the archive **OPFS file → OPFS file**, entirely inside that same
+  worker: a hand-written, streamed ZIP writer (STORE method, CRC-32 computed on the fly, sizes
+  recorded in a trailing data descriptor) copies each source file a chunk at a time straight into
+  the output file. The main thread only ever sees the final `{size}` — never the archive's bytes.
+* The finished file is handed to the browser as a native `File`/`Blob`, so even the download step
+  never duplicates it into the JS heap.
+* Browsers without OPFS (or without `FileSystemSyncAccessHandle` — Safari < 16.4, Firefox < 111,
+  very old Chromium) fall back to the original in-memory path automatically; the UI only shows the
+  soft-memory warning when that fallback is the one actually in use.
+
+`tests/opfs.test.js` runs the *exact worker source* `opfs-manager.js` ships to the browser inside
+a Node `vm` context against a small OPFS simulator, including a multi-megabyte streamed ZIP that
+is cross-checked with both the bundled JSZip and the system `unzip`.
+
+#### Chunked rendering for long files and mobile memory limits
+
+Streaming the *output* only helps once the file has already been decoded and rendered — a 96 kHz
+FLAC or a multi-hour DJ mix still has to exist as one whole-length `AudioBuffer`, one whole-length
+rendered signal and one whole-length encoded file in between, and on a phone that middle step is
+the one that actually runs out of room. Three pieces close that gap:
+
+* **Upload streaming.** A large freshly-picked file is copied into OPFS scratch storage the moment
+  it is added (`RSOPFS.streamFileIntoScratch()` in `assets/js/opfs-manager.js`), read in bounded
+  `file.slice().arrayBuffer()` chunks rather than one `file.arrayBuffer()` call — `app.js` then
+  rebinds the card to that disk-backed copy. Small files skip the round-trip entirely.
+* **Chunked offline rendering.** `assets/js/engine.js` adds `Engine.renderChunked()` alongside the
+  existing whole-file `Engine.render()` (which is unchanged and still used for the live preview,
+  the A/B window and every file below the chunking threshold). It renders independent, short
+  `OfflineAudioContext` spans — 10 seconds by default, with up to a second of preroll so stateful
+  filters (the mains-hum PLL, the de-click/de-clip detectors) can resettle, and a 50 ms lookahead
+  tail — and blends consecutive chunks with a linear, level-preserving crossfade (not an equal-power
+  one, which would add up to +3 dB at the midpoint of two near-identical, correlated renders of the
+  same underlying audio) instead of a hard seam. Each
+  finished chunk is hashed straight into an incremental encoder
+  (`Codecs.createWavStreamEncoder()` / `createMp3StreamEncoder()` in `assets/js/codecs.js`) and
+  written to the OPFS output file, then dropped — the full restored or encoded signal never exists
+  as one array. `app.js`'s `renderCard()` only takes this path once a file is both long enough and
+  OPFS is available; every shorter file still renders in a single pass exactly as before.
+* **Mobile memory budget guard.** `assets/js/memory-guard.js` (`RSMemoryGuard`) reads Chromium's
+  `performance.memory` heap snapshot where it exists (desktop and Android Chrome/WebView) and
+  shrinks the next chunk size as the heap fills past 70%, down to a 2-second floor past 90%.
+  `Engine.renderChunked()` consults it automatically between chunks. The signal is honestly
+  Chromium-only — iOS Safari exposes nothing like it — so the real, cross-platform guarantee is the
+  chunked architecture itself always working in small, bounded pieces; the watchdog is a
+  best-effort second layer where the browser actually lets it look.
+
 ### Honest A/B
 
 The **Original / Restored / A/B** switch cross-fades between dry and wet *inside* the processor
@@ -222,7 +279,7 @@ and runs per sample, control-rate decimated for speed:
 | --- | --- | --- |
 | 0 | **Presence follower** | a 13 ms envelope against a one-second average; it gates every synthesis stage, so nothing is generated in a gap — the air and the sub octave arrive with the music, not with the noise floor |
 | 1 | **Input DC guard** | 2 Hz one-pole: removes a damaged file's offset without rotating the phase of the 20–60 Hz region, where the sub-bass repair works |
-| 1a | **De-clip** | a *plateau* in the waveform — one to hundreds of samples sitting flat at the file's own peak level, which is what a limited master did to its peaks — is reconstructed: the run's implied overshoot is estimated from the local period of the zero crossings, and a cosine arc is written back into it. The detector keys on the measured plateau level of *this* file, not on a constant, which is what separates clipping from a merely loud waveform: a loud but unclipped recording measures 0.0007 % flat samples and 0.07 dB of implied overshoot, a clipped one 0.39 % and 1.7 dB. It runs first among the repairs, before anything else looks at the waveform — and the output guard's knee moves up with whatever the stage reconstructed (a per-file maximum), because that guard sits *below* the plateau of a clipped master and would otherwise flatten the restored arc straight back into the flat top it came from: on a 997 Hz tone clipped at 0.99, −16.2 dB of error left in the plateau with a fixed knee against −29.1 dB with the knee lifted |
+| 1a | **De-clip (CBAR)** | a *plateau* in the waveform — one sample to over a thousand sitting flat at the file's own peak level, which is what a limited master (or, on an extended run, a historical transfer's motor overload) did to its peaks — is reconstructed by one of three models, in order of how much evidence the run itself carries. A **short** run (≤ 269 samples, 5.6 ms) is solved exactly as before: the run's implied overshoot comes from the local period of the zero crossings where one is trustworthy, from a Hermite cubic through the two real neighbouring samples and their slopes where it is not, and whichever model predicts more is the one taken. A **longer but still periodic** run — a slow, heavily overloaded bass note whose flat top outlasts the old 269-sample ceiling — uses the *same* length-solves-for-the-peak formula (a sine of amplitude A clipped at T stays at or above T for T/A ≤ cos(ω·len/2), which does not get weaker as the run gets longer: it is exact up to half the signal's own period, which is also the hard ceiling on how long a same-sign run can ever be) but draws it as a symmetric raised-cosine arc over the *whole* run instead of a single bounded cubic, because a long span has more independent length-evidence to lean on than two sampled boundary slopes do. A run with **no reliable period** (broadband overload, clipped noise) falls back to CBAR proper — Constrained Blind Amplitude Reconstruction: an order-16 autoregressive model (Levinson–Durbin) is fit separately to the 128 samples of real audio immediately before the run and the 128 immediately after, each run forward as a zero-input filter across the gap, the two extrapolations cross-faded with a raised-cosine weight, and the result constrained to never cross back below the measured clip rail — so a run nothing can be inferred about settles honestly at the flat top it started at, rather than at a guess. The detector keys on the measured plateau level of *this* file, not on a constant, which is what separates clipping from a merely loud waveform: a loud but unclipped recording measures 0.0007 % flat samples and 0.07 dB of implied overshoot, a clipped one 0.39 % and 1.7 dB. Measured on a 25 Hz tone at twice the clip level (70 % of each half-cycle flat, 679 samples long — far beyond anything the old 269-sample ceiling could touch at all) the shape error against the known original goes from −13.9 dB unrepaired to −33.7 dB repaired by the periodic model; a milder 30 Hz/456-sample case goes from −18.0 to −43.7 dB; a clipped noise burst (no period to find) still produces zero non-finite samples and never reads worse than the flat top it replaced. It runs first among the repairs, before anything else looks at the waveform — and the output guard's knee moves up with whatever the stage reconstructed (a per-file maximum), because that guard sits *below* the plateau of a clipped master and would otherwise flatten the restored arc straight back into the flat top it came from: on a 997 Hz tone clipped at 0.99, −16.2 dB of error left in the plateau with a fixed knee against −29.1 dB with the knee lifted |
 | 1b | **Sub-sonic guard** | a 4-section (48 dB/octave) high-pass at the corner the measurement asks for: 18–24 Hz where a turntable's rumble sits *below* the music, escalating to 42 Hz — the top of the band the statistic calls rumble — only when the quiet passages are **saturated** with it (8 dB or more of the app's own excess). A turntable's rumble lives down there and no instrument does, which is why the corner stays low unless the floor itself is the defect |
 | 2 | **Static EQ bank** | 6 biquads: 60 Hz shelf, 200 Hz mud, 450 Hz box, 1.3 kHz honk, 3.2 kHz presence, 7 kHz air — the profile's anchors, dosed from the measurement |
 | 2b | **Per-song corrective EQ** | 12 bands, 50 Hz … 8 kHz at Q 1.4, correcting the file's own departures from its own spectral trend — net of what the six profile bands do. ±1.5 dB dead zone, ±6 dB cap, no boost near the noise floor, no correction in a band the file does not fill |
@@ -233,11 +290,12 @@ and runs per sample, control-rate decimated for speed:
 | 5b | **De-esser** | a dynamic dip over 5.2–9.5 kHz, keyed on the fast/slow ratio of that band: a quiet "s" and a loud one are the same problem, and a recording without sibilance measures zero. The *diagnosis* that arms it is a per-frame scan of the 7 kHz/2.6 kHz balance, and it has been cheated twice by material that is not a sibilant — a phrased organ (the 2.6 kHz band falls between the phrases, so the balance "rises" 4.3 dB: the old scan read 4.29 and the card named `sibilance` on a clean organ) and a sustained cymbal wash (the balance is over zero *all the time* — a wash breathes everywhere — and the median tilt of +4.73 dB, real enough, was amplified by 2 into a 0.61 dose). The scan now asks two things of the peak frame: the balance must *cross over* (7 kHz above 2.6 kHz, the one claim a sibilant makes by definition) and the file's own median balance must not already be over zero — and a file whose median frame *is* top-heavy is asked for a band-limited top end (7 kHz over 12 kHz: −0.5 dB on the wash, +2.1 on a continuous "s", +4.1…+4.8 on every burst fixture) before its median tilt may count as evidence. Measured: the organ 4.29 → 0.00 and the wash 2.52 → 0.00 of scan, both `deess 0.000`, both never ducked by the chain (+1.00 and +0.35 dB of 7 kHz, the tone stage's own lift); a singer whose "s" never stops still reads `sibilance` with a 0.558 dose and the chain takes its own 7 kHz band down 5.0 dB. Its amount is a *measurement*, like the de-hisser's: the law hands it zero unless a departure was measured, so the intensity curve was scaling the file's own reading — it took 0.830 of it, and the app's own export of §10's burst fixture came back diagnosed `sibilance` because of it. Measured with the curve removed (probes `sib11/sib12.js`, and the acceptance matrix's own §10 rows): the 7 kHz band of the loudest frames down 3.06 instead of 2.61 dB, the scan the card names the defect with 5.46 → 2.43, and the export **healthy** at a 0.226 dose against the 0.255 naming line. Every clean fixture still measures a dose of exactly 0. It sits before the synthesisers, so the exciter and the air cannot rebuild what it just removed |
 | 6 | **Harmonic exciter** | 3 bands, each: band-pass → asymmetric saturation (even *and* odd harmonics) → band-pass → envelope gate. Synthesise the overtones that were never recorded. |
 | 7 | **Air synthesis 8–16 kHz** | takes the surviving 4.5–7.5 kHz band and generates 2nd/3rd order content above it, gated by the presence follower and limited to a fraction of the band it came from |
+| 7b | **Neural air coupling (optional, off by default)** | six fixed peaking filters (8–22 kHz, clamped to ±12 dB) re-shape what stage 7 just built, driven by a dB correction curve an optional neural model predicts *offline*, once, from the dry source — see [Optional neural enhancement](#optional-neural-enhancement). It never synthesises a waveform of its own; stage 7 stays the only thing that puts energy above the cliff, this stage can only re-shape it, and it is bit-identical to not existing unless both a curve was posted and the control is turned on |
 | 8 | **Sub-bass 30–60 Hz** | 6th-order low pass → hysteresis zero-crossing detector → divide-by-two pitch tracking → oscillator with a gated envelope. A 60–120 Hz bass line gains its missing bottom octave. |
 | 9 | **Glue compressor** | soft 2:1 with automatic make-up; attack and release follow the file's measured percussive character. When `dynamicRangeDb < 12`, the dose is halved and warmth is capped: a squashed master is not compressed again. Measured on the acceptance fixture, the app reads **8.70 → 8.27 dB** and the independent 20 ms envelope reads **12.82 → 11.45 dB** — the class stays `squashed`; no transient shaper is shipped because the peaks are no longer present to reconstruct |
 | 10 | **Warmth + tilt** | gentle saturation and a low/high shelf pair for the final tone balance |
-| 11 | **Stereo (M/S)** | a bass that measured out of phase in one channel is folded to mono below 200 Hz; the side signal of an image that measured narrow but not mono is lifted back towards the programme's own bandwidth, and a mono master is never widened |
-| 12 | **Mains hum notch** | three biquads, three hertz wide, at the measured mains frequency and its harmonics — dosed from the level the line stands above its own neighbourhood, and placed *after* every stage that can put low-frequency energy back. Bypassed completely when nothing was measured |
+| 11 | **Stereo (M/S) & tape-azimuth correction** | before the mid/side split: a sliding cross-correlation between the high-passed (above 3 kHz) channels finds the sub-sample lag that maximises their agreement over a 12 ms window — refined to a fraction of a sample by a parabolic fit through the search's peak and its two neighbours, re-estimated every 20 ms — and the lagging channel is delayed to meet the other through a first-order (Thiran) fractional-allpass filter, phase-only and with no look-ahead of its own. This is the repair for a tape head tilted a few microradians off true vertical (a worn cassette or reel transport's classic defect): the two tracks are read a few hundred microseconds apart, which is inaudible as a polarity fault (a bass wavelength dwarfs the skew, so the bottom stays correlated) and turns into a comb filter the instant the pair is summed to mono, which is the complaint an off-azimuth transfer actually produces. The correction is its own guard: `confidence` is the normalised correlation improvement the estimated lag actually delivers over doing nothing, so a hard-panned mix or a double-tracked part that only *looks* like a timing defect is left alone, and silence or an already-aligned pair reads the same way. Measured against a known ground truth (a broadband signal and a copy of it delayed by a known sub-sample amount): the mono-sum high-band energy loss from the comb filter goes from −1.0…−3.8 dB at 1.2–2.7 samples of simulated skew to −0.05…−0.09 dB once corrected, independent L/R material keeps a confidence of 0.1 or below (no audible correction applied), and an already-aligned pair is not pulled apart. After alignment: a bass that measured out of phase in one channel is folded to mono below 200 Hz; the side signal of an image that measured narrow but not mono is lifted back towards the programme's own bandwidth, and a mono master is never widened |
+| 12 | **Mains hum notch, adaptive PLL-tracked** | three biquads, three hertz wide, at the mains fundamental and its harmonics — dosed from the level the line stands above its own neighbourhood, and placed *after* every stage that can put low-frequency energy back. Bypassed completely when nothing was measured. The frequency driving all three notches is no longer the value measured once at t = 0: a per-channel software PLL (lock-in/synchronous detector) tracks it continuously across the whole file, inside the 45–65 Hz capture range the task specifies. A self-tracking bandpass (Q ≈ 6, recut only when the estimate has moved enough to matter) isolates the fundamental's neighbourhood; a local oscillator is quadrature-mixed against it and each arm low-passed at 6 Hz, which leaves the two mix outputs converging on (A/2)·sin(φ−θ) and (A/2)·cos(φ−θ) — so `atan2(mixI, mixQ)` is the signed phase error, zero at lock, independent of the hum's own amplitude; a critically damped PI loop filter (natural frequency 0.3 Hz, chosen so the estimate settles in about a second without overshoot) steers the local oscillator's frequency, which is what the notches are retuned from. A motor that holds dead steady needed nothing extra: the measured mains notch above already covers it. What it does not cover is the motor that does not hold steady — a worn belt or a tired capstan loses a hertz or more of platter/transport speed over a side, which is wider than the notch's own three-hertz skirt — and that is what this closes: on a synthetic 50 → 48 Hz linear drift over 20 s (realistic worst-case belt wear, deliberately built wider than the notch skirt so a lucky-width pass cannot be the reason), the line that survives a frequency-frozen notch at −19.3 dB comes down to −22.9 dB once the PLL tracks it, 3.6 dB of extra attenuation measured against the drift's own known instantaneous frequency, not a fixed bin (`tests/dsp.test.js`). A first implementation of the phase detector used the mathematically adjacent but wrong convention (`atan2(mixQ, mixI)` with the quadrature arm built from `xb·(−sin θ)`), which puts the detector's zero at a quarter-cycle phase error rather than true lock: on a steady, driftless 50 Hz tone the estimate did not hold 50 Hz, it walked monotonically away from it (49.99 Hz at 0.5 s to 49.73 Hz at 9.5 s and still falling), the same class of sign inversion row 11's azimuth corrector shipped with and was caught by its own regression test — fixed the same way here, before it ever reached the worklet |
 | 13 | **Output** | 2 Hz DC guard (keeps the offset the saturation stages can add out of the export), auto level match, then a tanh soft-clip guard that saturates at −0.02 dBFS so a 16-bit export can never hit the rail. Its knee — and the hard rail behind it — moves up by whatever the de-clipper reconstructed, so the guard that protects the export cannot undo the repair; on a file that was not de-clipped both are exactly what they always were |
 | 14 | **True-peak limiter** | the export ceiling. Samples under full scale do not mean the *waveform* is under it, and a codec that has to encode an overdriven waveform distorts it — so the last stage holds the file to the true-peak target every streaming service asks for: −1 dBTP, or −2 dBTP when the master is louder than −14 LUFS. The peak is estimated between the samples with the same 32-tap windowed sinc the *measurement* (`ispDb`) uses — one shared definition of what the waveform does between the samples, so the stage that enforces the ceiling and the meter that reports it cannot disagree. It was a seven-tap sinc once, and on a bright percussive master that read 0.5 dB low: the export measured −1.60 dBTP by two independent meters while the app claimed −2.10, i.e. over the ceiling it had just been given. With 32 taps agreeing with ffmpeg's `ebur128` to 0.00–0.03 dB on tonal, squashed and percussive material, the ceiling holds where it says it does (−2.10 dBTP measured on all three). The gain is computed 1.5 ms ahead of the sample it applies to and minimised over that window, and the detector is shared between the channels so the image cannot move. A file already under the ceiling is bit-transparent (`gain = 1.000000`, no level change); a file over it comes down by the overshoot it had — and the *file the user keeps* is the MP3, not the render: a lossy encoder re-shapes the waveform between the samples, so its own overshoot comes out of that promise. Measured through the app's own export path (lamejs, the app's 16-bit dither and its 72000-sample chunking; ffmpeg's `ebur128` as an independent 4× oversampled meter), a dense master rendered *at* its ceiling comes back **+2.00 / +0.60 / +0.40 / +0.40 dB** over it at 128 / 192 / 256 / 320 kbit/s — and at 128 kbit/s the app's own findings list then named `truePeak` on the re-upload of its own export, the same shape of dishonesty as the sinc that read 0.5 dB low. So a lossy export lowers the render's ceiling by the worst overshoot measured at that bitrate (`Presets.codecMargin`: 2.1 / 0.8 / 0.5 / 0.5 dB) before the encoder ever runs, and the monitor is built from the same parameters, so what you hear is still what you save. A file that stays under the ceiling is bit-transparent to the margin (measured: 0.00 dB), so the room is only paid for by a master whose limiter is already working. The bitrates the UI offers (192/256/320) each carry their own margin, and the audit re-derives that arithmetic from the export markup itself |
 
@@ -248,8 +306,13 @@ repairs that cannot be done without seeing a little of the future:
 * the **de-clicker** needs half a millisecond of look-ahead to repair the part of a codec-smeared
   pop that sits *before* the spike the detector fired on (17 samples at 48 kHz, 0.35 ms), and the
   millisecond *behind* it that the click's ring-out is fitted over (48 samples, 1.00 ms — one number, 65 samples);
-* the **de-clipper** waits for the end of a flat run before it can reconstruct it (271 samples at
-  48 kHz, 5.6 ms — the longest run it will repair);
+* the **de-clipper** waits for the end of a flat run before it can reconstruct it, plus — now that
+  an extended, non-periodic run falls back to CBAR's forward/backward AR model — the 128 samples of
+  real audio collected *after* the run for the backward half of that fit (1330 samples at 48 kHz,
+  27.7 ms: 1200 the longest run it will ever track open-ended, plus 128 of trailing context, plus a
+  few samples of margin). A short or periodic run resolves in a fraction of that and never needs the
+  worst case, but the stage's reported latency is one fixed number regardless, so the chain stays
+  sample-aligned whichever model a given run actually took;
 * the **true-peak limiter** computes the gain 1.5 ms ahead of the sample it applies to, plus the
   sixteen samples the interpolator reaches past that interval (88 samples at 48 kHz), because a
   ceiling that is only enforced after the peak has passed is a clipper.
@@ -290,10 +353,56 @@ parsed to find it), then encodes:
   −1…1 float mix would be written out as a silent file), and the stream is checked for a frame
   header and a plausible length before the download starts
 
-A ZIP containing hundreds of megabytes of WAVs would blow up browser memory, so the app keeps an
-eye on the projected size and warns before you pack.
+A ZIP containing hundreds of megabytes of WAVs would blow up browser memory if it were built from
+plain in-memory buffers — so, where the browser allows it, it isn't: see
+[Streaming batch exports (OPFS)](#streaming-batch-exports-opfs). Where it can't (no OPFS support),
+the app falls back to the original in-memory path and keeps an eye on the projected size, warning
+before you pack.
 
 ---
+
+## Optional neural enhancement
+
+**Off by default, and invisible unless both a model is installed and the toggle is turned on.** Next to
+the export format row is "AI high-frequency reconstruction" (`#neuralToggle`); it stays disabled, with a
+status line explaining why, until `neural-controller.js`'s probe finds at least one model and a working
+execution provider. Nothing about the pure-DSP chain changes when it is off — this is additive-only, not
+a different mode.
+
+* **Execution.** [`assets/js/neural-worker.js`](assets/js/neural-worker.js) runs `onnxruntime-web` in a
+  dedicated Worker. On a phone or tablet (`/Mobi|Android|iPhone/i` against `navigator.userAgent`) with
+  WebNN available, it tries WebNN first — the only web API that can reach an on-device NPU, probed
+  NPU → GPU → CPU device type — then WebGPU (with fp16 weights once the adapter confirms `shader-f16`),
+  then WASM-SIMD; everywhere else WebGPU still goes first. Every provider is its own try/catch, so an
+  unsupported op or a refused context falls straight through to the next one, never to a failed call. The
+  library itself is fetched from a CDN only once a model is actually used (see [Privacy](#privacy)) — it
+  is never bundled (the npm package unpacks to ≈145 MB) and never loaded just because the toggle exists on
+  the page.
+* **Models.** Two restoration models — [DeepFilterNet3](https://github.com/Rikorose/DeepFilterNet)
+  (noise suppression) and [BS-RoFormer](https://github.com/ZFTurbo/Music-Source-Separation-Training)
+  (stem separation: vocals / drums / bass / other) — and the Stage-7 air coupling below are all wired to
+  real, published ONNX export contracts, but **no weights ship with this repository.** Drop a model's
+  `.onnx` file (and its auxiliary weights, where the export needs one) into OPFS or a same-origin
+  `models/<name>/` folder to activate it; with nothing there, every call cleanly reports
+  `{applied: false, reason: 'weights-not-found'}` and the DSP chain runs exactly as it always has. On
+  mobile, the smallest quantised variant a model publishes (int4, then int8) is preferred over fp16/fp32,
+  to keep resident weights under ≈80 MB of VRAM — the same clean "nothing installed" fallback applies
+  either way.
+* **Stage 7 coupling, not AudioSR.** A real AudioSR is a 258 M-parameter latent-diffusion model (UNet +
+  VAE + HiFi-GAN, 50 sampling steps, over a gigabyte of weights) — nothing a browser tab can run at a
+  usable speed. What ships instead keeps this project's existing, phase-correct `AirSynth` harmonic
+  regenerator (row 7 of [the signal chain](#the-signal-chain)) as the only thing that ever synthesises a
+  waveform above the codec cliff, and asks a (not yet installed) model only for a small per-band dB
+  correction curve — six fixed peaking filters apply it, blended in by the `airNeural` amount, clamped to
+  ±12 dB so a bad prediction can never do more than a gentle shelf could.
+* **When it runs.** Only on the final export render, never on the live preview or the A/B comparison
+  window — both re-render on every slider nudge, and inference is not instant.
+* **Thermal/memory throttle fallback.** Every inference call is raced against a 20 s watchdog; if it times
+  out, or the error matches an out-of-memory/device-lost pattern, the model's cached session is dropped (so
+  the next call re-probes instead of reusing a dead GPU/NPU context) and the call resolves
+  `{applied: false, reason: 'oom'|'device-lost'|'timeout'}` — the render falls back to the pure DSP path
+  exactly as it does for `weights-not-found`, and a single quiet toast lets you know why, without
+  repeating itself for every call in a batch export that hits the same limit.
 
 ## Privacy
 
@@ -308,6 +417,11 @@ eye on the projected size and warns before you pack.
 * **Optional FFmpeg.wasm rescue decoder:** if a browser refuses to decode a file itself, the suite
   can pull FFmpeg.wasm (single-threaded core, so it works on plain static hosting) from unpkg and
   convert the file to WAV locally. It is never loaded unless a file needs it.
+* **Optional neural enhancement, same rule:** turning the "AI high-frequency reconstruction" toggle
+  on (see [below](#optional-neural-enhancement)) is the only thing that fetches `onnxruntime-web`
+  from the jsDelivr/unpkg CDN (≈145 MB unpacked — far too large to vendor); the *audio* never leaves
+  the machine either way, inference runs entirely in a local Worker against weights that live in
+  OPFS or a local folder, never uploaded or referenced from the network.
 
 Full text: *Privacy* in the footer of the app.
 
@@ -317,6 +431,9 @@ Full text: *Privacy* in the footer of the app.
 
 ```
 index.html                       the whole interface (markup, templates, dialogs)
+coi-serviceworker.js             cross-origin isolation bootstrap: registers itself as a
+                                 Service Worker that adds COOP/COEP response headers on
+                                 plain static hosting (see Cross-origin isolation, below)
 assets/
   css/app.css                    dark Jamaican-flag theme, responsive, no webfonts
   js/
@@ -325,9 +442,24 @@ assets/
     presets.js                   the six profiles, auto-classification, adaptive tuning (RSPresets)
     i18n.js                      every German and English string, including the legal texts (RSi18n)
     library-loader.js            bundled copies ⇄ free CDNs, optional FFmpeg.wasm (RSLibs)
-    codecs.js                    decode, WAV/MP3 encode, ZIP, download (RSCodecs)
+    opfs-manager.js            Origin Private File System scratch storage: streaming
+                                 WAV/MP3 writers and a streamed ZIP packer, both backed by
+                                 FileSystemSyncAccessHandle in a Worker (RSOPFS)
+    codecs.js                    decode, WAV/MP3 encode (in memory or streamed), ZIP, download (RSCodecs)
     analyzer.js                  file → measurements, diagnosis, waveform envelopes (RSAnalyzer)
-    engine.js                    AudioContext + AudioWorklet, live monitor and offline render (RSEngine)
+    neural-controller.js         main-thread handle onto neural-worker.js — one Promise-returning
+                                 call per model, never rejects (RSNeural)
+    neural-worker.js             optional, best-effort WebNN/WebGPU/WASM inference: DeepFilterNet3,
+                                 BS-RoFormer, and the Stage-7 air super-resolution curve, with
+                                 mobile-first EP ordering, quantised-weight selection, and an
+                                 OOM/timeout throttle fallback (worker-only, loaded with
+                                 `new Worker(...)`, not a <script> tag)
+    memory-guard.js               best-effort mobile heap watchdog: reads performance.memory where
+                                 Chromium exposes it and shrinks the next render chunk under
+                                 pressure, null-safe everywhere else (RSMemoryGuard)
+    engine.js                    AudioContext + AudioWorklet, live monitor, whole-file offline
+                                 render, and the chunked/streamed offline render for long files
+                                 on constrained devices (RSEngine)
     ui.js                        DOM helpers, toasts, dialogs, interactive waveform (RSUI)
     app.js                       state, per-card logic, batch queue (RSApp)
   worklets/
@@ -359,6 +491,14 @@ tests/
   e2e.test.js                    realistic journeys: five problem recordings, slider sweep,
                                  profile overrides, 10-file batch → ZIP, mono/32 k/96 k,
                                  hostile input (108 checks)
+  opfs.test.js                   runs the actual shipped OPFS worker source in a Node vm
+                                 against a simulated Origin Private File System: streaming
+                                 writes, a multi-megabyte streamed ZIP cross-checked with
+                                 JSZip and unzip(1), and the in-memory fallback (28 checks)
+  coi.test.js                    runs the shipped coi-serviceworker.js in a Node vm as both
+                                 a Service Worker (COOP/COEP header rewrite) and a page
+                                 script (registration, the one-reload rule, no reload loop;
+                                 19 checks)
   webaudio-stub.js               miniature Web Audio implementation for Node
   beta/
     beta.js                      the real-browser suite: every control on the page,
@@ -378,7 +518,7 @@ belong to the test suite.
 
 ```bash
 npm install          # only for the test suite (jsdom)
-npm test             # runs all five suites
+npm test             # runs all seven dependency-free suites
 node tests/dsp.test.js     # engine: transparency, sub, air, exciter, de-hiss, de-click,
                            # de-resonator, level match, power scaling, WAV/MP3/ZIP, classification
 node tests/web.test.js     # static integrity, bilingual coverage, boot, drop → analyse → render
@@ -390,6 +530,16 @@ node tests/e2e.test.js     # realistic journeys: five problem recordings, slider
                            # overrides, 10-file batch → ZIP, mono/32 k/96 k, hostile input
 node tests/tuning.test.js  # the tuning contract: octave bands, loudness, the level match, the
                            # soft-clip guard, level-normalised synthesis, honest extremes
+node tests/opfs.test.js    # the shipped OPFS worker source against a simulated file system:
+                           # streaming writes, a streamed ZIP cross-checked with JSZip and
+                           # unzip(1), the oversized-batch guard, the in-memory fallback
+node tests/coi.test.js     # the shipped coi-serviceworker.js as both a Service Worker
+                           # (COOP/COEP header rewrite) and a page script (the one-reload
+                           # rule, never a reload loop)
+node tests/mobile-ux.test.js  # the carousel effect rack, the gold "AI Magic Fix" button,
+                           # and the live A/B/C compare FAB: markup/CSS, navigator.vibrate
+                           # safety, engine.js's switchBuffer() position preservation,
+                           # the desktop-arms vs phone-auto-processes split, tap/hold
 node tests/beta/beta.js    # big beta: drives a real headless Chromium over the DevTools
                            # protocol — real clicks, real drops, real AudioWorklet, real
                            # dialogs and downloads, phone emulation at 390 and 320 px with
@@ -426,6 +576,25 @@ engine, not a mock.
 
 Decoding uses the browser's own codecs — MP3, WAV, FLAC, OGG/Vorbis and M4A/AAC all work
 wherever the browser supports them. Anything the browser refuses is handed to FFmpeg.wasm.
+
+### Cross-origin isolation
+
+`SharedArrayBuffer` — which a future multi-threaded FFmpeg.wasm rescue decoder could use — only
+exists on a page that is `crossOriginIsolated`, which in turn needs two response headers
+(`Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Embedder-Policy: require-corp`) that
+plain static hosting such as GitHub Pages cannot send. [`coi-serviceworker.js`](coi-serviceworker.js)
+works around that: loaded as a normal `<script>`, it registers *itself* as a Service Worker (one
+file plays both roles, switching on whether `window` exists), which then rewrites every same-origin
+response to carry those two headers.
+
+A Service Worker only controls pages that load *after* it is active, so turning on isolation for
+an already-open tab needs exactly one reload. The suite only performs that reload after it has
+registered the worker and confirmed one is actually needed (an already-isolated page, a page
+served without TLS, or a browser with no Service Worker support never reloads at all), and shows a
+short, translated toast — *"Hochleistungsmodus wird aktiviert …" / "Turning on the high-performance
+mode …"* — in the moment before it does. `tests/coi.test.js` runs the exact shipped file inside a
+Node `vm`, standing in for both a `ServiceWorkerGlobalScope` and a page `window`, to check the
+header rewrite and every branch of that one-reload logic (including that it never loops).
 
 ---
 

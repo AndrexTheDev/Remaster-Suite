@@ -6,6 +6,439 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Round 30 — Mobile touch optimisation, the "AI Magic Fix" button, and a live A/B/C compare FAB
+
+**Three requirements, all aimed at the same phone in someone's hand: the effect rack has to work with a
+thumb, the whole restoration should be reachable with one tap, and comparing before/after should not need a
+second hand.**
+
+**1 — the effect rack becomes a swipeable carousel below 768 px.** The six control groups in `#controls`
+(power, profile, A/B, actions, export, neural) are now wrapped in a dedicated `.ctl-rack` element
+(`index.html`); on a desktop it is pixel-identical to before (a plain wrapping flex row — see the new
+`@media (max-width: 768px)` block in `assets/css/app.css`, which deliberately sits outside the existing
+`720px`→`480px` "mobile" slice `tests/audit.test.js` already regex-matches, so none of the pre-existing phone
+assertions move). Below 768 px the rack becomes a horizontally snap-scrolling carousel (`scroll-snap-type: x
+mandatory`, one control group per page, native momentum scrolling — no JS is needed for the swipe itself); a
+small dot trail (`#ctlDots`, painted and kept in sync by `bindCarousel()` in `app.js`) shows which page is
+centred and can be tapped would-be-future-proofed the same way. Slider thumbs grow to 28 px in that
+breakpoint, range inputs get a taller hitbox, and every meaningful touch interaction (a slider crossing a
+10 % notch or being released, a profile change, an A/B tap, the Magic Fix button, the compare FAB) now calls
+a new `vibrate()` helper that wraps `navigator.vibrate` in a feature-detected, try/caught no-op — silent on
+iOS Safari (which has never implemented the Vibration API) and in any sandboxed/permissions-policy context,
+exactly as the brief's own "wo unterstützt" (where supported) already allows for.
+
+**2 — the gold "AI Magic Fix" button** (`#btnMagicFix`, `assets/css/app.css`'s `.btn-magic`, always visible
+in the hero section from first load). One tap: selects automatic profile detection, sets a confidently
+strong restoration power (`CONFIG.magicPower = 0.85`), and — only where this build/device actually has a
+usable model (`State.neuralAvailable`) — turns on the optional neural coupling at a deliberately *light*
+amount via the already-wired `neural.amount` lever in `engine.js`'s render options (`CONFIG.magicNeuralAmount
+= 0.65`; `State.neuralAmount` is `undefined` everywhere else, so the pre-existing "KI-Höhenrekonstruktion"
+checkbox and all 989 pre-existing tests that exercise it keep their exact old `{}` behaviour). The
+de-clipping and air-synthesis the brief asks for are the real, already measurement-gated DSP stages this
+power level and profile genuinely drive — no new DSP was added or needed. Honesty note, documented in code
+rather than overclaimed: `RSNeural.denoise()`/`separate()` (DeepFilterNet3 / BS-RoFormer) exist in
+`neural-controller.js` but are *not* wired into `engine.js`'s render path, and this round does not change
+that — "light deep denoising" is the real superres/air-curve coupling at a light amount, not a second neural
+stage. With no files on the list yet, the button arms its settings and opens the file picker; on a touch
+device (`State.touch`) the very next batch is then flagged (`State._magicFixAutoProcess`) to run straight
+through `processAll()` the moment it is analysed — "auf Mobilgeräten soll dieser Button sofort … anwenden" —
+while a desktop arms the same settings and refreshes every preview but waits for an explicit "Alle
+verarbeiten" click. With files already on the list, a desktop still only previews; a touch device processes
+immediately either way.
+
+**3 — the live A/B/C compare FAB** (`#fabAB`, `assets/js/app.js`'s `FAB` module). A thumb-reach floating
+button, fixed bottom-right with the safe-area insets, visible only while something is actually playing (and
+hidden during the existing auto-alternating "A/B" self-compare mode, which already owns the bypass timer). A
+tap cycles Original → DSP → DSP+AI — the third position only ever appears when a real second render
+(`card.previewBufferNeural`, computed once per analysis/preset/power change by the new
+`computeComparePreview()`, full-strength, only when `State.neuralAvailable`) actually exists for that file;
+otherwise the FAB quietly offers a plain two-way A/B, the same honest degrade the rest of the neural feature
+already uses elsewhere. A press-and-hold (pointer or Enter/Space) jumps straight to Original for exactly as
+long as it is held and restores whatever was resting the instant it is released — a classic momentary
+footswitch gesture, matching "mit dem Daumen gedrückt halten … um den direkten Vorher/Nachher-Effekt hörbar
+zu machen" directly. The FAB always mirrors the top A/B switch (`setAB()` now also undoes any FAB-driven
+buffer swap, so the two controls can never show something different) and never changes it during a hold.
+Making this click-free required one small, additive addition to the live engine itself:
+`AudioEngine.prototype.switchBuffer(buffer, window)` swaps the buffer backing live monitoring for a
+*different render of the same material* while preserving the transport position and without interrupting
+playback — the one case the pre-existing `setBuffer()` (which always restarts at the window's start, correct
+for "a new file was picked") does not cover.
+
+**Tests:** a new `tests/mobile-ux.test.js` (48 checks) covers the carousel/FAB/Magic-Fix markup and CSS, the
+`vibrate()` helper's safety (missing API, real API, a permissions-policy throw), `engine.js`'s
+`switchBuffer()` preserving position against bare `setBuffer()` resetting it, Magic Fix's desktop-arms vs
+phone-auto-processes split and its empty-list/open-the-picker path, and the compare FAB's tap-cycle/hold
+behaviour against the live engine's actual bypass state. All nine new i18n keys
+(`magic.cta`/`magic.sub`/`magic.hint`, `toast.magicArmed`/`toast.magicFix`, `fab.tip`,
+`fab.mode.original`/`fab.mode.restored`/`fab.mode.ai`) were added to both `DICT.de` and `DICT.en` in the same
+change and pass every rule in `tests/audit.test.js`'s bilingual-coverage audit (identical key sets, no dead
+keys, placeholder parity, no cross-language word leakage, the new `fab.mode.` dynamic key family
+discovered). Full regression: **1037/1037 checks across 11 suites** (dsp 173, web 137, audit 338, e2e 108,
+tuning 17, opfs 39, coi 19, neural 87, memory-guard 21, chunked-render 50, mobile-ux 48, new).
+
+### Round 29 — OPFS chunked streaming for mobile audio processing: a disk-backed upload path,
+### overlapping-chunk offline rendering, and a live memory-budget guard
+
+**Mobile Safari and Chrome both kill a tab that pins too much heap for too long — exactly what holding a
+96 kHz FLAC or an hour-long DJ mix as one uncompressed in-memory buffer, twice over (once decoded, once
+rendered), does on a phone. This round removes that peak by moving both the upload and the render path to
+the Origin Private File System, chunk by chunk, with a watchdog that can shrink the chunk size live if the
+device is still under pressure.** Three additions, matching the brief's own three requirements:
+
+**1 — a stream-based decoder entry point.** `assets/js/opfs-manager.js` gains `streamFileIntoScratch(file,
+key, opts)`: instead of the picker's `File`/`Blob` sitting in memory for the card's whole lifetime, it is
+read in bounded chunks (`opts.chunkBytes`, default 4 MB) and written straight to an OPFS scratch file via
+`FileSystemSyncAccessHandle` (through the existing worker, the same one `createWriter`/`getFile` already
+use), returning a new `File` backed by that OPFS copy. `app.js`'s `streamUploadToOPFS(card)` calls this
+once per upload, above a configurable size floor (`CONFIG.opfsUploadThresholdBytes`, 24 MB), and rebinds
+`card.file` to the streamed copy — every later `Codecs.decodeFile(card.file)` call (the preview decode and
+the export decode) now reads from the disk-backed `File`, not the original in-memory `Blob`, which is free
+to be garbage-collected. `forgetUpload(card)` removes the scratch copy once the card itself is gone. Empty
+files and environments without OPFS support both fall back to the original `File`, untouched, rather than
+failing the upload.
+
+**2 — blockwise offline rendering.** `AudioEngine.prototype.renderChunked(source, sampleRate, params, opts)`
+(`assets/js/engine.js`) renders long material in overlapping spans — 10 s chunks by default, 50 ms of
+crossfade, a ~1 s preroll per chunk so each one's filter/look-ahead state settles before the audio that is
+actually kept — and hands each finished chunk to `opts.onChunk` as soon as it is ready, instead of
+assembling one whole-file array first. `app.js`'s `renderCardChunked()` pipes those chunks straight into
+`Codecs.createWavStreamEncoder`/`createMp3StreamEncoder` (also new, in `codecs.js`) writing directly to an
+OPFS output file, so the peak resident audio at any moment is a handful of chunks, not the whole render.
+`shouldChunkRender(durationSeconds)` opts a card into this path once it crosses
+`CONFIG.chunkedRenderThresholdSeconds` (90 s); shorter files keep the existing single-pass path unchanged.
+The chunk boundary itself blends with a **linear, level-preserving crossfade** (equal weights summing to 1
+across the overlap), not an equal-power one — an equal-power (`sin`/`cos`) curve is the right tool for
+blending two *independent* sources, but a chunk seam is blending two renders of the *same, correlated*
+audio, where an equal-power curve's peak `√2` gain at the seam's midpoint shows up as a real, audible +3 dB
+level bump every 10 seconds. `tests/chunked-render.test.js` checks this directly: a bypassed chunked render
+is diffed sample-for-sample against a bypassed single-pass render of the same source (max difference
+`0.00e+0`) and the chunked render's peak level is compared against the whole-file render's peak at the
+exact seam (`0.72000` either way) — both would have caught the equal-power version's bump had it shipped.
+
+**3 — a mobile memory budget guard.** `assets/js/memory-guard.js` (new) wraps `performance.memory` (where
+Chrome/Chromium exposes it) behind `heapInfo()`, returning `{supported, usedBytes, limitBytes, ratio}`;
+`deviceMemoryGB()` reads `navigator.deviceMemory` as a secondary signal on engines that don't expose heap
+details at all (notably Safari/WebKit, every iPhone's browser). `suggestChunkSeconds(current, info, opts)`
+shrinks the chunk size on a ramp between a `highWaterRatio` (0.70) and a `criticalRatio` (0.90) of the heap
+limit — unchanged below the low mark, clamped to `opts.minChunkSeconds` at or above the high mark — and
+`watch(callback, opts)` polls `heapInfo()` on an interval (floored at 250 ms so a tight polling request
+can't itself become a performance problem) and calls back with the same shape `suggestChunkSeconds` reads.
+`renderCardChunked()` wires a guard into every chunked render's `opts.onChunk`, so a chunk size decided
+before the render started can still shrink mid-render if memory pressure climbs partway through a long
+file — confirmed in `tests/chunked-render.test.js` by a render that starts at a larger chunk size than a
+simulated high-water mark allows, and ends up delivering more, smaller chunks than its starting size would
+have produced, with the guard consulted once per chunk rather than once for the whole render. On engines
+with neither `performance.memory` nor `navigator.deviceMemory` (iOS Safari, today), the guard simply never
+fires — `renderChunked()`'s own fixed default chunk size is the safety margin in that case, not a dynamic
+one.
+
+New tests: `tests/opfs.test.js` (39 checks, up from 28) covers `streamFileIntoScratch` end to end — bounded
+chunk reads, byte-exact round trips, progress reaching exactly 1, and both the empty-file and
+no-OPFS-support fallbacks. `tests/memory-guard.test.js` (new, 21 checks) covers `heapInfo`,
+`deviceMemoryGB`, the `suggestChunkSeconds` ramp and its clamps, and `watch`'s polling floor and `stop()`.
+`tests/chunked-render.test.js` (new, 50 checks) covers `renderChunked()`'s chunk shape and streamed
+delivery, the bypass/linear-crossfade correctness above, a tolerant comparison against the whole-file
+render with real DSP engaged, the memory-guard-driven shrink-mid-render path, error propagation out of a
+failing sink, both stream encoders' byte/size agreement with their existing batch counterparts, and
+`app.js`'s own `renderCard()` routing into the OPFS-backed chunked path once a file crosses the duration
+threshold (and staying on the original path below it).
+
+Changed: `assets/js/opfs-manager.js` (`streamFileIntoScratch`), `assets/js/engine.js` (`renderChunked`,
+`_renderSpan`), `assets/js/codecs.js` (`createWavStreamEncoder`, `createMp3StreamEncoder`), `assets/js/
+app.js` (`streamUploadToOPFS`, `forgetUpload`, `shouldChunkRender`, `renderCardChunked`, new `CONFIG`
+entries), `index.html` (new `memory-guard.js` script tag), `tests/opfs.test.js`, `tests/web.test.js`,
+`tests/e2e.test.js`.
+
+Added: `assets/js/memory-guard.js`, `tests/memory-guard.test.js`, `tests/chunked-render.test.js`.
+
+### Round 28 — the neural pipeline becomes mobile/NPU-aware: WebNN detection, quantised weights,
+### and a quiet toast when the hardware throttles mid-inference
+
+**Round 27's WebGPU/WASM pipeline gets a third rung, specifically for phones and tablets, without**
+touching the guarantee that made it safe to ship in the first place: every call still either produces a
+result or resolves `{applied: false, reason}`, never a thrown error. Three additions, matching the brief's
+own three requirements:
+
+**1 — WebNN capability detection, prioritised ahead of WebGPU on mobile.** `neural-worker.js` adds
+`probeWebNN()`, the same cautious shape as the existing `probeWebGpu()`: `navigator.ml` has to exist *and*
+`createContext({deviceType})` has to actually succeed, tried NPU → GPU → CPU in order, for `available` to
+ever come back true — a flag-gated `navigator.ml` that throws on every device type still degrades to
+`available: false` like every other probe here. `isMobileUA()` mirrors the brief's own detection regex
+(`/Mobi|Android|iPhone/i`) exactly. `createSession()`'s execution-provider order now depends on
+`isMobileUA()`: on a phone/tablet with WebNN available, WebNN is tried *first* — reaching an NPU at all is
+only possible through it — then WebGPU, then WASM; everywhere else WebGPU still goes first (WebNN is still
+tried opportunistically before WASM, never ahead of an already-proven WebGPU path). Each provider is its
+own try/catch, same pattern as the existing WebGPU→WASM fallback, so an unsupported op or a refused
+context falls through to the next provider rather than failing the call. `probe()`'s result (and
+`initNeural()`'s status line in `app.js`) now reports `webnn`/`mobile` alongside the existing
+`webgpu`/`wasmSimd`.
+
+**2 — mobile-optimised model configuration, targeting <80 MB of resident weights.** The `MODELS` manifest
+gains `int8`/`int4` file slots per model (DeepFilterNet3, BS-RoFormer — AudioSR's lightweight curve model
+is already small enough on its own) alongside the existing `fp32`/`fp16`; a new `selectVariant(def, caps)`
+picks, on mobile, the smallest quantised file a model actually publishes — int4, then int8, then fp16 (only
+if the adapter already supports it), then fp32 — while desktop behaviour is unchanged (fp16-when-supported,
+else fp32). None of these files ship with this repository any more than the fp32/fp16 ones already didn't
+(see Round 27's own note on why), so `loadWeights()` still resolves `null` cleanly by default; a deployment
+that *does* drop quantised weights next to its static files gets the VRAM saving with zero further code.
+
+**3 — a thermal/memory throttle fallback, with a quiet UI toast.** Every `session.run()` call
+(`denoiseDFN3`/`separateBSR`/`superresCurve`) is now raced against a 20 s watchdog
+(`withTimeout`/`InferenceTimeoutError`) — deliberately shorter than `neural-controller.js`'s own 120 s
+per-call ceiling, so a throttled GPU/NPU is caught mid-inference rather than only at the outer boundary —
+and its catch block runs the error through `classifyInferenceError()`, which pattern-matches the messages
+WebGPU/WASM/WebNN actually throw for out-of-memory and device-lost conditions (plus a `RangeError`, the
+classic symptom of a failed typed-array allocation). A classified hardware-limit error evicts the model's
+cached session (`sessionCache.delete`) so the next call re-probes instead of handing the same now-dead
+context straight back out, and tags the result with a dedicated `reason` (`oom`/`device-lost`/`timeout`) —
+distinct from the pre-existing `weights-not-found`, which is not a runtime failure at all. The render path
+itself needs no new code: `engine.js` already treats any `{applied: false}` as "proceed on the pure DSP
+path". What *is* new is `neural-controller.js`'s `onHardwareFallback(cb)`, a small pub/sub that fires only
+for that hardware-limit reason set (never for `weights-not-found`, `disposed`, or `worker-unavailable`);
+`app.js` subscribes once in `initNeural()` and shows exactly one `toast.neuralFallback` warning per
+session, however many calls in a batch export hit the same limit.
+
+New tests in `tests/neural.test.js` (87 checks total, up from 46) cover all three additions against fake
+`navigator.ml`/`ort`/`Worker` stand-ins — there is no more a real WebNN implementation under plain Node
+than there was a real WebGPU one.
+
+Changed: `assets/js/neural-worker.js` (`probeWebNN`, `isMobileUA`, `selectVariant`, `withTimeout`,
+`classifyInferenceError`, `resolveInferenceFailure`, extended `createSession`/`loadWeights`/`getSession`/
+`probe`), `assets/js/neural-controller.js` (`onHardwareFallback`), `assets/js/app.js` (`initNeural()`'s
+status line and the new toast subscription), `assets/js/i18n.js` (`ctl.neuralWebnn`,
+`toast.neuralFallback`, German and English), `tests/neural.test.js`.
+
+### Round 27 — an optional neural pipeline: WebGPU inference, DeepFilterNet3, BS-RoFormer, and a
+### Stage-7 coupling for the top end a lossy file never had
+
+**A new, entirely optional inference layer sits alongside the DSP chain, never inside it by default.**
+`assets/js/neural-worker.js` (new, a dedicated Worker, loaded with `new Worker(...)` the way
+`opfs-manager.js`'s worker is, never a `<script>` tag) hosts `onnxruntime-web`; `assets/js/
+neural-controller.js` (new) is the main-thread Promise wrapper the rest of the app calls — one call per
+model, and every call resolves, it never rejects. Nothing here runs unless the user turns on the new
+"AI high-frequency reconstruction" toggle in the export row *and* a model's weights are actually found,
+and the pure DSP chain is bit-for-bit unaffected when either condition is false. This addresses the task's
+three requirements in turn:
+
+**1 — WebGPU first, WASM-SIMD fallback, fp16 where it is real.** `neural-worker.js` tries
+`ort.InferenceSession.create(model, {executionProviders: [{name: 'webgpu', ...}]})` first and falls back
+to `['wasm']` on any failure (a missing adapter, a browser without WebGPU, a model that WebGPU cannot
+run); `onnxruntime-web` itself (CDN-only — the npm package unpacks to ≈145 MB, confirmed via the
+registry, which is why `library-loader.js`'s new `ortUrls()` entry follows the existing jsdeliver→unpkg
+CDN pattern instead of being vendored) is never fetched until a model is actually requested. FP16 is not
+a runtime fp32→fp16 cast — ONNX Runtime Web does not do that for free — so it is modelled honestly: each
+model in the `MODELS` manifest ships (or would ship, once weights are installed) separate `fp32`/`fp16`
+weight files, and `loadWeights()` only reaches for the fp16 file once `navigator.gpu.requestAdapter(...)`
+has confirmed the adapter's `shader-f16` feature. Every tensor the three model wrappers build pads its
+time axis up to the next multiple of 4 first (`alignT`/`padRowsTo`/`trimRowsTo`) and trims the result
+back down afterwards, exactly as asked.
+
+**2 — DeepFilterNet3 and BS-RoFormer, active only when their weights exist.** `denoiseDFN3()` and
+`separateBSR()` are wired to the real, published community ONNX exports (DeepFilterNet3: fused
+`feat_erb`[1,1,T,32]/`feat_spec`[1,2,T,96] → `erb_mask`[1,1,T,32] at 48 kHz/960-sample frames/32 ERB
+bands; BS-RoFormer: host-computed `in_spec_real`/`in_spec_imag` → `out_spec_real`/`out_spec_imag` for
+drums/bass/other/vocals at 2048-sample frames — see the in-code contract notes for the exact sources).
+`loadWeights()` looks in OPFS first, then a same-origin `models/<name>/` folder, and returns `null`
+rather than throwing when neither has the file — which is the state of this repository today, since no
+weights are shipped. Every one of the three model entry points, and the message handler that wraps them
+for the real Worker protocol, is wrapped so a missing model, a failed session, or a thrown error all
+produce the same `{applied: false, reason: ...}` object instead of an exception — confirmed in
+`tests/neural.test.js` by calling all three with no weights installed and asserting none of them reject.
+
+**3 — Stage 7 (air synthesis) gets a neural coupling, not a diffusion model.** The task's own wording
+allows "AudioSR or an equivalent DSP/AI coupling"; a real AudioSR is a 258 M-parameter latent-diffusion
+stack (UNet + VAE + HiFi-GAN, 50 DDIM steps, ≈1.3–2.5 GB of weights) that nothing in a browser tab can run
+at a usable speed, and even the lighter community alternatives evaluated for this still ship a full
+second vocoder. The coupling built instead keeps the one thing this project already does well — the
+existing, phase-correct `AirSynth` harmonic regenerator — as the *only* thing that ever synthesises a
+waveform above the cliff, and only ever asks the model to predict a magnitude correction: `superresCurve()`
+turns the dry signal into mel-ish band features, asks a (not yet installed) model for `mel_gain_db`, and
+hands back a small set of per-band dB numbers, never audio. `engine.js`'s `render()` calls this once, up
+front, on a mono downmix of the source (so it never touches the live preview or the A/B comparison
+window, both of which re-render on every slider nudge), and on a clean result posts the curve to the new
+`NeuralAirCurve` stage in `remaster-processor.js` — six fixed peaking filters (Q 1.1, clamped to ±12 dB so
+a bad prediction can never do more than a gentle shelf could) placed right after the existing Stage 5 air
+synthesiser, blended in by the new `airNeural` k-rate parameter (`x + (y − x) · amount`). Two independent
+gates keep this additive-only: `airNeural` defaults to 0 (so it is a no-op even if a curve was posted),
+and an all-zero or never-posted curve is a true identity even at `airNeural = 1` — both asserted
+bit-for-bit in `tests/neural.test.js`, along with the trust dial being a genuine blend (measured 3.51 dB
+at amount 0.5 against the full 6.00 dB design gain of a one-band test curve, matching the blend formula's
+own prediction to two decimal places) and a wildly out-of-range curve staying clamped.
+
+One real bug surfaced while building the DSP side of this and was fixed before it shipped: the project's
+shared FFT (`RSDSP.fft`, used by the analyser, the renderer, and now the STFT this worker needed) is a
+radix-2 kernel — power-of-two lengths only. DeepFilterNet3's real export, however, is specified at a
+960-sample frame, which is not a power of two; feeding it a padded 1024-point spectrum instead would
+silently stop matching the bins the weights were trained against. Rather than add a second FFT algorithm,
+`neural-worker.js` adds Bluestein's chirp-z transform (`fftAny`), which turns any length into one
+zero-padded power-of-two convolution computed with two calls into the same `dsp.fft` kernel — `dsp.fft`
+remains the project's only O(n log n) primitive. Verified in `tests/neural.test.js` against a direct O(n²)
+DFT at several power-of-two and non-power-of-two lengths (float32 precision at every size tried) and via
+full STFT/ISTFT perfect-reconstruction round trips at both DeepFilterNet3's 960/480 framing and
+BS-RoFormer's 2048/512 framing (interior reconstruction error ≈3×10⁻⁷, i.e. float32 noise floor).
+
+New: `assets/js/neural-worker.js`, `assets/js/neural-controller.js`, `tests/neural.test.js` (46 checks).
+Changed: `assets/js/library-loader.js` (`ortUrls()`), `assets/js/presets.js` (`airNeural` pass-through,
+never measurement-driven — see its own comment), `assets/js/engine.js` (`render()`'s optional `opts.neural`
+hook), `assets/js/app.js` (the toggle, `initNeural()`'s probe-driven enable/disable, wiring into the final
+export render only), `assets/js/i18n.js` (five new `ctl.neural*` strings, German and English),
+`assets/worklets/remaster-processor.js` (`NeuralAirCurve`, the `airNeural` parameter),
+`index.html`/`assets/css/app.css` (the control itself). `tests/audit.test.js` updated for the one new
+worklet parameter (60 declared, up from 59) with the same explicit "not a law parameter" exemption
+`bypass` already has, and for the new files' place in the dependency-ordered script list.
+
+### Round 26 — hum: the mains notch is now tracked by a software PLL, not fixed at t = 0
+
+**The three mains-hum notches no longer sit at whatever frequency the file measured as, once, before
+rendering started.** A turntable belt or a tape transport's capstan does not hold 50.0/60.0 Hz for the
+length of a side — motor load, belt age and mains-side wow move it by a hertz or more, which is already
+wider than the notch's own three-hertz skirt (see row 12 of the engine table). A notch frozen at t = 0
+loses the line the moment the drift walks past that skirt. `HumPLL` (new, in
+`assets/worklets/remaster-processor.js`, one instance per channel inside `HumNotch`) is a software
+phase-locked loop seeded from the measured nominal (50 or 60 Hz) that tracks the real mains frequency
+continuously, clamped to the task's stated 45–65 Hz capture range, and retunes the three existing notch
+biquads from its live estimate instead of the static value. The dose/gain law the notches apply is
+unchanged — this closes the "at what frequency" question, not the "how much" one, which stays
+presets.js's job.
+
+The loop is a standard lock-in detector: a self-tracking bandpass (Q ≈ 6, recut only when the estimate
+has moved more than 0.1 Hz, so the expensive trig is throttled without slowing the loop itself) isolates
+the fundamental's neighbourhood; the bandpassed signal is quadrature-mixed against a local oscillator and
+each arm low-passed at 6 Hz, which leaves the two mix outputs converging on (A/2)·sin(φ−θ) and
+(A/2)·cos(φ−θ) for a true phase error φ−θ — so `atan2(mixI, mixQ)` is the signed phase error directly,
+zero at lock and independent of the hum's own loudness; a critically damped PI loop filter
+(Kp = 2ζωₙ, Ki = ωₙ², ζ = 1, natural frequency 0.3 Hz — fast enough to settle in about a second,
+slow enough not to start answering to the programme) steers the oscillator's own frequency, anti-windup
+clamped so an unlocked loop (silence, or a false hum measurement on hum-free material) cannot wind the
+integrator far past what the frequency clamp allows.
+
+Measured against a known ground truth (a synthetic 50 → 48 Hz linear drift over 20 s — a realistic
+worst-case worn-belt scenario, deliberately built wider than the notch's own skirt so "the static notch
+happened to be wide enough" cannot be the result, demodulated against the drift's own instantaneous
+frequency rather than a fixed bin): the line that survives a frequency-frozen notch at −19.3 dB comes
+down to −22.9 dB once the PLL tracks it, 3.6 dB of extra attenuation on top of what the existing notch
+width already bought; a steady, driftless 50 Hz line is still taken down to −47.9 dB once the loop has
+settled, i.e. no regression on the case the old notch already handled; a 60 Hz nominal with 4 Hz flutter
+layered on top stays locked and finite; and strong musical content sitting on the mains grid with a
+non-zero (false-positive) dose does not destabilise the loop or add level (`tests/dsp.test.js`).
+
+Two bugs were caught by this measurement before either reached the shipped worklet. First, a sign
+convention: the first implementation built the phase detector as `atan2(mixQ, mixI)` with the quadrature
+arm as `xb·(−sin θ)` — mathematically adjacent to the correct form but wrong, since it puts the
+detector's zero at a quarter-cycle phase error rather than true lock, so even a perfectly steady 50 Hz
+tone never actually settled: the estimate walked monotonically away from 50 Hz (49.99 Hz at 0.5 s down
+to 49.73 Hz at 9.5 s, still falling with no sign of stopping) regardless of how far the loop gains were
+turned down — the same class of A/B sign inversion Round 25's azimuth corrector shipped with, caught the
+same way, by asserting what the right answer has to look like and finding the code did not produce it.
+Second, a loop-filter structure bug: an early version summed each sample's `Kp·err + ∫Ki·err` *into* the
+running frequency estimate rather than computing the frequency fresh from a fixed centre each sample,
+which quietly turns a standard two-pole (type-II) PI loop into an uncontrolled type-III one with an
+extra integrator — it never settled at any gain, only oscillated or drifted regardless of tuning. Fixed
+by keeping the loop's centre frequency fixed between re-seeds (set once from `humHz`, the file's own
+measurement, and reset on a profile/file change) and computing
+`freq = clamp(fCenter + Kp·err + integ, 45, 65)` outright every sample.
+
+### Round 25 — stereo: sub-sample tape-azimuth correction ahead of the M/S stage
+
+**A tilted tape head is now its own repair, not a side-effect of the width/mono-bass stage it used
+to be invisible to.** A worn cassette or reel transport whose head gap is not exactly perpendicular
+to the tape reads the two tracks a few hundred microseconds apart — a pure channel-to-channel timing
+offset, not a level or polarity fault. The bottom end stays correlated (a bass wavelength dwarfs the
+skew) while the top turns into a comb filter the instant the pair is summed to mono, which is the
+actual complaint an off-azimuth transfer produces. `AzimuthCorrector` (new, in
+`assets/worklets/remaster-processor.js`) runs a sliding cross-correlation between the high-passed
+(above 3 kHz) channels over a 12 ms window, refines the integer peak to a fraction of a sample with a
+parabolic fit through its two neighbours, re-estimates every 20 ms (azimuth drift is a transport
+property, not something to chase sample by sample), and delays whichever channel is lagging to meet
+the other through a first-order Thiran fractional-allpass — phase-only, no added look-ahead, because
+a filter needs no future samples the way a buffered repair does. The correction carries its own guard:
+`confidence` is how much the estimated lag's correlation actually improves on doing nothing, so a
+hard-panned mix or a double-tracked part that only resembles a timing defect is left alone, and so is
+an already-aligned pair or silence.
+
+Measured against a known ground truth (a broadband signal and a copy of it delayed by a known
+sub-sample amount): the mono-sum high-band energy lost to the comb filter goes from −1.0…−3.8 dB at
+1.2–2.7 samples of simulated skew down to −0.05…−0.09 dB once corrected; independent, uncorrelated
+left/right material keeps a confidence at or below 0.1 (no audible correction applied); and an
+already-aligned pair comes back unchanged. One bug was caught by this measurement before it shipped:
+the first implementation delayed the *leading* channel's own lateness further instead of delaying it
+to meet the lagging one, which made every correction measurably worse than doing nothing at all (the
+regression test that would have caught it in production, `tests/dsp.test.js`, is what caught it here).
+
+The repair is wired into the measurement-driven auto-tuning the rest of the per-song stages already
+use: a new three-band-correlation signature — the top reading worse than the middle while the middle
+stays as correlated as a hard-panned mix would not — arms a new `azimuth` worklet parameter exactly
+the way `bassMono` is armed by an out-of-phase bottom, so the stage is reachable from the existing
+auto / per-file pipeline, not a parameter nothing ever sets. `tests/audit.test.js`'s existing
+"every declared parameter is driven by the law" and "…and actually read by the worklet" checks cover
+it like every other repair.
+
+### Round 24 — de-clip: an autoregressive model picks up where the length ceiling used to stop
+
+**The de-clip stage no longer gives up on a plateau once it outgrows the old 269-sample (5.6 ms)
+ceiling.** That ceiling was never a property of clipping — it was the length a single Hermite cubic
+or period-solved cosine arc can be trusted to stand in for — and a slow, heavily overloaded bass note
+from a worn motor or a hot analogue transfer can sit flat for much longer than that. Three models now
+share the stage, each handed a run only when the shorter ones would be guessing: the existing
+Hermite/period solve for a short run (unchanged, ≤ 269 samples); the *same* length-solves-for-the-peak
+formula generalised to any length for a longer but still periodic run (a sine of amplitude A clipped
+at T stays at or above T for exactly T/A ≤ cos(ω·len/2) — true for any run up to half its own period,
+which is also the hard ceiling on how long a same-sign run can ever be, so the formula never runs out
+of validity the way a single bounded cubic does); and, only when no reliable period can be measured
+(broadband overload, clipped noise — material with no waveform to solve for), **CBAR** — Constrained
+Blind Amplitude Reconstruction — fits an order-16 autoregressive model separately to the 128 samples
+of real audio immediately before and after the run (Levinson–Durbin), runs each forward as a zero-input
+filter across the gap, cross-fades the two extrapolations with a raised-cosine weight, and constrains
+the result to never cross back below the measured clip rail, so a run nothing can be inferred about
+settles honestly at the flat top it started at instead of at a guess.
+
+Two bugs surfaced and were fixed while raising the length ceiling, both in the run-continuation check
+that decides when a plateau has ended: a step-to-step tolerance (±0.25 %) cut a genuine long plateau
+into dozens of one-sample fragments on a slow signal, because a low-frequency crest's entry and exit
+ramps change by less than that from one sample to the next; and even after that was replaced with a
+floor relative to the run's own peak, the branch order let the floor's own failure re-arm as a brand
+new one-sample run instead of closing the real one out first, discarding hundreds of samples of
+accumulated run length on every exit ramp. Both are measured on a 25 Hz tone clipped at 0.9: the
+true 679-sample plateau used to be reported and repaired as fifty one-sample runs: the floor-relative
+check with the corrected branch order reports the one true run.
+
+Measured against the known original: a 25 Hz tone at twice the clip level (70 % of each half-cycle
+flat, 679 samples — far beyond anything the old ceiling could reach at all) goes from −13.9 dB of
+shape error unrepaired to −33.7 dB repaired by the periodic model; a milder 30 Hz/456-sample case goes
+from −18.0 to −43.7 dB. A clipped noise burst with no period to find produces zero non-finite samples
+and never reads worse than the flat top it replaced — CBAR's constraint is a floor, not a promise of a
+shape that is not there. Every short-run fixture the stage already passed (the 997 Hz Hermite/period
+cases, the "stays out of the way" fixtures) is unaffected: the stage's reported look-ahead is now 1330
+samples (27.7 ms: 1200 the longest run it will ever track open-ended, plus 128 samples of trailing
+context for CBAR's backward fit, plus a few samples of margin) regardless of which of the three models
+a given run actually takes, so the chain stays one fixed, sample-aligned number the caller can trust.
+`tests/dsp.test.js` and `tests/audit.test.js` were updated for the new latency constant; no other
+stage's behaviour changed.
+
+### Round 23 — infrastructure: cross-origin isolation, and batch exports that stream instead of buffer
+
+**Cross-origin isolation, opportunistically.** [`coi-serviceworker.js`](coi-serviceworker.js) registers itself as a
+Service Worker from a plain `<script>` tag — one file plays both roles, switching on whether `window` exists — and
+that worker rewrites every same-origin response to carry `Cross-Origin-Opener-Policy: same-origin` and
+`Cross-Origin-Embedder-Policy: require-corp`, the two headers plain static hosting (GitHub Pages included) cannot
+send on its own. A Service Worker only controls pages loaded *after* it activates, so the suite performs exactly one
+reload when — and only when — it is actually needed (never on an already-isolated page, a page without TLS, a
+browser without Service Worker support, or a second attempt in the same tab session), and shows a short, translated
+toast in the moment before it does. `tests/coi.test.js` (19 checks) runs the shipped file in a Node `vm`, standing in
+for both a `ServiceWorkerGlobalScope` and a page `window`.
+
+**Batch exports now stream through the Origin Private File System instead of buffering in the heap.** A new
+[`assets/js/opfs-manager.js`](assets/js/opfs-manager.js) (`RSOPFS`) opens a `FileSystemSyncAccessHandle` inside a
+dedicated Worker — the one place the spec allows it — and `codecs.js` gained streaming WAV/MP3 encoders
+(`encodeWavStream`, and a `sink` parameter on `encodeMp3`) that write their output there in ~4 MB chunks as it is
+produced. *Download ZIP* goes a step further: it assembles the archive **OPFS file → OPFS file**, entirely inside
+that worker, with a hand-written streamed ZIP writer (STORE method, CRC-32 computed on the fly, a trailing data
+descriptor instead of a pre-pass) — the main thread never sees more than the final `{size}`. Browsers without OPFS
+fall back to the original in-memory path automatically, and the soft-memory warning now only fires when that
+fallback is the one actually in use. `tests/opfs.test.js` (28 checks) runs the *exact worker source* `opfs-manager.js`
+ships to the browser against a simulated OPFS, including a multi-megabyte streamed ZIP cross-checked with both the
+bundled JSZip and the system `unzip`.
+
 ### Round 22 — the beta suite, complete: every control, the whole journey, and two rows that were the suite's own fault
 
 **The beta is now a full pass over the interface, not a tour of it.** It grew from 63 to **94 checks**, and the two

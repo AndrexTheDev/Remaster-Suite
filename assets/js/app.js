@@ -13,6 +13,8 @@
   const Presets = global.RSPresets;
   const Analyzer = global.RSAnalyzer;
   const Engine = global.RSEngine;
+  const OPFS = global.RSOPFS;
+  const Neural = global.RSNeural;
 
   const $ = UI.$;
   const $$ = UI.$$;
@@ -40,6 +42,21 @@
     return touch;
   }
 
+  /**
+   * Haptic feedback for a touch interaction — a slider crossing a notch, a
+   * preset landing, the Magic Fix button firing, the compare FAB being held.
+   * `navigator.vibrate` is Android-Chrome-only (iOS Safari has never shipped
+   * it) and is sometimes blocked by a permissions policy in an embedded
+   * frame; both of those have to be silent no-ops, never a console error and
+   * never something a caller has to feature-detect itself.
+   */
+  function vibrate(pattern) {
+    try {
+      const v = global.navigator && global.navigator.vibrate;
+      if (typeof v === 'function') v.call(global.navigator, pattern);
+    } catch (e) { /* unsupported or blocked — the UI works fine without it */ }
+  }
+
   const CONFIG = {
     previewSeconds: 40,        // live A/B window; the full file is rendered on save
     previewMin: 12,
@@ -47,6 +64,27 @@
     // a phone browser has far less room for a ZIP full of WAVs than a desktop
     softMemoryMB: isTouchDevice() ? 420 : 900,
     maxLiveTools: 120,
+    // a freshly-picked file larger than this is streamed straight into OPFS
+    // scratch storage on upload (see streamUploadToOPFS()) instead of ever
+    // being read whole into the heap by a naive `file.arrayBuffer()`; small
+    // files skip the round-trip entirely — there is nothing to protect
+    opfsUploadThresholdBytes: 24 * 1024 * 1024,
+    // a file this long (post-decode) renders through Engine.renderChunked()
+    // and streams straight into the OPFS output file instead of one
+    // whole-file Engine.render() pass — see renderCard(). Well above every
+    // fixture the automated test suites use, so their exact-size/exact-peak
+    // assertions exercise the unchanged render() path, never this one.
+    chunkedRenderThresholdSeconds: 90,
+    chunkSeconds: 10,
+    chunkCrossfadeMs: 50,
+    // the one-tap "AI Magic Fix": a confident, pre-judged restoration power —
+    // strong enough that the measurement-gated de-clipper and air-synthesis
+    // stages really engage, but short of 100 % so it never feels like a
+    // blunt instrument — paired with auto profile detection and, where the
+    // hardware/weights allow it, a deliberately *light* application of the
+    // optional neural coupling (see State.neuralAmount below).
+    magicPower: 0.85,
+    magicNeuralAmount: 0.65,
   };
 
   /* -------------------------------------------------------------------- state */
@@ -64,7 +102,152 @@
     powerTouched: false,
     touch: false,
     job: null,
+    // set once `RSOPFS.isSupported()` resolves (see `initStreaming()`); while
+    // it is still pending, batch rendering uses the safe in-memory path
+    opfsReady: false,
+    // the user's own choice, off by default (see `initNeural()`): whether the
+    // optional neural Stage-7 coupling should run on the *final* export
+    // render. It only ever has an effect when `neuralAvailable` is also true.
+    neuralEnabled: false,
+    // set once `RSNeural.probe()` resolves: true only when at least one of
+    // DeepFilterNet3 / BS-RoFormer / the air super-resolution model actually
+    // has weights installed *and* a WebGPU or WASM session could be built —
+    // never true just because the feature exists in this build.
+    neuralAvailable: false,
+    // flips true the first time a render's neural call fails with a
+    // hardware-limit reason (OOM/device-lost/timeout — see initNeural()'s
+    // Neural.onHardwareFallback subscription); keeps the toast it triggers
+    // to exactly one per session instead of one per failed call in a batch.
+    _neuralFallbackToastShown: false,
+    // set by applyMagicFix() right before it opens the file picker when the
+    // list is still empty — addFiles() checks this once its own sequential
+    // analyse loop is done and, only on a touch device, goes straight into
+    // processAll() so a single tap on "AI Magic Fix" really is the whole
+    // journey from empty page to a finished, downloadable file.
+    _magicFixAutoProcess: false,
+    // a lighter-than-default wet amount for the optional neural coupling
+    // (see CONFIG.magicNeuralAmount); undefined everywhere except right
+    // after a Magic Fix, so the pre-existing "KI-Höhenrekonstruktion"
+    // checkbox keeps its original, full-strength `{}` neural options object
+    // and every test that exercises it is unaffected.
+    neuralAmount: undefined,
   };
+
+  /* ------------------------------------------------------- OPFS scratch I/O */
+
+  /**
+   * Detect the Origin Private File System once at boot and sweep any scratch
+   * files a previous, crashed tab might have left behind — OPFS persists
+   * across reloads, unlike a plain JS heap, so it needs this one bit of
+   * housekeeping that in-memory buffers never did.
+   */
+  async function initStreaming() {
+    if (!OPFS) return;
+    try {
+      State.opfsReady = await OPFS.isSupported();
+    } catch (e) {
+      State.opfsReady = false;
+    }
+    if (State.opfsReady) OPFS.resetScratch();
+  }
+
+  /* ---------------------------------------------------------- neural panel */
+
+  /**
+   * Probe the optional neural pipeline once at boot: does WebGPU (or at
+   * least WASM-SIMD) work here, and is any model's weights file actually
+   * installed (OPFS or a local `models/<name>/` folder)? The checkbox stays
+   * disabled with an explanatory status line until this resolves true — the
+   * feature is opt-in *and* only ever offered when it can really do
+   * something, never a control that silently does nothing when toggled.
+   */
+  async function initNeural() {
+    const toggle = $('#neuralToggle');
+    const status = $('#neuralStatus');
+    if (!toggle) return;
+    if (!Neural || typeof Neural.probe !== 'function') { toggle.disabled = true; return; }
+    let probe;
+    try { probe = await Neural.probe(); } catch (e) { toggle.disabled = true; return; }
+    const models = (probe && probe.models) || {};
+    const anyModel = Object.keys(models).some((k) => models[k] && models[k].available);
+    State.neuralAvailable = !!anyModel;
+    toggle.disabled = !State.neuralAvailable;
+    toggle.checked = false;
+    if (status) {
+      if (State.neuralAvailable) {
+        // WebNN > WebGPU > WASM only as a *status label* here — which EP a
+        // given model session actually landed on (mobile-first WebNN order
+        // included) is `neural-worker.js`'s own call per model; this is just
+        // the best single-line summary of what this device can reach at all.
+        const provider = (probe.webnn && probe.webnn.available) ? t('ctl.neuralWebnn')
+          : (probe.webgpu && probe.webgpu.available) ? t('ctl.neuralWebgpu') : t('ctl.neuralWasm');
+        status.textContent = Object.keys(models).filter((k) => models[k] && models[k].available).join(', ') + ' · ' + provider;
+      } else {
+        status.textContent = t('ctl.neuralUnavailable');
+      }
+    }
+    // One quiet, one-time-per-session toast when a render actually attempted
+    // neural inference and the hardware gave out mid-call (OOM/device-lost/
+    // timeout — see neural-worker.js's resolveInferenceFailure and
+    // neural-controller.js's HARDWARE_LIMIT_REASONS). The pure-DSP fallback
+    // itself needs no new code here: engine.js already treats any
+    // `{applied:false}` result as "proceed without the curve" — this is
+    // purely informational, so it never fires more than once even across a
+    // whole batch export full of repeated throttled calls.
+    if (Neural && typeof Neural.onHardwareFallback === 'function' && !State._neuralFallbackToastShown) {
+      Neural.onHardwareFallback(() => {
+        if (State._neuralFallbackToastShown) return;
+        State._neuralFallbackToastShown = true;
+        UI.toast(t('toast.neuralFallback'), 'warn', 6000);
+      });
+    }
+  }
+
+  /** A fresh, collision-free OPFS scratch key for this card's next render. */
+  function renderKeyFor(card) {
+    card._renderSeq = (card._renderSeq || 0) + 1;
+    return 'render-' + card.id + '-' + card._renderSeq;
+  }
+
+  /** Drop a card's previous rendered file from OPFS before replacing it. */
+  async function forgetRender(card) {
+    if (!OPFS || !card.result || !card.result.opfsKey) return;
+    await OPFS.remove(card.result.opfsKey);
+  }
+
+  /**
+   * The moment a card is big enough to matter, copy its raw upload into OPFS
+   * scratch storage (bounded-chunk reads — see `RSOPFS.streamFileIntoScratch`)
+   * and rebind `card.file` to the disk-backed copy, so every later
+   * `Codecs.decodeFile(card.file)` call (there are two: the preview decode in
+   * `prepareCard()` and the export decode in `renderCard()`) reads from a
+   * `File` OPFS itself is holding, not an in-memory `Blob` the picker handed
+   * over. `decodeAudioData` itself still needs one whole `ArrayBuffer` at the
+   * moment it actually decodes — this does not change that, it only removes
+   * the *second*, redundant whole-file copy the original upload Blob would
+   * otherwise keep pinned in the heap for as long as the card exists.
+   */
+  async function streamUploadToOPFS(card) {
+    if (!OPFS || !State.opfsReady) return;
+    if (!card.file || (card.file.size || 0) < CONFIG.opfsUploadThresholdBytes) return;
+    try {
+      const key = 'upload-' + card.id;
+      const res = await OPFS.streamFileIntoScratch(card.file, key, {});
+      if (res.streamed) {
+        card.file = res.file;
+        card._uploadOpfsKey = key;
+      }
+    } catch (e) {
+      // best effort — the card simply keeps its original, in-memory File
+    }
+  }
+
+  /** Drop a card's streamed-to-OPFS upload copy, if it has one. */
+  async function forgetUpload(card) {
+    if (!OPFS || !card._uploadOpfsKey) return;
+    await OPFS.remove(card._uploadOpfsKey);
+    card._uploadOpfsKey = null;
+  }
 
   /* ------------------------------------------------------------- formatting */
 
@@ -342,7 +525,10 @@
 
   function totalBytesOf(list) {
     let bytes = 0;
-    for (const c of list) if (c.result && c.result.bytes) bytes += c.result.bytes.length;
+    for (const c of list) {
+      if (!c.result) continue;
+      bytes += c.result.bytes ? c.result.bytes.length : (c.result.size || 0);
+    }
     return bytes;
   }
 
@@ -575,7 +761,27 @@
       const env = Analyzer.envelope(res.channels, card.analysis.windowEnvelope.max.length);
       card.after = { envelope: env, chips: Analyzer.analyzeChannels(res.channels, res.sampleRate).chips };
       refreshCardText(card);
+      await computeComparePreview(card, card.analysisWindowChannels, card.analysis.sampleRate, params);
     } catch (err) { /* preview refresh is best effort */ }
+  }
+
+  /**
+   * The compare FAB's third position — "DSP + AI" — needs an actual second
+   * render to play, not a knob flipped live (the neural coupling is far too
+   * slow for that). This renders it once per analysis/preset/power change,
+   * at full strength, purely so there is something real to switch to; it
+   * never touches the "KI-Höhenrekonstruktion" checkbox or the export. A
+   * missing model, no WebGPU/WASM session, or any render failure just leaves
+   * `previewBufferNeural` null and the FAB quietly offers only Original/DSP —
+   * the same honest degrade the rest of the neural feature already uses.
+   */
+  async function computeComparePreview(card, chans, sampleRate, params) {
+    if (!(State.neuralAvailable && params && chans)) { card.previewBufferNeural = null; return; }
+    try {
+      const res = await Engine.render(chans, sampleRate, params, { neural: {} });
+      card.previewBufferNeural = Codecs.makeBuffer(res.channels, res.sampleRate);
+    } catch (e) { card.previewBufferNeural = null; }
+    if (FAB && FAB.onPreviewChanged) FAB.onPreviewChanged(card);
   }
 
   /* ------------------------------------------------------------ live playback */
@@ -602,6 +808,7 @@
       Engine.setLoop(card.loop);
       applyLiveParams(card);
       markPlaying(null);
+      FAB.syncFromAB();           // a new card starts on whatever the top A/B switch says
     }
     Engine.play();
     markPlaying(card);
@@ -620,6 +827,12 @@
 
   function setAB(mode) {
     State.ab = mode === 'compare' ? 'compare' : mode === 'original' ? 'original' : 'restored';
+    // undo whatever buffer the compare FAB might have swapped in for its 'ai'
+    // position — the top switch only ever knows about the plain DSP render
+    const card = State.current;
+    if (card && card.previewBuffer && Engine.buffer !== card.previewBuffer) {
+      Engine.switchBuffer(card.previewBuffer, Engine.bounds);
+    }
     Engine.setCompare(State.ab === 'compare');
     Engine.setBypass(State.ab === 'original');
     $$('#abSwitch button').forEach((b) => b.classList.toggle('is-active', b.getAttribute('data-ab') === State.ab));
@@ -629,7 +842,131 @@
         b.classList.toggle('is-active', on);
       });
     }
+    FAB.syncFromAB();
   }
+
+  /**
+   * The live A/B/C compare FAB — a thumb-reach floating control that mirrors
+   * the top A/B switch (so the two never disagree) and adds one thing the
+   * top switch cannot: a third, AI-assisted position, plus a press-and-hold
+   * gesture that jumps to the original for exactly as long as it is held and
+   * returns to whatever was playing the instant it is released. It only ever
+   * appears while something is actually playing; the auto-alternating "A/B"
+   * self-compare mode hides it, since that already flips bypass on its own
+   * timer and the two would otherwise fight over the same engine state.
+   *
+   * `mode` is always the *resting* position — a hold never changes it, it
+   * only ever engages Original for as long as the thumb (or Enter/Space key)
+   * stays down; `engaged()` is what is actually reaching the speakers right
+   * now, which is what every repaint and every engine call go by.
+   */
+  const FAB = {
+    mode: 'restored',          // 'original' | 'restored' | 'ai'
+    holding: false,
+    _holdT0: 0,
+    _wasHold: false,
+    el: null, btn: null, label: null,
+
+    init() {
+      this.el = $('#fabAB');
+      this.btn = $('#fabABBtn');
+      this.label = $('#fabABLabel');
+      if (!this.el || !this.btn) return;
+      this.btn.addEventListener('pointerdown', () => this.holdStart());
+      this.btn.addEventListener('pointerup', () => this.holdEnd());
+      this.btn.addEventListener('pointercancel', () => this.holdEnd());
+      this.btn.addEventListener('pointerleave', () => { if (this.holding) this.holdEnd(); });
+      this.btn.addEventListener('click', () => this.tap());
+      this.btn.addEventListener('keydown', (ev) => {
+        if ((ev.key === 'Enter' || ev.key === ' ') && !ev.repeat) { ev.preventDefault(); this.holdStart(); }
+      });
+      this.btn.addEventListener('keyup', (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); this.holdEnd(); }
+      });
+      this.paint();
+    },
+
+    /** Which resting positions this card can actually offer right now. */
+    availableModes() {
+      const card = State.current;
+      return (card && card.previewBufferNeural) ? ['restored', 'ai', 'original'] : ['restored', 'original'];
+    },
+
+    /** What is actually supposed to be reaching the speakers right now. */
+    engaged() { return this.holding ? 'original' : this.mode; },
+
+    tap() {
+      if (this._wasHold) { this._wasHold = false; return; }     // a hold's release already fired the click
+      const modes = this.availableModes();
+      const i = modes.indexOf(this.mode);
+      const next = modes[(i + 1) % modes.length];
+      vibrate(8);
+      // 'original'/'restored' also exist on the top A/B switch — go through
+      // setAB() so the two controls can never show something different
+      if (next === 'ai') { this.mode = next; this.engage(); } else { setAB(next); }
+    },
+
+    holdStart() {
+      if (this.holding || !State.current) return;
+      this.holding = true;
+      this._holdT0 = nowMs();
+      vibrate(12);
+      this.engage();
+    },
+
+    holdEnd() {
+      if (!this.holding) return;
+      this.holding = false;
+      // a quick tap-and-release should read as a tap, not a flash-to-original
+      this._wasHold = (nowMs() - this._holdT0) > 220;
+      this.engage();
+    },
+
+    /** Push whatever `engaged()` currently resolves to into the live engine. */
+    engage() {
+      const mode = this.engaged();
+      const card = State.current;
+      if (card && card.previewBuffer) {
+        if (mode === 'ai' && card.previewBufferNeural) {
+          Engine.switchBuffer(card.previewBufferNeural, Engine.bounds);
+          Engine.setBypass(false);
+        } else {
+          Engine.switchBuffer(card.previewBuffer, Engine.bounds);
+          Engine.setBypass(mode === 'original');
+        }
+      }
+      this.paint();
+    },
+
+    /** Called by setAB() so the FAB never disagrees with the top A/B switch
+     * — it only ever adds the 'ai' position on top of what that sets. */
+    syncFromAB() {
+      if (!this.holding) this.mode = State.ab === 'original' ? 'original' : 'restored';
+      this.paint();
+      this.updateVisibility();
+    },
+
+    /** A neural preview finished (or failed) rendering for `card` — if it is
+     * the one currently playing and the FAB is resting on 'ai', keep it honest. */
+    onPreviewChanged(card) {
+      if (card !== State.current) return;
+      if (this.mode === 'ai' && !card.previewBufferNeural) { this.mode = 'restored'; this.engage(); }
+      this.paint();
+    },
+
+    updateVisibility() { this.show(Engine.playing && State.ab !== 'compare'); },
+    show(on) { if (this.el) this.el.hidden = !on; },
+
+    paint() {
+      if (!this.btn || !this.label) return;
+      const shown = this.engaged();
+      const letter = shown === 'original' ? 'A' : shown === 'ai' ? 'C' : 'B';
+      this.label.textContent = letter;
+      this.btn.classList.toggle('is-holding', this.holding);
+      this.btn.classList.toggle('is-ai', shown === 'ai');
+      this.btn.setAttribute('aria-label', t('fab.mode.' + shown));
+    },
+  };
 
   Engine.onTick((pos) => {
     const card = State.current;
@@ -645,6 +982,7 @@
 
   Engine.onState((s) => {
     markPlaying(s.playing ? State.current : null);
+    FAB.updateVisibility();
   });
 
   /* ---------------------------------------------------------- the file queue */
@@ -683,6 +1021,13 @@
     }
     Job.end();
     if (skipped) UI.toast(t('toast.skipped', { n: skipped }), 'bad');
+    // the Magic Fix button armed itself before the file picker opened and the
+    // list was empty at the time — on a phone that means "go", full stop
+    if (State._magicFixAutoProcess) {
+      State._magicFixAutoProcess = false;
+      UI.toast(t('toast.magicFix'), 'ok');
+      await processAll();
+    }
   }
 
   /** Scroll a fresh card into view (guarded: headless DOMs have no scrolling). */
@@ -711,6 +1056,10 @@
     card._workT0 = nowMs();
     setCardWork(card, 'decode', null);
     await nextPaint();                       // let the bar paint before the work starts
+    if (!card._uploadStreamAttempted) {
+      card._uploadStreamAttempted = true;
+      await streamUploadToOPFS(card);
+    }
     try {
       const dec = await Codecs.decodeFile(card.file);
       const buffer = dec.buffer;
@@ -757,6 +1106,7 @@
         const after = Analyzer.analyzeChannels(res.channels, res.sampleRate);
         card.after = { envelope: env, chips: after.chips };
         card.afterScore = after.score;
+        await computeComparePreview(card, chans, analysis.sampleRate, params);
       }
       $('[data-act="retry"]', card.el.card).hidden = true;
       clearCardWork(card);
@@ -802,15 +1152,82 @@
   /* -------------------------------------------------------- full rendering */
 
   /**
+   * Whether a file is long enough that `renderCard()` should use the
+   * bounded-memory `Engine.renderChunked()` + incremental-encoder path
+   * instead of one whole-file `Engine.render()` pass. Pulled out as its own
+   * pure function so the threshold decision is trivially unit-testable
+   * without needing a real OPFS or a real render.
+   *
+   * Requires OPFS (the chunked path has nowhere to stream to otherwise) and
+   * a duration comfortably above anything the automated test fixtures use,
+   * so every existing exact-size/exact-peak assertion keeps exercising the
+   * unchanged `Engine.render()` path.
+   */
+  function shouldChunkRender(durationSeconds) {
+    return State.opfsReady && !!OPFS && durationSeconds >= CONFIG.chunkedRenderThresholdSeconds;
+  }
+
+  /**
+   * The memory-bounded twin of the plain `Engine.render()` + encode block in
+   * `renderCard()`: used only once `shouldChunkRender()` says the file is
+   * worth it. Each `Engine.renderChunked()` chunk is hashed straight into the
+   * matching incremental codec encoder (`Codecs.createWavStreamEncoder` /
+   * `createMp3StreamEncoder`) and then dropped — at no point does this
+   * card's full-length restored *or* encoded audio exist anywhere but on the
+   * OPFS-backed scratch file being streamed to. `RSMemoryGuard`, if the
+   * script is loaded, is picked up automatically by `Engine.renderChunked()`
+   * itself (see its own default there) and needs no wiring here.
+   */
+  async function renderCardChunked(card, dec, rate, params, neuralOpt, name, signature) {
+    await forgetRender(card);
+    const key = renderKeyFor(card);
+    const sink = await OPFS.createWriter(key);
+    const nCh = Math.min(2, dec.buffer.numberOfChannels);
+    const totalSamples = Math.max(1, Math.round((dec.buffer.length * rate) / dec.buffer.sampleRate));
+    try {
+      card._workT0 = nowMs();
+      setCardWork(card, 'render', 0);
+      const isMp3 = State.format === 'mp3';
+      const mp3Enc = isMp3 ? await Codecs.createMp3StreamEncoder(rate, State.mp3Rate, nCh, sink) : null;
+      const wavEnc = isMp3 ? null : Codecs.createWavStreamEncoder(totalSamples, rate, State.wavDepth, sink);
+      await Engine.renderChunked(dec.buffer, rate, params, {
+        chunkSeconds: CONFIG.chunkSeconds,
+        crossfadeMs: CONFIG.chunkCrossfadeMs,
+        neural: neuralOpt,
+        onProgress: (p) => setCardWork(card, 'render', p, estimateLeft(card, p)),
+        onChunk: async (channels, info) => {
+          if (mp3Enc) await mp3Enc.appendChannels(channels, info.isLast);
+          else await wavEnc.appendChannels(channels);
+        },
+      });
+      const stats = mp3Enc ? await mp3Enc.finish() : await wavEnc.finish();
+      const closed = await sink.close();
+      const file = await OPFS.getFile(key);
+      return { file, size: closed.size, name, format: State.format, rate: stats.sampleRate || rate, signature, stale: false, opfsKey: key };
+    } catch (err) {
+      await sink.abort();
+      throw err;
+    }
+  }
+
+  /**
    * Render the whole file with the current settings and keep the encoded blob.
    * @returns {Promise<{blob:Blob,name:string,format:string}>}
    */
+  /** The neural render option for the final export, honouring the toggle,
+   * capability probe, and — only when a Magic Fix armed it — a lighter wet
+   * amount via the already-wired `neural.amount` lever (see engine.js). */
+  function neuralOptFor() {
+    if (!(State.neuralEnabled && State.neuralAvailable)) return null;
+    return isFinite(State.neuralAmount) ? { amount: State.neuralAmount } : {};
+  }
+
   async function renderCard(card, opts) {
     const o = opts || {};
     const params = P.params(card);
     if (!params) throw new Error('not analysed');
     const signature = P.signature(card);
-    if (card.result && card.result.signature === signature && card.result.bytes && !o.force) {
+    if (card.result && card.result.signature === signature && (card.result.bytes || card.result.file) && !o.force) {
       return card.result;
     }
 
@@ -824,28 +1241,79 @@
     card._workT0 = nowMs();
     setCardWork(card, 'render', 0);
     setNote(card, t('status.processing'));
-    const res = await Engine.render(dec.buffer, rate, params, {
-      progressSteps: 24,
-      onProgress: (p) => setCardWork(card, 'render', p, estimateLeft(card, p)),
-    });
+    // The neural Stage-7 coupling driven by the "KI-Höhenrekonstruktion"
+    // checkbox (or by a Magic Fix) only ever runs on this, the final export
+    // render — never on the live preview or the A/B comparison window, both
+    // of which re-render on every slider nudge and would otherwise pay an
+    // inference cost the user never gets to hear the benefit of before the
+    // next nudge discards it. (The one exception is the compare FAB's own
+    // "C" position — see computeComparePreviews() — which renders its own,
+    // separate, always-full-strength neural preview once per analysis, not
+    // on every nudge, specifically so there is something real to A/B/C
+    // against.) It is also always optional: `Engine.render` falls back to
+    // the identical pure-DSP render whenever it is omitted, unavailable, or
+    // fails for any reason (see the comment there).
+    const neuralOpt = neuralOptFor();
+    const name = Codecs.outputName(card.name, State.format === 'mp3' ? 'mp3' : 'wav');
 
-    setNote(card, State.format === 'mp3' ? t('toast.mp3Slow') : t('status.export'));
-    let bytes;
-    let name;
-    if (State.format === 'mp3') {
-      card._workT0 = nowMs();
-      setCardWork(card, 'encode', 0);
-      const out = await Codecs.encodeMp3(res.channels, res.sampleRate, State.mp3Rate,
-        (p) => setCardWork(card, 'encode', p, estimateLeft(card, p)));
-      bytes = out.bytes;
-      name = Codecs.outputName(card.name, 'mp3');
+    let result;
+    if (shouldChunkRender(dec.buffer.duration)) {
+      // Long file, OPFS available: render *and* encode in small, overlapping
+      // chunks streamed straight to the scratch file — see
+      // renderCardChunked() — instead of materialising the whole restored
+      // signal (Engine.render()'s own return value) and then the whole
+      // encoded file as two more full-length allocations on top of it.
+      setNote(card, State.format === 'mp3' ? t('toast.mp3Slow') : t('status.export'));
+      result = await renderCardChunked(card, dec, rate, params, neuralOpt, name, signature);
     } else {
-      setCardWork(card, 'encode', null);     // a WAV write is fast, but not instant
-      bytes = Codecs.encodeWav(res.channels, res.sampleRate, State.wavDepth);
-      name = Codecs.outputName(card.name, 'wav');
+      const res = await Engine.render(dec.buffer, rate, params, {
+        progressSteps: 24,
+        onProgress: (p) => setCardWork(card, 'render', p, estimateLeft(card, p)),
+        neural: neuralOpt,
+      });
+
+      setNote(card, State.format === 'mp3' ? t('toast.mp3Slow') : t('status.export'));
+      const onEncodeProgress = (p) => setCardWork(card, 'encode', p, estimateLeft(card, p));
+
+      if (State.opfsReady && OPFS) {
+        // stream straight to disk-backed scratch storage: at no point does this
+        // card's whole output exist as one ArrayBuffer on the main thread, so a
+        // batch of large files never multiplies into the soft-memory ceiling
+        await forgetRender(card);
+        const key = renderKeyFor(card);
+        const sink = await OPFS.createWriter(key);
+        try {
+          card._workT0 = nowMs();
+          setCardWork(card, 'encode', 0);
+          if (State.format === 'mp3') {
+            await Codecs.encodeMp3(res.channels, res.sampleRate, State.mp3Rate, onEncodeProgress, sink);
+          } else {
+            await Codecs.encodeWavStream(res.channels, res.sampleRate, State.wavDepth, sink, onEncodeProgress);
+          }
+          const closed = await sink.close();
+          const file = await OPFS.getFile(key);
+          result = { file, size: closed.size, name, format: State.format, rate: res.sampleRate, signature, stale: false, opfsKey: key };
+        } catch (err) {
+          await sink.abort();
+          throw err;
+        }
+      } else {
+        card._workT0 = nowMs();
+        setCardWork(card, 'encode', 0);
+        let bytes;
+        if (State.format === 'mp3') {
+          const out = await Codecs.encodeMp3(res.channels, res.sampleRate, State.mp3Rate, onEncodeProgress);
+          bytes = out.bytes;
+        } else {
+          setCardWork(card, 'encode', null); // a WAV write is fast, but not instant
+          bytes = Codecs.encodeWav(res.channels, res.sampleRate, State.wavDepth);
+        }
+        result = { bytes, name, format: State.format, rate: res.sampleRate, signature, stale: false };
+      }
     }
+
     clearCardWork(card);
-    card.result = { bytes, name, format: State.format, rate: res.sampleRate, signature, stale: false };
+    card.result = result;
     setStatus(card, 'done');
     setNote(card, t('note.done', { fmt: State.format.toUpperCase() }));
     refreshCardText(card);
@@ -859,7 +1327,7 @@
     Job.start(1, card);
     try {
       const res = await renderCard(card);
-      Codecs.download(res.bytes, res.name);
+      Codecs.download(res.file || res.bytes, res.name);
       UI.toast(t('toast.saved', { name: res.name }), 'ok');
     } catch (err) {
       setStatus(card, 'error');
@@ -887,8 +1355,8 @@
           ? secs * State.mp3Rate * 125
           : secs * rate * (c.analysis.channels > 1 ? 2 : 1) * (State.wavDepth / 8));
       }, 0);
-      if (projected > CONFIG.softMemoryMB * 1e6) {
-        UI.toast(t('toast.mp3Slow'), 'warn', 6000);
+      if (projected > CONFIG.softMemoryMB * 1e6 && !State.opfsReady) {
+        UI.toast(t('toast.bigBatchMemory'), 'warn', 6000);
       }
       Job.start(todo.length, todo[0]);
       for (let i = 0; i < todo.length; i++) {
@@ -916,11 +1384,12 @@
     if (!ready.length) { UI.toast(t('toast.zipEmpty'), 'bad'); return; }
     State.busy = true;
     disableControls(true);
+    let zipKey = null;
     try {
       UI.toast(t('toast.zipStart'), null, 2200);
       const projected = totalBytesOf(ready);
-      if (projected > CONFIG.softMemoryMB * 1e6 && State.format === 'wav') {
-        UI.toast(t('toast.mp3Slow'), 'warn', 6000);
+      if (projected > CONFIG.softMemoryMB * 1e6 && State.format === 'wav' && !State.opfsReady) {
+        UI.toast(t('toast.bigBatchMemory'), 'warn', 6000);
       }
       const entries = [];
       Job.start(ready.length, ready[0]);
@@ -928,21 +1397,50 @@
         const card = ready[i];
         Job.file(i, card.name, card);
         const res = await renderCard(card);
-        entries.push({ name: res.name, bytes: res.bytes });
+        entries.push(res.opfsKey
+          ? { name: res.name, key: res.opfsKey, size: res.size }
+          : { name: res.name, bytes: res.bytes });
       }
-      entries.readme = buildReadme(ready);
+      const readmeText = buildReadme(ready);
+      const readmeBytes = utf8Encode(readmeText);
       Job.file(Math.max(0, entries.length - 1), entries.length ? entries[entries.length - 1].name : '', null);
       Job.at(0.9, 'zip');
-      const blob = await Codecs.zip(entries, (p) => Job.at(0.9 + p * 0.1, 'zip'));
       const name = 'remaster-suite-' + new Date().toISOString().slice(0, 10) + '.zip';
-      Codecs.download(blob, name);
-      UI.toast(t('toast.zipDone', { n: entries.length }), 'ok');
+
+      let file;
+      if (State.opfsReady && OPFS && entries.every((e) => e.key)) {
+        // OPFS file → OPFS file, all the way through: the assembled archive
+        // never exists in the main thread's heap, only its final `{size}`
+        zipKey = 'zip-' + Date.now();
+        entries.push({ name: 'README.txt', bytes: readmeBytes });
+        await OPFS.packZip(entries, zipKey, (info) => {
+          const share = entries.length ? info.index / entries.length : 1;
+          Job.at(0.9 + share * 0.1, 'zip');
+        });
+        file = await OPFS.getFile(zipKey);
+      } else {
+        entries.readme = readmeText;
+        file = await Codecs.zip(entries, (p) => Job.at(0.9 + p * 0.1, 'zip'));
+      }
+      Codecs.download(file, name);
+      UI.toast(t('toast.zipDone', { n: ready.length }), 'ok');
     } catch (err) {
       UI.toast(t('toast.zipFail') + ' ' + (err && err.message ? err.message : ''), 'bad', 6000);
     }
+    if (zipKey) global.setTimeout(() => OPFS.remove(zipKey), 5000);
     Job.end();
     disableControls(false);
     State.busy = false;
+  }
+
+  /** UTF-8 bytes of a string — used for the small README.txt entry that goes
+   * straight into an OPFS-assembled ZIP (never needs a real file on disk). */
+  function utf8Encode(str) {
+    if (typeof global.TextEncoder !== 'undefined') return new global.TextEncoder().encode(str);
+    const esc = unescape(encodeURIComponent(str));
+    const out = new Uint8Array(esc.length);
+    for (let i = 0; i < esc.length; i++) out[i] = esc.charCodeAt(i);
+    return out;
   }
 
   /** A short note inside the ZIP: what was done and by whom. */
@@ -979,6 +1477,8 @@
     if (State.current === card) { Engine.stop(); State.current = null; }
     clearTimeout(card._previewTimer);
     if (card.wave && card.wave.destroy) card.wave.destroy();
+    forgetRender(card);
+    forgetUpload(card);
     const i = State.cards.indexOf(card);
     if (i >= 0) State.cards.splice(i, 1);
     card.el.card.remove();
@@ -997,6 +1497,8 @@
     for (const c of State.cards) {
       clearTimeout(c._previewTimer);
       if (c.wave && c.wave.destroy) c.wave.destroy();
+      forgetRender(c);
+      forgetUpload(c);
       c.el.card.remove();
     }
     State.cards = [];
@@ -1078,11 +1580,16 @@
     power.value = Math.round(State.power * 100);
     UI.paintRange(power);
     $('#powerVal').textContent = t('ui.percent', { v: power.value });
+    let lastPowerDecile = Math.round(State.power * 10);
     power.addEventListener('input', () => {
       State.powerTouched = true;
       State.power = Number(power.value) / 100;
       $('#powerVal').textContent = t('ui.percent', { v: power.value });
       UI.paintRange(power);
+      // a tiny pulse every 10 % — tactile ticks on a slider that otherwise
+      // gives a touch screen no physical detents to feel
+      const decile = Math.round(State.power * 10);
+      if (decile !== lastPowerDecile) { lastPowerDecile = decile; vibrate(6); }
       for (const c of State.cards) {
         if (c.power === null) {
           c.el.power.value = power.value;
@@ -1094,11 +1601,13 @@
       if (card) applyLiveParams(card);
       debouncePreviewAll();
     });
+    power.addEventListener('change', () => vibrate(14));
 
     const presetSel = $('#presetSelect');
     presetSel.value = State.preset;
     presetSel.addEventListener('change', () => {
       State.preset = presetSel.value;
+      vibrate(10);
       for (const c of State.cards) {
         if (c.preset === null || c.preset === undefined) c.el.preset.value = State.preset;
       }
@@ -1109,6 +1618,7 @@
 
     $$('#abSwitch button').forEach((b) => {
       b.addEventListener('click', () => {
+        vibrate(10);
         setAB(b.getAttribute('data-ab'));
         if (!Engine.playing && State.cards.length) {
           const target = State.current || State.cards.find((c) => c.previewBuffer);
@@ -1143,6 +1653,138 @@
         markAllStale();
       });
     }
+
+    const neural = $('#neuralToggle');
+    if (neural) {
+      neural.addEventListener('change', () => {
+        State.neuralEnabled = neural.checked && State.neuralAvailable;
+        markAllStale();   // the final export differs, so any cached render is now stale
+      });
+    }
+
+    FAB.init();
+    bindMagicFix();
+    bindCarousel();
+  }
+
+  /* ----------------------------------------------------------- magic fix */
+
+  /**
+   * One tap: auto profile, a confidently strong restoration power, and —
+   * wherever this device/build actually has the weights for it — a light
+   * application of the optional neural coupling. On a phone this also runs
+   * the batch straight through, exactly as the brief asks ("auf Mobilgeräten
+   * soll dieser Button sofort … anwenden"); on a desktop it arms the same
+   * settings and refreshes every preview so the result can be previewed
+   * before committing to "Alle verarbeiten".
+   *
+   * What this honestly does *not* do: it never calls the separate
+   * DeepFilterNet3 denoise() / BS-RoFormer separate() controllers — those
+   * exist but are not wired into the render pipeline (see engine.js). The
+   * "light deep denoising" and the air-synthesis/de-clipping it promises are
+   * the real, already-measurement-gated DSP stages this power level and
+   * preset genuinely drive, plus the real (if currently unavailable almost
+   * everywhere, since no model weights ship with this build) neural air
+   * coupling at a deliberately light amount.
+   */
+  function bindMagicFix() {
+    const btn = $('#btnMagicFix');
+    if (!btn) return;
+    btn.addEventListener('click', () => applyMagicFix());
+  }
+
+  async function applyMagicFix() {
+    const btn = $('#btnMagicFix');
+    if (btn && btn.classList.contains('is-firing')) return;   // ignore a double-tap mid-run
+    vibrate(16);
+    armMagicSettings();
+    if (!State.cards.length) {
+      State._magicFixAutoProcess = State.touch;
+      UI.toast(t('toast.magicArmed'), 'ok', 5000);
+      const input = $('#fileInput');
+      if (input) input.click();
+      return;
+    }
+    UI.toast(t('toast.magicFix'), 'ok');
+    debouncePreviewAll();
+    if (State.touch) {
+      if (btn) btn.classList.add('is-firing');
+      try { await processAll(); } finally { if (btn) btn.classList.remove('is-firing'); }
+    }
+  }
+
+  /** Arm the global + every existing card's settings for the Magic Fix,
+   * without necessarily processing anything yet (see applyMagicFix()). */
+  function armMagicSettings() {
+    State.preset = 'auto';
+    State.powerTouched = true;
+    State.power = CONFIG.magicPower;
+    if (State.neuralAvailable) {
+      State.neuralEnabled = true;
+      State.neuralAmount = CONFIG.magicNeuralAmount;
+    }
+
+    const presetSel = $('#presetSelect');
+    if (presetSel) presetSel.value = 'auto';
+    const power = $('#power');
+    if (power) {
+      power.value = Math.round(CONFIG.magicPower * 100);
+      UI.paintRange(power);
+      $('#powerVal').textContent = t('ui.percent', { v: power.value });
+    }
+    const neuralToggle = $('#neuralToggle');
+    if (neuralToggle && State.neuralAvailable) neuralToggle.checked = true;
+
+    for (const c of State.cards) {
+      c.preset = null;              // follow the global "auto"
+      c.power = null;               // follow the global power
+      c.el.preset.value = 'auto';
+      c.el.power.value = Math.round(CONFIG.magicPower * 100);
+      c.el.powerOut.textContent = t('ui.percent', { v: c.el.power.value });
+      UI.paintRange(c.el.power);
+    }
+    markAllStale();
+    const card = State.current;
+    if (card) applyLiveParams(card);
+  }
+
+  /* -------------------------------------------------------- effect carousel */
+
+  /** The phone-only swipeable effect rack: a dot per page, kept in sync with
+   * whichever page is currently centred in the scroll container. Purely a
+   * progressive enhancement — the rack scrolls natively via CSS scroll-snap
+   * with or without this; the dots just make the "there is more" visible. */
+  function bindCarousel() {
+    const rack = $('#ctlRack');
+    const dots = $('#ctlDots');
+    if (!rack || !dots) return;
+    const groups = $$('.ctl-group', rack);
+    if (!groups.length) return;
+    while (dots.firstChild) dots.removeChild(dots.firstChild);
+    const dotEls = groups.map((g, i) => {
+      const i_ = UI.el('i', { role: 'presentation' });
+      i_.className = i === 0 ? 'is-active' : '';
+      dots.appendChild(i_);
+      return i_;
+    });
+
+    let raf = 0;
+    const paint = () => {
+      raf = 0;
+      const center = rack.scrollLeft + rack.clientWidth / 2;
+      let closest = 0;
+      let best = Infinity;
+      groups.forEach((g, i) => {
+        const mid = g.offsetLeft + g.offsetWidth / 2;
+        const d = Math.abs(mid - center);
+        if (d < best) { best = d; closest = i; }
+      });
+      dotEls.forEach((d, i) => d.classList.toggle('is-active', i === closest));
+    };
+    rack.addEventListener('scroll', () => {
+      if (!raf) raf = requestAnimationFrame(paint);
+    }, { passive: true });
+    paint();
   }
 
   /** Any change of export settings invalidates already rendered results. */
@@ -1265,6 +1907,25 @@
     bindFooter();
     setAB('restored');           // a first listen should be the restored version
     refreshAllText();
+    initStreaming();
+    initNeural();
+    initCOI();
+  }
+
+  /**
+   * Hook into `coi-serviceworker.js`'s registration result (see root-level
+   * file): if a one-time reload is still needed to actually pick up the
+   * cross-origin isolation headers, say so for a moment before it happens —
+   * a page that silently reloads itself looks broken, not helpful.
+   */
+  function initCOI() {
+    const coi = global.RSCOI;
+    if (!coi || !coi.ready || typeof coi.ready.then !== 'function') return;
+    coi.ready.then((info) => {
+      if (!info || !info.needsReload || typeof info.confirmReload !== 'function') return;
+      UI.toast(t('coi.reloading'), null, 1400);
+      global.setTimeout(() => info.confirmReload(), 650);
+    }).catch(() => { /* isolation is an optional speed-up, never required */ });
   }
 
   if (global.document) {
@@ -1276,6 +1937,8 @@
     State, CONFIG, Job, boot, addFiles, prepareCard, renderCard, processAll, downloadZip,
     adoptRecommendedPower, setCardWork, revealCard, isTouchDevice, refreshAllText,
     setAB, ensurePlaying, clearAll, removeCard, refreshPreview, P,
+    initStreaming, initCOI, initNeural,
+    vibrate, applyMagicFix, armMagicSettings, FAB,
   };
   global.RSApp = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;

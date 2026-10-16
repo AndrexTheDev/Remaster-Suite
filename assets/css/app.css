@@ -142,6 +142,34 @@ code { font-family: var(--mono); }
   background: var(--gold-soft); color: var(--gold); font-size: .74rem; font-weight: 800;
 }
 
+/* ---------------------------------------------------------- 4b · magic fix */
+/* One prominent, gold, single-tap shortcut: auto profile + a confident
+   restoration power + a light neural pass wherever the hardware supports
+   it — the whole four-part combo the brief asks for, without the user ever
+   touching a slider. Gold (not green) on purpose: this is the one button
+   that *acts*, not just confirms a choice already made. */
+.btn-magic {
+  display: flex; align-items: center; gap: 14px; justify-content: center; text-align: left;
+  margin: 22px auto 0; padding: 14px 26px 14px 20px; max-width: 460px; width: 100%;
+  border: 1px solid rgba(255,215,0,.5); border-radius: 999px; cursor: pointer;
+  background: linear-gradient(180deg, var(--gold), var(--gold-2));
+  color: #16130a; box-shadow: 0 10px 30px rgba(255,200,0,.22);
+  transition: transform .14s var(--ease), box-shadow .14s var(--ease), opacity .14s var(--ease);
+  animation: magicPulse 2.6s ease-in-out infinite;
+}
+.btn-magic:hover { transform: translateY(-2px); box-shadow: 0 14px 36px rgba(255,200,0,.32); }
+.btn-magic:active { transform: translateY(0) scale(.98); }
+.btn-magic[disabled] { opacity: .55; cursor: wait; animation: none; transform: none; }
+.btn-magic.is-firing { animation: none; }
+.btn-magic-ico { font-size: 1.5rem; line-height: 1; flex: none; filter: drop-shadow(0 1px 1px rgba(0,0,0,.25)); }
+.btn-magic-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.btn-magic-text strong { font-size: 1rem; font-weight: 800; letter-spacing: -.005em; }
+.btn-magic-text small { font-size: .78rem; font-weight: 650; opacity: .82; line-height: 1.3; }
+@keyframes magicPulse {
+  0%, 100% { box-shadow: 0 10px 30px rgba(255,200,0,.22); }
+  50% { box-shadow: 0 10px 38px rgba(255,200,0,.42); }
+}
+
 /* ------------------------------------------------------------ 5 · dropzone */
 .dropzone {
   position: relative; overflow: hidden; cursor: pointer;
@@ -188,11 +216,21 @@ code { font-family: var(--mono); }
   display: flex; flex-wrap: wrap; align-items: flex-end; gap: 14px 22px;
   padding-top: 14px; padding-bottom: 14px;
 }
+/* The "effect rack" proper: on a desktop this is just a flex row exactly like
+   `.controls` was before this wrapper existed (see the max-width: 768px block
+   below for the swipeable-carousel phone layout — the only place this stops
+   looking like plain desktop wrapping). */
+.ctl-rack { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 14px 22px; flex: 1 1 100%; min-width: 0; }
+.ctl-dots { display: none; flex: 1 1 100%; justify-content: center; gap: 7px; margin-top: -4px; }
+.ctl-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--line); flex: none; transition: background .16s var(--ease), transform .16s var(--ease); }
+.ctl-dots i.is-active { background: var(--gold); transform: scale(1.35); }
 .ctl-group { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .ctl-label { font-size: .72rem; font-weight: 750; text-transform: uppercase; letter-spacing: .13em; color: var(--ink-mute); }
 .ctl { display: flex; flex-direction: column; gap: 6px; min-width: 230px; }
 .ctl-row { display: flex; align-items: center; gap: 12px; }
 .ctl-hint { font-size: .74rem; color: var(--ink-mute); max-width: 34ch; }
+.ctl-check { display: flex; align-items: center; gap: 8px; font-size: .86rem; font-weight: 650; cursor: pointer; }
+.ctl-check input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--gold); cursor: pointer; }
 .ctl-actions { flex-direction: row; align-items: center; gap: 10px; margin-left: auto; }
 
 input[type="range"] {
@@ -498,6 +536,45 @@ dialog.dialog:not([open]) { display: none; }
 @keyframes toastIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
 @keyframes toastOut { to { opacity: 0; transform: translateY(10px); } }
 
+/* ---------------------------------------------------------- 13b · compare FAB */
+/* The live A/B/C compare control: a thumb-reachable floating button, visible
+   only while something is actually playing. A tap cycles Original → DSP →
+   DSP+AI (whichever of those this device/card can actually offer); a press
+   that is *held* jumps straight to Original for as long as the thumb stays
+   down, and lets go back to whatever was playing the moment it is lifted —
+   the fastest possible "wait, what did it sound like before?" gesture. */
+.fab-ab {
+  position: fixed; z-index: 70; right: max(18px, env(safe-area-inset-right));
+  bottom: max(18px, env(safe-area-inset-bottom)); display: flex; flex-direction: column;
+  align-items: flex-end; gap: 8px; animation: fabIn .22s var(--ease) both;
+}
+.fab-ab[hidden] { display: none; }
+@keyframes fabIn { from { opacity: 0; transform: translateY(10px) scale(.92); } to { opacity: 1; transform: none; } }
+.fab-ab-tip {
+  background: rgba(13,15,18,.92); border: 1px solid var(--line); color: var(--ink-dim);
+  font-size: .74rem; font-weight: 650; padding: 6px 11px; border-radius: 999px;
+  box-shadow: var(--sh-1); white-space: nowrap;
+}
+.fab-ab-btn {
+  position: relative; width: 60px; height: 60px; border-radius: 50%; flex: none; cursor: pointer;
+  border: 1px solid rgba(0,230,118,.4); background: linear-gradient(180deg, var(--green), var(--green-2));
+  color: #06150d; display: grid; place-items: center; box-shadow: 0 10px 26px rgba(0,230,118,.3);
+  transition: transform .14s var(--ease), box-shadow .14s var(--ease), background .16s var(--ease);
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+}
+.fab-ab-btn:hover { transform: scale(1.05); }
+.fab-ab-btn.is-holding {
+  background: linear-gradient(180deg, #cfd3da, #9aa1ad); border-color: rgba(255,255,255,.3);
+  color: #15171b; transform: scale(.96); box-shadow: 0 6px 18px rgba(0,0,0,.35);
+}
+.fab-ab-btn.is-ai { background: linear-gradient(180deg, var(--gold), var(--gold-2)); border-color: rgba(255,215,0,.5); color: #16130a; box-shadow: 0 10px 26px rgba(255,200,0,.3); }
+.fab-ab-ring {
+  position: absolute; inset: -5px; border-radius: 50%; border: 2px solid transparent;
+  transition: border-color .16s var(--ease);
+}
+.fab-ab-btn.is-holding .fab-ab-ring { border-color: rgba(255,255,255,.45); }
+.fab-ab-label { font-size: 1.15rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+
 /* ------------------------------------------------------------- 14 · responsive */
 @media (max-width: 900px) {
   .footer-in { grid-template-columns: 1fr; }
@@ -562,9 +639,43 @@ dialog.dialog:not([open]) { display: none; }
   .steps li:last-child { display: none; }        /* compare & save comes later anyway */
   .wave { height: 96px; }
 }
+@media (max-width: 768px) {
+  /* The effect rack becomes a wischbares Karussell: each control group is its
+     own full-width, snap-aligned page instead of a dense wall of sliders —
+     one thing to set at a time, a thumb-swipe apart. Scrolling is native
+     (no JS needed to make it swipeable); app.js only paints the dot trail
+     and keeps it in sync with whichever page is currently centred. */
+  .ctl-rack {
+    flex-wrap: nowrap; overflow-x: auto; scroll-snap-type: x mandatory;
+    gap: 0; margin: 0 -20px; padding: 2px 20px 6px; -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .ctl-rack::-webkit-scrollbar { display: none; }
+  .ctl-rack .ctl-group {
+    flex: 0 0 min(340px, 86vw); scroll-snap-align: center; scroll-snap-stop: always;
+    padding: 2px 12px; min-width: 0;
+  }
+  .ctl-dots { display: flex; }
+
+  /* bigger hitboxes: a slider thumb a thumb can actually land on, not just
+     grab after a retry */
+  input[type="range"]::-webkit-slider-thumb { width: 28px; height: 28px; margin-top: -11px; }
+  input[type="range"]::-moz-range-thumb { width: 26px; height: 26px; }
+  .range-sm { height: 30px; }
+
+  .btn-magic { margin-top: 18px; padding: 16px 22px 16px 18px; }
+  .btn-magic-text small { font-size: .76rem; }
+
+  /* the compare FAB clears the docked job bar and the home-indicator gesture
+     area by the same margin the toasts already use */
+  .fab-ab { bottom: calc(86px + env(safe-area-inset-bottom)); }
+  .fab-ab-tip { font-size: .68rem; padding: 5px 9px; }
+}
 @media (hover: none) {
   /* a finger leaves no hover state behind — never let a hover style stick */
   .btn:hover, .btn-play:hover, .coin:hover, .dz-icon { transform: none; }
+  .btn-magic:hover { transform: none; }
+  .fab-ab-btn:hover { transform: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
