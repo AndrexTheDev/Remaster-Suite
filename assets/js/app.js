@@ -42,6 +42,21 @@
     return touch;
   }
 
+  /**
+   * Haptic feedback for a touch interaction — a slider crossing a notch, a
+   * preset landing, the Magic Fix button firing, the compare FAB being held.
+   * `navigator.vibrate` is Android-Chrome-only (iOS Safari has never shipped
+   * it) and is sometimes blocked by a permissions policy in an embedded
+   * frame; both of those have to be silent no-ops, never a console error and
+   * never something a caller has to feature-detect itself.
+   */
+  function vibrate(pattern) {
+    try {
+      const v = global.navigator && global.navigator.vibrate;
+      if (typeof v === 'function') v.call(global.navigator, pattern);
+    } catch (e) { /* unsupported or blocked — the UI works fine without it */ }
+  }
+
   const CONFIG = {
     previewSeconds: 40,        // live A/B window; the full file is rendered on save
     previewMin: 12,
@@ -62,6 +77,14 @@
     chunkedRenderThresholdSeconds: 90,
     chunkSeconds: 10,
     chunkCrossfadeMs: 50,
+    // the one-tap "AI Magic Fix": a confident, pre-judged restoration power —
+    // strong enough that the measurement-gated de-clipper and air-synthesis
+    // stages really engage, but short of 100 % so it never feels like a
+    // blunt instrument — paired with auto profile detection and, where the
+    // hardware/weights allow it, a deliberately *light* application of the
+    // optional neural coupling (see State.neuralAmount below).
+    magicPower: 0.85,
+    magicNeuralAmount: 0.65,
   };
 
   /* -------------------------------------------------------------------- state */
@@ -96,6 +119,18 @@
     // Neural.onHardwareFallback subscription); keeps the toast it triggers
     // to exactly one per session instead of one per failed call in a batch.
     _neuralFallbackToastShown: false,
+    // set by applyMagicFix() right before it opens the file picker when the
+    // list is still empty — addFiles() checks this once its own sequential
+    // analyse loop is done and, only on a touch device, goes straight into
+    // processAll() so a single tap on "AI Magic Fix" really is the whole
+    // journey from empty page to a finished, downloadable file.
+    _magicFixAutoProcess: false,
+    // a lighter-than-default wet amount for the optional neural coupling
+    // (see CONFIG.magicNeuralAmount); undefined everywhere except right
+    // after a Magic Fix, so the pre-existing "KI-Höhenrekonstruktion"
+    // checkbox keeps its original, full-strength `{}` neural options object
+    // and every test that exercises it is unaffected.
+    neuralAmount: undefined,
   };
 
   /* ------------------------------------------------------- OPFS scratch I/O */
@@ -726,7 +761,27 @@
       const env = Analyzer.envelope(res.channels, card.analysis.windowEnvelope.max.length);
       card.after = { envelope: env, chips: Analyzer.analyzeChannels(res.channels, res.sampleRate).chips };
       refreshCardText(card);
+      await computeComparePreview(card, card.analysisWindowChannels, card.analysis.sampleRate, params);
     } catch (err) { /* preview refresh is best effort */ }
+  }
+
+  /**
+   * The compare FAB's third position — "DSP + AI" — needs an actual second
+   * render to play, not a knob flipped live (the neural coupling is far too
+   * slow for that). This renders it once per analysis/preset/power change,
+   * at full strength, purely so there is something real to switch to; it
+   * never touches the "KI-Höhenrekonstruktion" checkbox or the export. A
+   * missing model, no WebGPU/WASM session, or any render failure just leaves
+   * `previewBufferNeural` null and the FAB quietly offers only Original/DSP —
+   * the same honest degrade the rest of the neural feature already uses.
+   */
+  async function computeComparePreview(card, chans, sampleRate, params) {
+    if (!(State.neuralAvailable && params && chans)) { card.previewBufferNeural = null; return; }
+    try {
+      const res = await Engine.render(chans, sampleRate, params, { neural: {} });
+      card.previewBufferNeural = Codecs.makeBuffer(res.channels, res.sampleRate);
+    } catch (e) { card.previewBufferNeural = null; }
+    if (FAB && FAB.onPreviewChanged) FAB.onPreviewChanged(card);
   }
 
   /* ------------------------------------------------------------ live playback */
@@ -753,6 +808,7 @@
       Engine.setLoop(card.loop);
       applyLiveParams(card);
       markPlaying(null);
+      FAB.syncFromAB();           // a new card starts on whatever the top A/B switch says
     }
     Engine.play();
     markPlaying(card);
@@ -771,6 +827,12 @@
 
   function setAB(mode) {
     State.ab = mode === 'compare' ? 'compare' : mode === 'original' ? 'original' : 'restored';
+    // undo whatever buffer the compare FAB might have swapped in for its 'ai'
+    // position — the top switch only ever knows about the plain DSP render
+    const card = State.current;
+    if (card && card.previewBuffer && Engine.buffer !== card.previewBuffer) {
+      Engine.switchBuffer(card.previewBuffer, Engine.bounds);
+    }
     Engine.setCompare(State.ab === 'compare');
     Engine.setBypass(State.ab === 'original');
     $$('#abSwitch button').forEach((b) => b.classList.toggle('is-active', b.getAttribute('data-ab') === State.ab));
@@ -780,7 +842,131 @@
         b.classList.toggle('is-active', on);
       });
     }
+    FAB.syncFromAB();
   }
+
+  /**
+   * The live A/B/C compare FAB — a thumb-reach floating control that mirrors
+   * the top A/B switch (so the two never disagree) and adds one thing the
+   * top switch cannot: a third, AI-assisted position, plus a press-and-hold
+   * gesture that jumps to the original for exactly as long as it is held and
+   * returns to whatever was playing the instant it is released. It only ever
+   * appears while something is actually playing; the auto-alternating "A/B"
+   * self-compare mode hides it, since that already flips bypass on its own
+   * timer and the two would otherwise fight over the same engine state.
+   *
+   * `mode` is always the *resting* position — a hold never changes it, it
+   * only ever engages Original for as long as the thumb (or Enter/Space key)
+   * stays down; `engaged()` is what is actually reaching the speakers right
+   * now, which is what every repaint and every engine call go by.
+   */
+  const FAB = {
+    mode: 'restored',          // 'original' | 'restored' | 'ai'
+    holding: false,
+    _holdT0: 0,
+    _wasHold: false,
+    el: null, btn: null, label: null,
+
+    init() {
+      this.el = $('#fabAB');
+      this.btn = $('#fabABBtn');
+      this.label = $('#fabABLabel');
+      if (!this.el || !this.btn) return;
+      this.btn.addEventListener('pointerdown', () => this.holdStart());
+      this.btn.addEventListener('pointerup', () => this.holdEnd());
+      this.btn.addEventListener('pointercancel', () => this.holdEnd());
+      this.btn.addEventListener('pointerleave', () => { if (this.holding) this.holdEnd(); });
+      this.btn.addEventListener('click', () => this.tap());
+      this.btn.addEventListener('keydown', (ev) => {
+        if ((ev.key === 'Enter' || ev.key === ' ') && !ev.repeat) { ev.preventDefault(); this.holdStart(); }
+      });
+      this.btn.addEventListener('keyup', (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); this.holdEnd(); }
+      });
+      this.paint();
+    },
+
+    /** Which resting positions this card can actually offer right now. */
+    availableModes() {
+      const card = State.current;
+      return (card && card.previewBufferNeural) ? ['restored', 'ai', 'original'] : ['restored', 'original'];
+    },
+
+    /** What is actually supposed to be reaching the speakers right now. */
+    engaged() { return this.holding ? 'original' : this.mode; },
+
+    tap() {
+      if (this._wasHold) { this._wasHold = false; return; }     // a hold's release already fired the click
+      const modes = this.availableModes();
+      const i = modes.indexOf(this.mode);
+      const next = modes[(i + 1) % modes.length];
+      vibrate(8);
+      // 'original'/'restored' also exist on the top A/B switch — go through
+      // setAB() so the two controls can never show something different
+      if (next === 'ai') { this.mode = next; this.engage(); } else { setAB(next); }
+    },
+
+    holdStart() {
+      if (this.holding || !State.current) return;
+      this.holding = true;
+      this._holdT0 = nowMs();
+      vibrate(12);
+      this.engage();
+    },
+
+    holdEnd() {
+      if (!this.holding) return;
+      this.holding = false;
+      // a quick tap-and-release should read as a tap, not a flash-to-original
+      this._wasHold = (nowMs() - this._holdT0) > 220;
+      this.engage();
+    },
+
+    /** Push whatever `engaged()` currently resolves to into the live engine. */
+    engage() {
+      const mode = this.engaged();
+      const card = State.current;
+      if (card && card.previewBuffer) {
+        if (mode === 'ai' && card.previewBufferNeural) {
+          Engine.switchBuffer(card.previewBufferNeural, Engine.bounds);
+          Engine.setBypass(false);
+        } else {
+          Engine.switchBuffer(card.previewBuffer, Engine.bounds);
+          Engine.setBypass(mode === 'original');
+        }
+      }
+      this.paint();
+    },
+
+    /** Called by setAB() so the FAB never disagrees with the top A/B switch
+     * — it only ever adds the 'ai' position on top of what that sets. */
+    syncFromAB() {
+      if (!this.holding) this.mode = State.ab === 'original' ? 'original' : 'restored';
+      this.paint();
+      this.updateVisibility();
+    },
+
+    /** A neural preview finished (or failed) rendering for `card` — if it is
+     * the one currently playing and the FAB is resting on 'ai', keep it honest. */
+    onPreviewChanged(card) {
+      if (card !== State.current) return;
+      if (this.mode === 'ai' && !card.previewBufferNeural) { this.mode = 'restored'; this.engage(); }
+      this.paint();
+    },
+
+    updateVisibility() { this.show(Engine.playing && State.ab !== 'compare'); },
+    show(on) { if (this.el) this.el.hidden = !on; },
+
+    paint() {
+      if (!this.btn || !this.label) return;
+      const shown = this.engaged();
+      const letter = shown === 'original' ? 'A' : shown === 'ai' ? 'C' : 'B';
+      this.label.textContent = letter;
+      this.btn.classList.toggle('is-holding', this.holding);
+      this.btn.classList.toggle('is-ai', shown === 'ai');
+      this.btn.setAttribute('aria-label', t('fab.mode.' + shown));
+    },
+  };
 
   Engine.onTick((pos) => {
     const card = State.current;
@@ -796,6 +982,7 @@
 
   Engine.onState((s) => {
     markPlaying(s.playing ? State.current : null);
+    FAB.updateVisibility();
   });
 
   /* ---------------------------------------------------------- the file queue */
@@ -834,6 +1021,13 @@
     }
     Job.end();
     if (skipped) UI.toast(t('toast.skipped', { n: skipped }), 'bad');
+    // the Magic Fix button armed itself before the file picker opened and the
+    // list was empty at the time — on a phone that means "go", full stop
+    if (State._magicFixAutoProcess) {
+      State._magicFixAutoProcess = false;
+      UI.toast(t('toast.magicFix'), 'ok');
+      await processAll();
+    }
   }
 
   /** Scroll a fresh card into view (guarded: headless DOMs have no scrolling). */
@@ -912,6 +1106,7 @@
         const after = Analyzer.analyzeChannels(res.channels, res.sampleRate);
         card.after = { envelope: env, chips: after.chips };
         card.afterScore = after.score;
+        await computeComparePreview(card, chans, analysis.sampleRate, params);
       }
       $('[data-act="retry"]', card.el.card).hidden = true;
       clearCardWork(card);
@@ -1019,6 +1214,14 @@
    * Render the whole file with the current settings and keep the encoded blob.
    * @returns {Promise<{blob:Blob,name:string,format:string}>}
    */
+  /** The neural render option for the final export, honouring the toggle,
+   * capability probe, and — only when a Magic Fix armed it — a lighter wet
+   * amount via the already-wired `neural.amount` lever (see engine.js). */
+  function neuralOptFor() {
+    if (!(State.neuralEnabled && State.neuralAvailable)) return null;
+    return isFinite(State.neuralAmount) ? { amount: State.neuralAmount } : {};
+  }
+
   async function renderCard(card, opts) {
     const o = opts || {};
     const params = P.params(card);
@@ -1038,14 +1241,19 @@
     card._workT0 = nowMs();
     setCardWork(card, 'render', 0);
     setNote(card, t('status.processing'));
-    // The neural Stage-7 coupling only ever runs on this, the final export
+    // The neural Stage-7 coupling driven by the "KI-Höhenrekonstruktion"
+    // checkbox (or by a Magic Fix) only ever runs on this, the final export
     // render — never on the live preview or the A/B comparison window, both
     // of which re-render on every slider nudge and would otherwise pay an
     // inference cost the user never gets to hear the benefit of before the
-    // next nudge discards it. It is also always optional: `Engine.render`
-    // falls back to the identical pure-DSP render whenever it is omitted,
-    // unavailable, or fails for any reason (see the comment there).
-    const neuralOpt = (State.neuralEnabled && State.neuralAvailable) ? {} : null;
+    // next nudge discards it. (The one exception is the compare FAB's own
+    // "C" position — see computeComparePreviews() — which renders its own,
+    // separate, always-full-strength neural preview once per analysis, not
+    // on every nudge, specifically so there is something real to A/B/C
+    // against.) It is also always optional: `Engine.render` falls back to
+    // the identical pure-DSP render whenever it is omitted, unavailable, or
+    // fails for any reason (see the comment there).
+    const neuralOpt = neuralOptFor();
     const name = Codecs.outputName(card.name, State.format === 'mp3' ? 'mp3' : 'wav');
 
     let result;
@@ -1372,11 +1580,16 @@
     power.value = Math.round(State.power * 100);
     UI.paintRange(power);
     $('#powerVal').textContent = t('ui.percent', { v: power.value });
+    let lastPowerDecile = Math.round(State.power * 10);
     power.addEventListener('input', () => {
       State.powerTouched = true;
       State.power = Number(power.value) / 100;
       $('#powerVal').textContent = t('ui.percent', { v: power.value });
       UI.paintRange(power);
+      // a tiny pulse every 10 % — tactile ticks on a slider that otherwise
+      // gives a touch screen no physical detents to feel
+      const decile = Math.round(State.power * 10);
+      if (decile !== lastPowerDecile) { lastPowerDecile = decile; vibrate(6); }
       for (const c of State.cards) {
         if (c.power === null) {
           c.el.power.value = power.value;
@@ -1388,11 +1601,13 @@
       if (card) applyLiveParams(card);
       debouncePreviewAll();
     });
+    power.addEventListener('change', () => vibrate(14));
 
     const presetSel = $('#presetSelect');
     presetSel.value = State.preset;
     presetSel.addEventListener('change', () => {
       State.preset = presetSel.value;
+      vibrate(10);
       for (const c of State.cards) {
         if (c.preset === null || c.preset === undefined) c.el.preset.value = State.preset;
       }
@@ -1403,6 +1618,7 @@
 
     $$('#abSwitch button').forEach((b) => {
       b.addEventListener('click', () => {
+        vibrate(10);
         setAB(b.getAttribute('data-ab'));
         if (!Engine.playing && State.cards.length) {
           const target = State.current || State.cards.find((c) => c.previewBuffer);
@@ -1445,6 +1661,130 @@
         markAllStale();   // the final export differs, so any cached render is now stale
       });
     }
+
+    FAB.init();
+    bindMagicFix();
+    bindCarousel();
+  }
+
+  /* ----------------------------------------------------------- magic fix */
+
+  /**
+   * One tap: auto profile, a confidently strong restoration power, and —
+   * wherever this device/build actually has the weights for it — a light
+   * application of the optional neural coupling. On a phone this also runs
+   * the batch straight through, exactly as the brief asks ("auf Mobilgeräten
+   * soll dieser Button sofort … anwenden"); on a desktop it arms the same
+   * settings and refreshes every preview so the result can be previewed
+   * before committing to "Alle verarbeiten".
+   *
+   * What this honestly does *not* do: it never calls the separate
+   * DeepFilterNet3 denoise() / BS-RoFormer separate() controllers — those
+   * exist but are not wired into the render pipeline (see engine.js). The
+   * "light deep denoising" and the air-synthesis/de-clipping it promises are
+   * the real, already-measurement-gated DSP stages this power level and
+   * preset genuinely drive, plus the real (if currently unavailable almost
+   * everywhere, since no model weights ship with this build) neural air
+   * coupling at a deliberately light amount.
+   */
+  function bindMagicFix() {
+    const btn = $('#btnMagicFix');
+    if (!btn) return;
+    btn.addEventListener('click', () => applyMagicFix());
+  }
+
+  async function applyMagicFix() {
+    const btn = $('#btnMagicFix');
+    if (btn && btn.classList.contains('is-firing')) return;   // ignore a double-tap mid-run
+    vibrate(16);
+    armMagicSettings();
+    if (!State.cards.length) {
+      State._magicFixAutoProcess = State.touch;
+      UI.toast(t('toast.magicArmed'), 'ok', 5000);
+      const input = $('#fileInput');
+      if (input) input.click();
+      return;
+    }
+    UI.toast(t('toast.magicFix'), 'ok');
+    debouncePreviewAll();
+    if (State.touch) {
+      if (btn) btn.classList.add('is-firing');
+      try { await processAll(); } finally { if (btn) btn.classList.remove('is-firing'); }
+    }
+  }
+
+  /** Arm the global + every existing card's settings for the Magic Fix,
+   * without necessarily processing anything yet (see applyMagicFix()). */
+  function armMagicSettings() {
+    State.preset = 'auto';
+    State.powerTouched = true;
+    State.power = CONFIG.magicPower;
+    if (State.neuralAvailable) {
+      State.neuralEnabled = true;
+      State.neuralAmount = CONFIG.magicNeuralAmount;
+    }
+
+    const presetSel = $('#presetSelect');
+    if (presetSel) presetSel.value = 'auto';
+    const power = $('#power');
+    if (power) {
+      power.value = Math.round(CONFIG.magicPower * 100);
+      UI.paintRange(power);
+      $('#powerVal').textContent = t('ui.percent', { v: power.value });
+    }
+    const neuralToggle = $('#neuralToggle');
+    if (neuralToggle && State.neuralAvailable) neuralToggle.checked = true;
+
+    for (const c of State.cards) {
+      c.preset = null;              // follow the global "auto"
+      c.power = null;               // follow the global power
+      c.el.preset.value = 'auto';
+      c.el.power.value = Math.round(CONFIG.magicPower * 100);
+      c.el.powerOut.textContent = t('ui.percent', { v: c.el.power.value });
+      UI.paintRange(c.el.power);
+    }
+    markAllStale();
+    const card = State.current;
+    if (card) applyLiveParams(card);
+  }
+
+  /* -------------------------------------------------------- effect carousel */
+
+  /** The phone-only swipeable effect rack: a dot per page, kept in sync with
+   * whichever page is currently centred in the scroll container. Purely a
+   * progressive enhancement — the rack scrolls natively via CSS scroll-snap
+   * with or without this; the dots just make the "there is more" visible. */
+  function bindCarousel() {
+    const rack = $('#ctlRack');
+    const dots = $('#ctlDots');
+    if (!rack || !dots) return;
+    const groups = $$('.ctl-group', rack);
+    if (!groups.length) return;
+    while (dots.firstChild) dots.removeChild(dots.firstChild);
+    const dotEls = groups.map((g, i) => {
+      const i_ = UI.el('i', { role: 'presentation' });
+      i_.className = i === 0 ? 'is-active' : '';
+      dots.appendChild(i_);
+      return i_;
+    });
+
+    let raf = 0;
+    const paint = () => {
+      raf = 0;
+      const center = rack.scrollLeft + rack.clientWidth / 2;
+      let closest = 0;
+      let best = Infinity;
+      groups.forEach((g, i) => {
+        const mid = g.offsetLeft + g.offsetWidth / 2;
+        const d = Math.abs(mid - center);
+        if (d < best) { best = d; closest = i; }
+      });
+      dotEls.forEach((d, i) => d.classList.toggle('is-active', i === closest));
+    };
+    rack.addEventListener('scroll', () => {
+      if (!raf) raf = requestAnimationFrame(paint);
+    }, { passive: true });
+    paint();
   }
 
   /** Any change of export settings invalidates already rendered results. */
@@ -1598,6 +1938,7 @@
     adoptRecommendedPower, setCardWork, revealCard, isTouchDevice, refreshAllText,
     setAB, ensurePlaying, clearAll, removeCard, refreshPreview, P,
     initStreaming, initCOI, initNeural,
+    vibrate, applyMagicFix, armMagicSettings, FAB,
   };
   global.RSApp = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;

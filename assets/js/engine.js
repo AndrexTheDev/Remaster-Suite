@@ -131,6 +131,33 @@
       this.bounds = window || { start: 0, end: buffer ? buffer.duration : 0 };
     }
 
+    /**
+     * Swap the buffer being monitored for a different render of the *same*
+     * material — e.g. the mobile A/B/C compare control jumping between the
+     * original, the DSP render and the neural-assisted render — without
+     * losing the listener's place or interrupting playback. A plain
+     * `setBuffer()` always restarts at the window's start, which is correct
+     * for "load a new file" but wrong for "keep listening, just change which
+     * render this is"; this is the one call that keeps going from exactly
+     * where the ear already was.
+     */
+    switchBuffer(buffer, window) {
+      if (!buffer) return;
+      const wasPlaying = this.playing;
+      const pos = this.position;
+      const bounds = window || this.bounds || { start: 0, end: buffer.duration };
+      this.buffer = buffer;
+      this.bounds = bounds;
+      this.offset = Math.max(bounds.start, Math.min(bounds.end, pos));
+      if (wasPlaying) {
+        this._stopSource();
+        this.playing = false;
+        this.play();
+      } else {
+        this._notifyState();
+      }
+    }
+
     async play() {
       if (!this.buffer) return;
       await this.init();

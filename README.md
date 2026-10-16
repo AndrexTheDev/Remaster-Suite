@@ -536,6 +536,10 @@ node tests/opfs.test.js    # the shipped OPFS worker source against a simulated 
 node tests/coi.test.js     # the shipped coi-serviceworker.js as both a Service Worker
                            # (COOP/COEP header rewrite) and a page script (the one-reload
                            # rule, never a reload loop)
+node tests/mobile-ux.test.js  # the carousel effect rack, the gold "AI Magic Fix" button,
+                           # and the live A/B/C compare FAB: markup/CSS, navigator.vibrate
+                           # safety, engine.js's switchBuffer() position preservation,
+                           # the desktop-arms vs phone-auto-processes split, tap/hold
 node tests/beta/beta.js    # big beta: drives a real headless Chromium over the DevTools
                            # protocol — real clicks, real drops, real AudioWorklet, real
                            # dialogs and downloads, phone emulation at 390 and 320 px with

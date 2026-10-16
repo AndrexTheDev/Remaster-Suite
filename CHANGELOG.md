@@ -6,6 +6,76 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Round 30 — Mobile touch optimisation, the "AI Magic Fix" button, and a live A/B/C compare FAB
+
+**Three requirements, all aimed at the same phone in someone's hand: the effect rack has to work with a
+thumb, the whole restoration should be reachable with one tap, and comparing before/after should not need a
+second hand.**
+
+**1 — the effect rack becomes a swipeable carousel below 768 px.** The six control groups in `#controls`
+(power, profile, A/B, actions, export, neural) are now wrapped in a dedicated `.ctl-rack` element
+(`index.html`); on a desktop it is pixel-identical to before (a plain wrapping flex row — see the new
+`@media (max-width: 768px)` block in `assets/css/app.css`, which deliberately sits outside the existing
+`720px`→`480px` "mobile" slice `tests/audit.test.js` already regex-matches, so none of the pre-existing phone
+assertions move). Below 768 px the rack becomes a horizontally snap-scrolling carousel (`scroll-snap-type: x
+mandatory`, one control group per page, native momentum scrolling — no JS is needed for the swipe itself); a
+small dot trail (`#ctlDots`, painted and kept in sync by `bindCarousel()` in `app.js`) shows which page is
+centred and can be tapped would-be-future-proofed the same way. Slider thumbs grow to 28 px in that
+breakpoint, range inputs get a taller hitbox, and every meaningful touch interaction (a slider crossing a
+10 % notch or being released, a profile change, an A/B tap, the Magic Fix button, the compare FAB) now calls
+a new `vibrate()` helper that wraps `navigator.vibrate` in a feature-detected, try/caught no-op — silent on
+iOS Safari (which has never implemented the Vibration API) and in any sandboxed/permissions-policy context,
+exactly as the brief's own "wo unterstützt" (where supported) already allows for.
+
+**2 — the gold "AI Magic Fix" button** (`#btnMagicFix`, `assets/css/app.css`'s `.btn-magic`, always visible
+in the hero section from first load). One tap: selects automatic profile detection, sets a confidently
+strong restoration power (`CONFIG.magicPower = 0.85`), and — only where this build/device actually has a
+usable model (`State.neuralAvailable`) — turns on the optional neural coupling at a deliberately *light*
+amount via the already-wired `neural.amount` lever in `engine.js`'s render options (`CONFIG.magicNeuralAmount
+= 0.65`; `State.neuralAmount` is `undefined` everywhere else, so the pre-existing "KI-Höhenrekonstruktion"
+checkbox and all 989 pre-existing tests that exercise it keep their exact old `{}` behaviour). The
+de-clipping and air-synthesis the brief asks for are the real, already measurement-gated DSP stages this
+power level and profile genuinely drive — no new DSP was added or needed. Honesty note, documented in code
+rather than overclaimed: `RSNeural.denoise()`/`separate()` (DeepFilterNet3 / BS-RoFormer) exist in
+`neural-controller.js` but are *not* wired into `engine.js`'s render path, and this round does not change
+that — "light deep denoising" is the real superres/air-curve coupling at a light amount, not a second neural
+stage. With no files on the list yet, the button arms its settings and opens the file picker; on a touch
+device (`State.touch`) the very next batch is then flagged (`State._magicFixAutoProcess`) to run straight
+through `processAll()` the moment it is analysed — "auf Mobilgeräten soll dieser Button sofort … anwenden" —
+while a desktop arms the same settings and refreshes every preview but waits for an explicit "Alle
+verarbeiten" click. With files already on the list, a desktop still only previews; a touch device processes
+immediately either way.
+
+**3 — the live A/B/C compare FAB** (`#fabAB`, `assets/js/app.js`'s `FAB` module). A thumb-reach floating
+button, fixed bottom-right with the safe-area insets, visible only while something is actually playing (and
+hidden during the existing auto-alternating "A/B" self-compare mode, which already owns the bypass timer). A
+tap cycles Original → DSP → DSP+AI — the third position only ever appears when a real second render
+(`card.previewBufferNeural`, computed once per analysis/preset/power change by the new
+`computeComparePreview()`, full-strength, only when `State.neuralAvailable`) actually exists for that file;
+otherwise the FAB quietly offers a plain two-way A/B, the same honest degrade the rest of the neural feature
+already uses elsewhere. A press-and-hold (pointer or Enter/Space) jumps straight to Original for exactly as
+long as it is held and restores whatever was resting the instant it is released — a classic momentary
+footswitch gesture, matching "mit dem Daumen gedrückt halten … um den direkten Vorher/Nachher-Effekt hörbar
+zu machen" directly. The FAB always mirrors the top A/B switch (`setAB()` now also undoes any FAB-driven
+buffer swap, so the two controls can never show something different) and never changes it during a hold.
+Making this click-free required one small, additive addition to the live engine itself:
+`AudioEngine.prototype.switchBuffer(buffer, window)` swaps the buffer backing live monitoring for a
+*different render of the same material* while preserving the transport position and without interrupting
+playback — the one case the pre-existing `setBuffer()` (which always restarts at the window's start, correct
+for "a new file was picked") does not cover.
+
+**Tests:** a new `tests/mobile-ux.test.js` (48 checks) covers the carousel/FAB/Magic-Fix markup and CSS, the
+`vibrate()` helper's safety (missing API, real API, a permissions-policy throw), `engine.js`'s
+`switchBuffer()` preserving position against bare `setBuffer()` resetting it, Magic Fix's desktop-arms vs
+phone-auto-processes split and its empty-list/open-the-picker path, and the compare FAB's tap-cycle/hold
+behaviour against the live engine's actual bypass state. All nine new i18n keys
+(`magic.cta`/`magic.sub`/`magic.hint`, `toast.magicArmed`/`toast.magicFix`, `fab.tip`,
+`fab.mode.original`/`fab.mode.restored`/`fab.mode.ai`) were added to both `DICT.de` and `DICT.en` in the same
+change and pass every rule in `tests/audit.test.js`'s bilingual-coverage audit (identical key sets, no dead
+keys, placeholder parity, no cross-language word leakage, the new `fab.mode.` dynamic key family
+discovered). Full regression: **1037/1037 checks across 11 suites** (dsp 173, web 137, audit 338, e2e 108,
+tuning 17, opfs 39, coi 19, neural 87, memory-guard 21, chunked-render 50, mobile-ux 48, new).
+
 ### Round 29 — OPFS chunked streaming for mobile audio processing: a disk-backed upload path,
 ### overlapping-chunk offline rendering, and a live memory-budget guard
 

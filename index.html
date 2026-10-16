@@ -78,6 +78,14 @@
       <li><span class="n">2</span><span class="t" data-i18n="steps.2">Automatisch prüfen</span></li>
       <li><span class="n">3</span><span class="t" data-i18n="steps.3">Vergleichen &amp; speichern</span></li>
     </ol>
+
+    <button type="button" class="btn-magic" id="btnMagicFix" data-i18n-title="magic.hint" title="Wendet automatisch die beste Kombination an und verarbeitet alles — ganz ohne Regler.">
+      <span class="btn-magic-ico" aria-hidden="true">✨</span>
+      <span class="btn-magic-text">
+        <strong data-i18n="magic.cta">KI Magic-Fix</strong>
+        <small data-i18n="magic.sub">Ein Tipp: Profil erkennen, sanft entrauschen, entklippen, Höhen synthetisieren — fertig.</small>
+      </span>
+    </button>
   </section>
 
   <!-- ═════════════════════════════════════════ dropzone ═════════════════════ -->
@@ -107,6 +115,7 @@
   <!-- ═════════════════════════════════════ control bar ══════════════════════ -->
   <section class="controls-wrap" id="controls" hidden>
     <div class="wrap controls">
+    <div class="ctl-rack" id="ctlRack">
       <div class="ctl-group">
         <label class="ctl" for="power">
           <span class="ctl-label" data-i18n="ctl.power">Restaurationskraft</span>
@@ -171,6 +180,8 @@
         </label>
         <span class="ctl-hint" id="neuralStatus" data-i18n="ctl.neuralUnavailable">Kein Modell gefunden — reine DSP-Kette aktiv</span>
       </div>
+    </div>
+    <div class="ctl-dots" id="ctlDots" aria-hidden="true"></div>
 
       <div class="job" id="globalProgress" hidden>
         <div class="job-head">
@@ -376,6 +387,15 @@
   <div data-i18n-html="help.body" class="dialog-body"></div>
   <form method="dialog"><button class="btn btn-primary" data-i18n="ui.close">Schließen</button></form>
 </dialog>
+
+<!-- ═════════════════════════════ live A/B/C compare FAB ═══════════════════ -->
+<div class="fab-ab" id="fabAB" hidden>
+  <span class="fab-ab-tip" id="fabABTip" data-i18n="fab.tip">Tippen wechselt · Halten hört Original</span>
+  <button type="button" class="fab-ab-btn" id="fabABBtn" aria-label="Original">
+    <span class="fab-ab-ring" aria-hidden="true"></span>
+    <span class="fab-ab-label" id="fabABLabel">B</span>
+  </button>
+</div>
 
 <div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>
 

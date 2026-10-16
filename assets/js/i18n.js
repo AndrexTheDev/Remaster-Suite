@@ -265,6 +265,17 @@
       'coi.reloading': 'Hochleistungsmodus wird aktiviert — Seite wird einmalig neu geladen …',
       'toast.needDecode': 'Die Datei ist noch nicht bereit.',
       'toast.renderFail': 'Rendern fehlgeschlagen: {msg}',
+      'toast.magicArmed': 'Magic-Fix ist scharf — wähle jetzt eine Datei, der Rest läuft von allein.',
+      'toast.magicFix': 'Magic-Fix angewendet: bestes Profil, volle Reparaturkraft, KI-Unterstützung wo möglich.',
+
+      'magic.cta': 'KI Magic-Fix',
+      'magic.sub': 'Ein Tipp: Profil erkennen, sanft entrauschen, entklippen, Höhen synthetisieren — fertig.',
+      'magic.hint': 'Wendet automatisch die beste Kombination an und verarbeitet alles — ganz ohne Regler.',
+
+      'fab.tip': 'Tippen wechselt · Halten hört Original',
+      'fab.mode.original': 'Original',
+      'fab.mode.restored': 'Repariert (DSP)',
+      'fab.mode.ai': 'Repariert + KI',
 
       'err.decode': 'Die Datei konnte nicht gelesen werden.',
       'err.broken': 'Diese Datei enthält beschädigte Audiodaten (keine gültigen Samples) — sie lässt sich nicht reparieren.',
@@ -638,6 +649,17 @@
       'coi.reloading': 'Turning on the high-performance mode — reloading the page once …',
       'toast.needDecode': 'This file is not ready yet.',
       'toast.renderFail': 'Rendering failed: {msg}',
+      'toast.magicArmed': 'Magic Fix is armed — pick a file now, everything else runs by itself.',
+      'toast.magicFix': 'Magic Fix applied: best profile, full repair strength, AI help wherever it is available.',
+
+      'magic.cta': 'AI Magic Fix',
+      'magic.sub': 'One tap: detect the profile, denoise gently, de-clip, resynthesise the air — done.',
+      'magic.hint': 'Applies the best combination automatically and processes everything — no sliders required.',
+
+      'fab.tip': 'Tap to switch · hold to hear the original',
+      'fab.mode.original': 'Original',
+      'fab.mode.restored': 'Restored (DSP)',
+      'fab.mode.ai': 'Restored + AI',
 
       'err.decode': 'The file could not be read.',
       'err.broken': 'This file contains corrupted audio data (no valid samples) — it cannot be repaired.',
