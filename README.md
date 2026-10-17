@@ -553,11 +553,13 @@ tests/
                                  resampling, stem mixes, the \{applied:false\} contract, and the
                                  engine wiring that makes C measurably cleaner than B with no
                                  buffer underruns (86 checks)
-  mobile-ux.test.js              the carousel effect rack, the gold "AI Magic Fix" button and
-                                 the live A/B/C compare FAB: markup/CSS, navigator.vibrate
-                                 safety, switchBuffer() position preservation, seek()
-                                 clamping and its no-buffer no-op, the desktop-arms vs
-                                 phone-auto-processes split, tap/hold (53 checks)
+  mobile-ux.test.js              the carousel effect rack, the gold "AI Magic Fix" button,
+                                 the live A/B/C compare FAB and the phone's card inspector:
+                                 markup/CSS, the focus trap, the exact restore index, the
+                                 haptic fallback, navigator.vibrate safety, switchBuffer()
+                                 position preservation, seek() clamping and its no-buffer
+                                 no-op, the desktop-arms vs phone-auto-processes split,
+                                 tap/hold (101 checks)
   coi.test.js                    runs the shipped coi-serviceworker.js in a Node vm as both
                                  a Service Worker (COOP/COEP header rewrite) and a page
                                  script (registration, the one-reload rule, and the guarantee
@@ -569,7 +571,8 @@ tests/
                                  rows, the progress bars, the phone layouts — and the
                                  three mobile-UX surfaces driven with real touch: the
                                  swipeable effect rack, the Magic Fix button, the live
-                                 A/B/C compare FAB, the model download (174 checks)
+                                 A/B/C compare FAB, the card inspector and its gesture
+                                 separation, the model download (195 checks)
     cdp.js                       minimal Chrome DevTools Protocol client over the
                                  platform WebSocket — no dependency beyond Node ≥ 22
     png.js                       PNG decoder/encoder and pixel differ in ~200 lines of
@@ -614,7 +617,7 @@ belong to the test suite.
 
 ## Tests
 
-**12 dependency-free suites · 1186 checks.** Every count below is the suite's own
+**12 dependency-free suites · 1234 checks.** Every count below is the suite's own
 (`ALL TESTS PASSED (n)`); `node scripts/validate-docs.js --run` re-runs them and
 fails if this file, `tests/` and `package.json` ever disagree.
 
@@ -631,7 +634,7 @@ fails if this file, `tests/` and `package.json` ever disagree.
 | Memory guard | `tests/memory-guard.test.js` | 21 | the heap watchdog on a host without `performance.memory`: the honest no-signal default, the one-way shrink ramp, a stop function that never leaks a timer |
 | Chunked render | `tests/chunked-render.test.js` | 53 | chunk boundaries and level-preserving crossfades, the streaming WAV/MP3 encoders, the mid-render shrink, the abort a failing onChunk triggers, a sink that takes ownership of the buffer it is handed |
 | Stage 0 (pre-DSP) | `tests/stage0.test.js` | 86 | the SAB ring (exact round-trips, wrap, all-or-nothing writes, the underrun/overflow counters, the non-shared fallback), the chunk plan and its seam crossfades, the 48 kHz resampling, stem mixing, the fallback contract, and the engine wiring: C really is Stage 0 + DSP, and a missing model leaves B bit-identical |
-| Mobile UX | `tests/mobile-ux.test.js` | 53 | the carousel effect rack, the gold "AI Magic Fix" button, the live A/B/C compare FAB, navigator.vibrate safety, switchBuffer() position preservation, seek() clamping and its no-buffer no-op, tap/hold |
+| Mobile UX | `tests/mobile-ux.test.js` | 101 | the carousel effect rack, the gold "AI Magic Fix" button, the live A/B/C compare FAB, **the phone's card inspector** (markup, focus trap, the grid handed back to its exact index, haptic fallback), navigator.vibrate safety, switchBuffer() position preservation, seek() clamping and its no-buffer no-op, tap/hold |
 
 ```bash
 npm install          # only for the test suite and the static analysis (jsdom, acorn)

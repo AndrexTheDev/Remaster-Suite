@@ -6,6 +6,53 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Round 35 — the card inspector: one drawer instead of three gestures fighting
+
+**A phone had one thumb and three gestures competing for it: the page pans vertically, the effect
+rack swipes horizontally, and a card's own controls sat in a row wide enough to scroll. This round
+gives every per-file control a drawer of its own and leaves the card with nothing to scroll.**
+
+**1 — the drawer.** Below 768 px a card no longer carries its controls inline. An explicit settings
+button in the card head (a real `<button>`, in the tab order and named by the same i18n key in both
+languages) opens a bottom sheet; tapping the card's own chrome — its name, its diagnosis, its
+waveform — does the same, while every control inside it keeps its own gesture. The sheet is a
+`role="dialog"` with `aria-modal`, labelled by the file name, closed by Escape, the close button, the
+scrim, or a downward drag that starts on the grabber and nowhere else. Profile, power, A/B and save
+stack full width in one column; the body pans on `pan-y` only and `overscroll-behavior: contain`
+stops the scroll from chaining into the page behind it.
+
+**2 — the page stays where it was.** Opening pins `body` at its current offset (the `overflow: hidden`
+trick alone does not hold on iOS Safari), marks `main`, the top bar, the footer, the compare FAB and
+the toasts `inert`, and moves focus to the sheet's close button. Closing hands the *live* grid node
+back to its original parent at its original index — not re-rendered, not appended — restores the
+scroll offset to the pixel and returns focus to the element that opened it. The sheet closes itself
+when a card is removed, when the list is cleared, and when the viewport widens past the breakpoint,
+so a phone rotated to landscape never leaves a fixed panel floating over a desktop layout.
+
+**3 — the gestures are separated by element, not by timing.** The global rack keeps its carousel and
+gains `overscroll-behavior-x: contain` and `touch-action: pan-x pan-y`: a horizontal swipe scrolls
+the rack and stops there, a vertical drag still pans the page. Inside the card there is no horizontal
+scroller left to steal either — the card's fields wrap, are clamped to `max-width: 100%`, and the
+grid is a single column in the drawer. The grabber is the one element with `touch-action: none`,
+which is why dragging the panel and scrolling its list can never be the same gesture.
+
+**4 — haptics that iOS can hear.** `UI.haptic()` tries `navigator.vibrate` and reports which path it
+took: `'vibrate'` when a real buzz was requested, `'visual'` when the API is missing, returns `false`
+or throws, `'none'` with no anchor. Every existing `vibrate()` call site keeps its pattern and gains
+the control it belongs to, so on iOS Safari — which has never shipped the Vibration API — that
+control knocks and glows for 420 ms instead. `prefers-reduced-motion` removes the animation along
+with every other one in the app.
+
+**Measured, not asserted.** `tests/mobile-ux.test.js` grows from 53 to 101 checks (the markup, the
+focus trap, the exact restore index, the fallback contract), the whole suite goes from 1186 to 1234,
+and the real-browser beta suite grows to **195 checks and 26 screenshots**: it taps a real card with
+a real finger on an iPhone 14 Pro profile, confirms the sheet is `fixed` to the bottom edge at full
+width, that its four fields are one per row, that a vertical swipe inside it leaves `scrollY` at 0
+and the body pinned, that the grabber dismisses it and the page pans again afterwards, that the main
+rack still pages horizontally on the same finger, and that Android Chrome vibrates where iOS Safari
+falls back to the animation. The two rack baselines were re-recorded (`--accept-baseline`) because
+the card behind them genuinely gained a button.
+
 ### Round 34 — Stage 0: the denoiser moves in front of the chain
 
 **Until this round the neural models were a promise the render pipeline never kept: `denoise()` and

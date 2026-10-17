@@ -342,6 +342,438 @@
     });
   }
 
+  /* ------------------------------------------------------------ bottom sheet */
+
+  /**
+   * The breakpoint the phone layout starts at, in CSS pixels. It is the same
+   * one `app.css` uses for the effect rack (`max-width: 768px`) — two
+   * breakpoints that disagree by a pixel would put a tablet in the state where
+   * the rack is a carousel but the inspector does not exist.
+   * @type {number}
+   */
+  const SHEET_BREAKPOINT = 768;
+
+  /**
+   * How long a closed sheet stays in the DOM while it slides out, in ms. Kept
+   * above the CSS transition's own 280 ms so the class is never yanked from
+   * under a running animation.
+   * @type {number}
+   */
+  const SHEET_OUT_MS = 320;
+
+  /**
+   * The scroll position to restore when the sheet closes, and the element that
+   * had focus before it opened.
+   * @type {{y: number, focus: ?Element}}
+   */
+  const sheetMemory = { y: 0, focus: null };
+
+  /**
+   * The background regions a modal sheet makes inert. Collected by selector
+   * rather than by hand so a region added later is a one-line change here, and
+   * a missing region is simply skipped.
+   * @type {string[]}
+   */
+  const SHEET_BACKGROUND = ['header.topbar', 'main', 'footer', '#fabAB', '#toasts'];
+
+  /**
+   * The modal bottom sheet the per-file controls move into on a phone.
+   *
+   * Why a sheet and not another carousel: a drawer that slides up from the
+   * bottom edge is the one mobile pattern where a *vertical* list of controls
+   * is the whole point. Nothing inside it scrolls sideways, so the vertical
+   * page pan and the horizontal swipe of the main effect rack can never be
+   * confused with it — the sheet is a separate layer with its own axis, its
+   * own scrim and a scroll lock underneath.
+   *
+   * The panel is a real `role="dialog"` with `aria-modal`, a focus trap, an
+   * Escape handler and a scrim click, because "it looks like a modal" is not
+   * the same thing as "a keyboard or a screen reader can use it". The body is
+   * a live element the caller hands over (the card's own `.card-grid`), not a
+   * clone: the sliders, the select and the A/B buttons keep their listeners
+   * and their state, and closing the sheet puts that exact node back where it
+   * came from.
+   *
+   * @typedef {Object} BottomSheetApi
+   * @property {function(): boolean} isOpen
+   * @property {function(): boolean} isSmallViewport
+   * @property {function({title: (string|undefined), subtitle: (string|undefined), body: Element, onClose: (Function|undefined)}): boolean} open
+   * @property {function(): void} close
+   * @property {function(): void} toggle
+   * @property {function(): void} init
+   * @property {function(): void} handleResize
+   */
+
+  /** @type {BottomSheetApi} */
+  const sheet = {
+    _open: false,
+    _home: null,
+    _onClose: null,
+    _bound: false,
+    _closeTimer: 0,
+    _sheet: null,
+    _scrim: null,
+    _body: null,
+
+    /**
+     * Whether the current viewport is a phone width. Read from `innerWidth`
+     * first because it is the one number every environment (including jsdom,
+     * which does not evaluate media queries) answers honestly; `matchMedia`
+     * would report `false` there even on a 390 px page.
+     * @returns {boolean} `true` at or below {@link SHEET_BREAKPOINT}.
+     */
+    isSmallViewport() {
+      const w = Number(global.innerWidth)
+        || (doc && doc.documentElement && doc.documentElement.clientWidth)
+        || SHEET_BREAKPOINT + 1;
+      return w <= SHEET_BREAKPOINT;
+    },
+
+    /**
+     * Whether the sheet is currently presented.
+     * @returns {boolean} `true` between `open()` and `close()`.
+     */
+    isOpen() { return this._open; },
+
+    /**
+     * Look up the markup once and bind the parts that never change: the two
+     * close affordances, the scrim, Escape and the focus trap. Idempotent, so
+     * every `open()` can call it without keeping a second flag in the caller.
+     * @returns {void}
+     */
+    init() {
+      if (this._bound || !doc) return;
+      this._sheet = $('#cardSheet');
+      this._scrim = $('#cardSheetScrim');
+      this._body = $('#cardSheetBody');
+      if (!this._sheet || !this._scrim || !this._body) return;
+      this._bound = true;
+      /** Close from any of the sheet's own affordances. @returns {void} */
+      const close = () => this.close();
+      ['#cardSheetClose', '#cardSheetDone'].forEach((sel) => {
+        const btn = $(sel);
+        if (btn) btn.addEventListener('click', close);
+      });
+      this._scrim.addEventListener('click', close);
+      doc.addEventListener('keydown', (ev) => this._onKeydown(ev));
+      try {
+        global.addEventListener('resize', () => this.handleResize());
+      } catch (e) { /* no window: nothing to resize */ }
+      this._bindDrag();
+    },
+
+    /**
+     * Present the sheet with a live element as its body.
+     * @param {{title: (string|undefined), subtitle: (string|undefined),
+     *   body: Element, onClose: (Function|undefined)}} opts - the file name,
+     *   the meta line under it, the node to adopt and an optional callback.
+     * @returns {boolean} `false` when there is no document, no markup or the
+     *   viewport is not a phone — the caller then leaves the card as it was.
+     */
+    open(opts) {
+      const o = opts || {};
+      if (!doc || !o.body) return false;
+      this.init();
+      if (!this._sheet || !this._body) return false;
+      if (!this.isSmallViewport()) return false;
+      if (this._open) this.close();
+
+      const title = $('#cardSheetTitle');
+      const sub = $('#cardSheetSub');
+      if (title) title.textContent = o.title || '';
+      if (sub) sub.textContent = o.subtitle || '';
+
+      // Remember where the node lives *before* adopting it, so closing can put
+      // it back at the same index rather than merely at the end of the card.
+      this._home = { parent: o.body.parentNode, next: o.body.nextSibling };
+      this._body.appendChild(o.body);
+      o.body.classList.add('in-sheet');
+      this._onClose = typeof o.onClose === 'function' ? o.onClose : null;
+
+      sheetMemory.focus = doc.activeElement;
+      sheetMemory.y = Math.max(0, Number(global.pageYOffset) || 0);
+      this._lock(true);
+      this._scrim.hidden = false;
+      this._sheet.hidden = false;
+      this._scrim.classList.add('is-open');
+      this._sheet.classList.add('is-open');
+      this._open = true;
+      this._focusInside();
+      return true;
+    },
+
+    /**
+     * Dismiss the sheet: hand the body node back to its home, unlock the page,
+     * restore focus and fire the caller's callback exactly once.
+     * @returns {void}
+     */
+    close() {
+      if (!this._open) return;
+      this._open = false;
+      const body = this._body && this._body.firstElementChild;
+      if (body && this._home) {
+        body.classList.remove('in-sheet');
+        const parent = this._home.parent;
+        const next = this._home.next;
+        if (parent) {
+          if (next && next.parentNode === parent) parent.insertBefore(body, next);
+          else parent.appendChild(body);
+        }
+      }
+      this._home = null;
+      this._scrim.classList.remove('is-open');
+      this._sheet.classList.remove('is-open');
+      this._scrim.hidden = true;
+      clearTimeout(this._closeTimer);
+      this._closeTimer = global.setTimeout(() => {
+        if (!this._open && this._sheet) this._sheet.hidden = true;
+      }, SHEET_OUT_MS);
+      this._lock(false);
+      const back = sheetMemory.focus;
+      sheetMemory.focus = null;
+      if (back && back.isConnected && typeof back.focus === 'function') {
+        try { back.focus({ preventScroll: true }); } catch (e) { try { back.focus(); } catch (e2) { /* detached */ } }
+      }
+      const cb = this._onClose;
+      this._onClose = null;
+      if (cb) { try { cb(); } catch (e) { /* a caller's teardown must not strand the sheet */ } }
+    },
+
+    /**
+     * Close the sheet if it is open. Idempotent, so callers that tear a card
+     * down do not have to know whether it was the one being inspected.
+     * @returns {void}
+     */
+    toggle() { if (this._open) this.close(); },
+
+    /**
+     * A viewport change: a phone rotating to landscape stays a phone, but a
+     * window widened past the breakpoint must not leave a fixed panel floating
+     * over a desktop layout.
+     * @returns {void}
+     */
+    handleResize() {
+      if (this._open && !this.isSmallViewport()) this.close();
+    },
+
+    /**
+     * Keep focus inside the modal, and let Escape dismiss it.
+     * @param {KeyboardEvent} ev - the key event.
+     * @returns {void}
+     */
+    _onKeydown(ev) {
+      if (!this._open) return;
+      if (ev.key === 'Escape') { ev.preventDefault(); this.close(); return; }
+      if (ev.key !== 'Tab' || !this._sheet) return;
+      const focusables = $$('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])', this._sheet)
+        .filter((n) => !n.disabled && n.offsetParent !== null);
+      if (!focusables.length) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (ev.shiftKey && doc.activeElement === first) { ev.preventDefault(); last.focus(); }
+      else if (!ev.shiftKey && doc.activeElement === last) { ev.preventDefault(); first.focus(); }
+    },
+
+    /**
+     * Put focus on the panel's own first control — the close button — rather
+     * than on the first slider, which a thumb would otherwise nudge by
+     * accident just by opening the sheet.
+     * @returns {void}
+     */
+    _focusInside() {
+      const target = $('#cardSheetClose') || this._sheet;
+      if (target && typeof target.focus === 'function') {
+        try { target.focus({ preventScroll: true }); } catch (e) { try { target.focus(); } catch (e2) { /* detached */ } }
+      }
+    },
+
+    /**
+     * Freeze the page behind the sheet. `overflow: hidden` alone does not stop
+     * iOS Safari from scrolling the body under a fixed layer, so the body is
+     * pinned at its current offset; closing restores the offset exactly.
+     * @param {boolean} on - lock or unlock.
+     * @returns {void}
+     */
+    _lock(on) {
+      const de = doc.documentElement;
+      const body = doc.body;
+      if (!de || !body) return;
+      if (on) {
+        de.classList.add('sheet-open');
+        body.classList.add('sheet-open');
+        body.style.position = 'fixed';
+        body.style.top = -sheetMemory.y + 'px';
+        body.style.left = '0';
+        body.style.right = '0';
+        body.style.width = '100%';
+        this._setBackgroundInert(true);
+      } else {
+        de.classList.remove('sheet-open');
+        body.classList.remove('sheet-open');
+        body.style.position = '';
+        body.style.top = '';
+        body.style.left = '';
+        body.style.right = '';
+        body.style.width = '';
+        this._setBackgroundInert(false);
+        if (sheetMemory.y) {
+          try { global.scrollTo(0, sheetMemory.y); } catch (e) { /* jsdom has no scrolling */ }
+          de.scrollTop = sheetMemory.y;
+        }
+      }
+    },
+
+    /**
+     * Take the regions outside the sheet out of the tab order and the
+     * accessibility tree while it is open — the `inert` attribute does both in
+     * every browser this app supports, and is a no-op (never a styling change)
+     * where it is not implemented.
+     * @param {boolean} on - inert or not.
+     * @returns {void}
+     */
+    _setBackgroundInert(on) {
+      for (const sel of SHEET_BACKGROUND) {
+        const node = $(sel);
+        if (!node) continue;
+        if (on) {
+          if (!node.hasAttribute('data-sheet-inert')) {
+            node.setAttribute('data-sheet-inert', node.hasAttribute('inert') ? 'was' : 'now');
+            node.setAttribute('inert', '');
+          }
+        } else if (node.getAttribute('data-sheet-inert') === 'now') {
+          node.removeAttribute('inert');
+          node.removeAttribute('data-sheet-inert');
+        } else {
+          node.removeAttribute('data-sheet-inert');
+        }
+      }
+    },
+
+    /**
+     * Drag-to-dismiss, bound to the grabber only. The content below it keeps
+     * `touch-action: pan-y`, so a vertical flick inside the sheet scrolls the
+     * list instead of dragging the panel — the two gestures never compete
+     * because they never start on the same element.
+     * @returns {void}
+     */
+    _bindDrag() {
+      const grab = $('#cardSheetGrab');
+      if (!grab || !this._sheet) return;
+      let startY = 0;
+      let dy = 0;
+      let active = false;
+      /**
+       * The press: remember where the finger landed.
+       * @param {PointerEvent} ev - the pointer down.
+       * @returns {void}
+       */
+      const down = (ev) => {
+        active = true;
+        startY = ev.clientY;
+        dy = 0;
+        this._sheet.style.transition = 'none';
+        if (grab.setPointerCapture && ev.pointerId !== undefined) {
+          try { grab.setPointerCapture(ev.pointerId); } catch (e) { /* synthetic event */ }
+        }
+      };
+      /**
+       * The drag: follow the finger downwards only.
+       * @param {PointerEvent} ev - the pointer move.
+       * @returns {void}
+       */
+      const move = (ev) => {
+        if (!active) return;
+        dy = Math.max(0, ev.clientY - startY);
+        this._sheet.style.transform = 'translateY(' + dy + 'px)';
+      };
+      /**
+       * The release: past the threshold it dismisses, before it it springs back.
+       * @returns {void}
+       */
+      const up = () => {
+        if (!active) return;
+        active = false;
+        this._sheet.style.transition = '';
+        this._sheet.style.transform = '';
+        if (dy > 88) this.close();
+      };
+      grab.addEventListener('pointerdown', down);
+      grab.addEventListener('pointermove', move);
+      grab.addEventListener('pointerup', up);
+      grab.addEventListener('pointercancel', up);
+    },
+  };
+
+  /* ------------------------------------------------------- haptic feedback */
+
+  /**
+   * The class a micro-animation is applied through, and how long it stays.
+   * @type {{cls: string, ms: number}}
+   */
+  const HAPTIC = { cls: 'is-haptic', ms: 420 };
+
+  /**
+   * Per-element timers, so two quick pulses restart the animation instead of
+   * the first one's timer removing the class mid-way through the second.
+   * @type {WeakMap<Element, number>}
+   */
+  const hapticTimers = new WeakMap();
+
+  /**
+   * Whether this browser can actually vibrate. iOS Safari never ships
+   * `navigator.vibrate`, and an embedded frame can be denied it by a
+   * permissions policy, so this is a question to ask, not a constant.
+   * @returns {boolean} `true` only when a real function is present.
+   */
+  function hapticSupported() {
+    const nav = global.navigator;
+    return !!(nav && typeof nav.vibrate === 'function');
+  }
+
+  /**
+   * The visual half of haptic feedback: a short, unmistakable knock on the
+   * element the interaction belongs to. It is what iOS Safari gets *instead*
+   * of a vibration, and what a desktop with `prefers-reduced-motion` simply
+   * does not see (the global rule collapses the animation to nothing, which is
+   * the correct answer to that preference).
+   * @param {?Element} anchor - the control that was touched, or `null`.
+   * @returns {boolean} `true` when an animation was started.
+   */
+  function pulse(anchor) {
+    if (!anchor || !anchor.classList) return false;
+    anchor.classList.remove(HAPTIC.cls);
+    // read a layout property to commit the removal — without it, adding the
+    // class back in the same tick is a no-op and a second tap feels dead
+    void anchor.offsetWidth;
+    anchor.classList.add(HAPTIC.cls);
+    const prev = hapticTimers.get(anchor);
+    if (prev) global.clearTimeout(prev);
+    hapticTimers.set(anchor, global.setTimeout(() => {
+      anchor.classList.remove(HAPTIC.cls);
+      hapticTimers.delete(anchor);
+    }, HAPTIC.ms));
+    return true;
+  }
+
+  /**
+   * Fire haptic feedback: a real vibration where the platform has one, a
+   * micro-animation where it does not. Exactly one of the two happens — a
+   * device that can buzz does not also need to flash, and a page that cannot
+   * must still acknowledge the touch.
+   * @param {?Element} anchor - the control the feedback belongs to.
+   * @param {(number|number[])} pattern - milliseconds or an on/off pattern,
+   *   exactly as the Web Vibration API takes them.
+   * @returns {('vibrate'|'visual'|'none')} which channel was used.
+   */
+  function haptic(anchor, pattern) {
+    let ok = false;
+    if (hapticSupported()) {
+      try { ok = global.navigator.vibrate(pattern) !== false; } catch (e) { ok = false; }
+    }
+    if (ok) return 'vibrate';
+    return pulse(anchor) ? 'visual' : 'none';
+  }
+
   /* ------------------------------------------------- detailed analysis list */
 
   /**
@@ -835,6 +1267,13 @@
    * @property {function(RSAnalyzer.Chips, ?RSAnalyzer.Chips=): Element[]} chipsFrom
    * @property {function(RSPresets.Diagnosis): string} diagnosisText
    * @property {ModelLoader} modelLoader - the model-download progress row.
+   * @property {BottomSheetApi} sheet - the phone-only inspector drawer.
+   * @property {function((Element|null), (number|number[])): string} haptic
+   *   - vibrate where possible, micro-animate where not.
+   * @property {function((Element|null)): boolean} pulse - the animation alone.
+   * @property {function(): boolean} hapticSupported - whether the platform
+   *   has the Vibration API at all.
+   * @property {number} SHEET_BREAKPOINT - the phone breakpoint, in CSS pixels.
    */
 
   /** @type {RSUIApi} */
@@ -842,6 +1281,7 @@
     formatValue, findingsList,
     $, $$, el, paintRange, scoreColor, copyText, toast, openDialog, closeDialog, bindDialogs,
     Waveform, formatTime, chipsFrom, diagnosisText, modelLoader,
+    sheet, haptic, pulse, hapticSupported, SHEET_BREAKPOINT,
   };
   /** @type {RSUIApi} */
   global.RSUI = API;

@@ -78,19 +78,28 @@
   /**
    * Haptic feedback for a touch interaction — a slider crossing a notch, a
    * preset landing, the Magic Fix button firing, the compare FAB being held.
-   * `navigator.vibrate` is Android-Chrome-only (iOS Safari has never shipped
-   * it) and is sometimes blocked by a permissions policy in an embedded
-   * frame; both of those have to be silent no-ops, never a console error and
-   * never something a caller has to feature-detect itself.
+   *
+   * `navigator.vibrate` is Android-Chrome-only: iOS Safari has never shipped
+   * it, and an embedded frame can have it blocked by a permissions policy. So
+   * the call goes through `RSUI.haptic()`, which vibrates where it can and
+   * otherwise knocks the control the touch belongs to (a short scale-and-ring
+   * micro-animation). Exactly one of the two happens, and a caller never has
+   * to feature-detect either.
    * @param {(number|number[])} pattern - milliseconds, or an on/off pattern,
    *   exactly as the Web Vibration API takes them.
-   * @returns {void}
+   * @param {?Element} [anchor] - the control that was touched; the visual
+   *   fallback animates this, so a caller on a phone should always pass it.
+   * @returns {('vibrate'|'visual'|'none')} which feedback channel really ran.
    */
-  function vibrate(pattern) {
+  function vibrate(pattern, anchor) {
+    if (UI && UI.haptic && typeof UI.haptic === 'function') {
+      return UI.haptic(anchor || null, pattern);
+    }
     try {
       const v = global.navigator && global.navigator.vibrate;
-      if (typeof v === 'function') v.call(global.navigator, pattern);
+      if (typeof v === 'function') { v.call(global.navigator, pattern); return 'vibrate'; }
     } catch (e) { /* unsupported or blocked — the UI works fine without it */ }
+    return 'none';
   }
 
   /**
@@ -206,6 +215,9 @@
    * @property {boolean} _aiDenoiseWanted - Magic Fix asked for the pre-DSP
    *   denoiser before the capability probe had answered, so the answer arms it
    *   instead of the request being lost.
+   * @property {?RSApp.Card} _inspectorCard - the card whose controls the phone
+   *   sheet is holding, or `null`. Exactly one can be open, because there is
+   *   exactly one sheet.
    * @property {boolean} _neuralFallbackToastShown - one hardware-fallback toast
    *   per session, not one per failed call in a batch.
    * @property {boolean} _magicFixAutoProcess - Magic Fix set this before opening
@@ -249,6 +261,8 @@
     neuralModels: null,
     // Magic Fix pressed before the probe resolved: arm Stage 0 when it does
     _aiDenoiseWanted: false,
+    // the card whose per-file controls are in the phone's bottom sheet
+    _inspectorCard: null,
     // set in initNeural(): nothing is installed but the model manager could
     // fetch the quantised weights, so the toggle offers to do exactly that
     // instead of sitting disabled.
@@ -301,12 +315,16 @@
    *   set when that stage really ran (see computeComparePreview()).
    * @property {?Object} previewStage0 - what Stage 0 reported for that render
    *   (chunks, underflows, timing), or `null`.
+   * @property {boolean} [isInspected] - this card's controls are currently in
+   *   the phone's bottom sheet; only ever one card at a time.
    * @property {?Object} result - the finished render (channels or an OPFS key,
    *   plus its rate and length).
    * @property {number} progress - 0…1 of the current step, for the bar.
    * @property {?string} error - a failed step's message, or `null`.
    * @property {Object<string, Element>} el - the card's DOM handles (see
-   *   `createCard()`), so a repaint never queries the document again.
+   *   `createCard()`), so a repaint never queries the document again. `grid`
+   *   is the `.card-grid` holding the per-file controls: it is the node the
+   *   bottom sheet adopts on a phone, and closing the sheet puts it back.
    * @property {RSUI.Waveform} wave - the A/B canvas controller.
    * @property {number} [_workT0] - when the current step started, for the ETA.
    * @property {string} [_uploadOpfsKey] - scratch key of a streamed upload.
@@ -1074,6 +1092,8 @@
         window: $('[data-slot="window"]', node),
         seek: $('[data-slot="seek"]', node),
         time: $('[data-slot="time"]', node),
+        grid: $('.card-grid', node),
+        inspect: $('[data-act="inspect"]', node),
         preset: $('[data-slot="preset"]', node),
         power: $('[data-act="power"]', node),
         powerOut: $('[data-slot="power"]', node),
@@ -1133,6 +1153,15 @@
   function refreshCardText(card) {
     const a = card.analysis;
     if (!a) { setNote(card, t('note.decode')); return; }
+    if (State._inspectorCard === card) {
+      const sub = $('#cardSheetSub');
+      if (sub) sub.textContent = t('meta.line', {
+        dur: Codecs.formatDuration(a.duration),
+        ch: a.channels > 1 ? 'Stereo' : 'Mono',
+        sr: Codecs.formatRate(a.sampleRate, global.RSi18n.lang),
+        size: Codecs.formatBytes(card.size, global.RSi18n.lang),
+      });
+    }
     card.el.meta.textContent = t('meta.line', {
       dur: Codecs.formatDuration(a.duration),
       ch: a.channels > 1 ? 'Stereo' : 'Mono',
@@ -1195,6 +1224,58 @@
     card.el.findings.appendChild(UI.findingsList(r, global.RSi18n.lang));
   }
 
+  /* ---------------------------------------------------------- card inspector */
+
+  /**
+   * Open the phone's bottom sheet with this card's per-file controls in it.
+   *
+   * On a phone the card itself stops carrying the grid: `.card-grid` is moved
+   * into the sheet, where CSS lays it out as one vertical column — profile,
+   * power, the A/B pair and the save buttons, in that order, full width. The
+   * node is *moved*, not copied, so the slider keeps its listener and the A/B
+   * buttons keep their `is-active` state, and `closeInspector()` puts it back
+   * at the exact position it came from.
+   *
+   * On a desktop this is a deliberate no-op: the card already shows every
+   * control, and a drawer over a 1440 px layout would be a regression dressed
+   * up as a feature.
+   * @param {RSApp.Card} card - the card to inspect.
+   * @returns {boolean} `true` when the sheet really opened.
+   */
+  function openInspector(card) {
+    if (!card || !card.el || !card.el.grid) return false;
+    if (!UI.sheet || typeof UI.sheet.open !== 'function') return false;
+    if (!UI.sheet.isSmallViewport()) return false;
+    // a second card's inspector replaces the first one's, never stacks
+    if (State._inspectorCard && State._inspectorCard !== card) closeInspector();
+    const opened = UI.sheet.open({
+      title: card.name,
+      subtitle: card.el.meta ? card.el.meta.textContent : '',
+      body: card.el.grid,
+      onClose: () => {
+        card.el.card.classList.remove('is-inspected');
+        card.isInspected = false;
+        if (State._inspectorCard === card) State._inspectorCard = null;
+      },
+    });
+    if (!opened) return false;
+    State._inspectorCard = card;
+    card.isInspected = true;
+    card.el.card.classList.add('is-inspected');
+    vibrate(8, card.el.inspect || card.el.card);
+    return true;
+  }
+
+  /**
+   * Close whichever card's controls the sheet is holding, if any. Safe to call
+   * when nothing is open — the card queue calls it on every removal.
+   * @returns {void}
+   */
+  function closeInspector() {
+    if (UI.sheet && typeof UI.sheet.close === 'function') UI.sheet.close();
+    State._inspectorCard = null;
+  }
+
   /* -------------------------------------------------------------- card wiring */
 
   /**
@@ -1209,6 +1290,27 @@
     const node = card.el.card;
 
     $('[data-act="remove"]', node).addEventListener('click', () => removeCard(card));
+
+    // The card's own drawer affordance. It is a real button, so it is reachable
+    // by keyboard and announced by a screen reader — the whole-card tap below
+    // is a convenience on top of it, never the only way in.
+    if (card.el.inspect) {
+      card.el.inspect.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        openInspector(card);
+      });
+    }
+
+    // A tap anywhere on the card that is not itself a control opens the
+    // inspector. Restricting it to the card's own chrome is what keeps the
+    // gesture from stealing a slider drag, a seek, a play button or a link.
+    node.addEventListener('click', (ev) => {
+      if (!UI.sheet || !UI.sheet.isSmallViewport()) return;
+      if (UI.sheet.isOpen()) return;
+      const t = ev.target;
+      if (t && t.closest && t.closest('button, a, input, select, textarea, label, canvas, summary, details, .seek, .player, .chip')) return;
+      openInspector(card);
+    });
 
     $('[data-act="play"]', node).addEventListener('click', () => {
       if (State.current === card && Engine.playing) Engine.pause();
@@ -1457,7 +1559,10 @@
     Engine.setBypass(State.ab === 'original');
     $$('#abSwitch button').forEach((b) => b.classList.toggle('is-active', b.getAttribute('data-ab') === State.ab));
     for (const c of State.cards) {
-      $$('[data-act="ab"] button', c.el.card).forEach((b) => {
+      // the grid is the stable home of the per-file A/B buttons: on a phone it
+      // may currently be living inside the inspector sheet, and a selector run
+      // against the card would then find nothing to repaint
+      $$('[data-act="ab"] button', c.el.grid || c.el.card).forEach((b) => {
         const on = State.ab !== 'compare' && b.getAttribute('data-ab') === State.ab;
         b.classList.toggle('is-active', on);
       });
@@ -1524,7 +1629,7 @@
       const modes = this.availableModes();
       const i = modes.indexOf(this.mode);
       const next = modes[(i + 1) % modes.length];
-      vibrate(8);
+      vibrate(8, this.btn);
       // 'original'/'restored' also exist on the top A/B switch — go through
       // setAB() so the two controls can never show something different
       if (next === 'ai') { this.mode = next; this.engage(); } else { setAB(next); }
@@ -1534,7 +1639,7 @@
       if (this.holding || !State.current) return;
       this.holding = true;
       this._holdT0 = nowMs();
-      vibrate(12);
+      vibrate(12, this.btn);
       this.engage();
     },
 
@@ -2274,6 +2379,7 @@
    * @returns {void}
    */
   function removeCard(card) {
+    if (State._inspectorCard === card) closeInspector();
     if (State.current === card) { Engine.stop(); State.current = null; }
     clearTimeout(card._previewTimer);
     if (card.wave && card.wave.destroy) card.wave.destroy();
@@ -2296,6 +2402,7 @@
    * @returns {void}
    */
   function clearAll() {
+    closeInspector();
     Engine.stop();
     State.current = null;
     Job.end();
@@ -2428,7 +2535,7 @@
       // a tiny pulse every 10 % — tactile ticks on a slider that otherwise
       // gives a touch screen no physical detents to feel
       const decile = Math.round(State.power * 10);
-      if (decile !== lastPowerDecile) { lastPowerDecile = decile; vibrate(6); }
+      if (decile !== lastPowerDecile) { lastPowerDecile = decile; vibrate(6, $('#powerVal')); }
       for (const c of State.cards) {
         if (c.power === null) {
           c.el.power.value = power.value;
@@ -2440,13 +2547,13 @@
       if (card) applyLiveParams(card);
       debouncePreviewAll();
     });
-    power.addEventListener('change', () => vibrate(14));
+    power.addEventListener('change', () => vibrate(14, power));
 
     const presetSel = $('#presetSelect');
     presetSel.value = State.preset;
     presetSel.addEventListener('change', () => {
       State.preset = presetSel.value;
-      vibrate(10);
+      vibrate(10, presetSel);
       for (const c of State.cards) {
         if (c.preset === null || c.preset === undefined) c.el.preset.value = State.preset;
       }
@@ -2457,7 +2564,7 @@
 
     $$('#abSwitch button').forEach((b) => {
       b.addEventListener('click', () => {
-        vibrate(10);
+        vibrate(10, b);
         setAB(b.getAttribute('data-ab'));
         if (!Engine.playing && State.cards.length) {
           const target = State.current || State.cards.find((c) => c.previewBuffer);
@@ -2553,7 +2660,7 @@
   async function applyMagicFix() {
     const btn = $('#btnMagicFix');
     if (btn && btn.classList.contains('is-firing')) return;   // ignore a double-tap mid-run
-    vibrate(16);
+    vibrate(16, btn);
     armMagicSettings();
     if (!State.cards.length) {
       State._magicFixAutoProcess = State.touch;
@@ -2880,7 +2987,13 @@
    * @property {function(): Promise<void>} initStreaming - probe OPFS and the codecs.
    * @property {function(): void} initCOI - the cross-origin-isolation probe.
    * @property {function(): Promise<void>} initNeural - probe the neural worker.
-   * @property {function(number=): void} vibrate - haptic feedback where it exists.
+   * @property {function((number|number[]), (Element|null)=): string} vibrate
+   *   - haptic feedback: a vibration where the platform has one, a
+   *   micro-animation where it does not.
+   * @property {function(RSApp.Card): boolean} openInspector - the phone's
+   *   bottom sheet with this card's controls.
+   * @property {function(): void} closeInspector - dismiss it.
+   * @property {RSUI.BottomSheetApi} sheet - the drawer module itself.
    * @property {function(): Promise<void>} applyMagicFix - the one-tap restoration.
    * @property {function(): void} armMagicSettings - set the Magic Fix state.
    * @property {RSApp.FabController} FAB - the floating A/B button.
@@ -2893,6 +3006,7 @@
     setAB, ensurePlaying, clearAll, removeCard, refreshPreview, P,
     initStreaming, initCOI, initNeural,
     vibrate, applyMagicFix, armMagicSettings, FAB,
+    openInspector, closeInspector, sheet: UI.sheet,
   };
   global.RSApp = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;

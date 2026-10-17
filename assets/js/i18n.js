@@ -130,6 +130,10 @@
       'ui.percent': '{v} %',
 
       'card.remove': 'Datei entfernen',
+      'card.inspect': 'Einstellungen für diese Datei',
+      'sheet.close': 'Schließen',
+      'sheet.done': 'Fertig',
+      'sheet.hint': 'Profil, Kraft, Vergleich und Speichern für diese Datei — von unten eingeblendet, damit nichts seitwärts scrollt.',
       'card.waveAria': 'Wellenform-Vergleich Original und Repariert',
       'card.legendOriginal': 'Original',
       'card.legendRestored': 'Repariert',
@@ -521,6 +525,10 @@
       'ui.percent': '{v} %',
 
       'card.remove': 'Remove file',
+      'card.inspect': 'Settings for this file',
+      'sheet.close': 'Close',
+      'sheet.done': 'Done',
+      'sheet.hint': 'Profile, power, comparison and save for this file — slid up from the bottom so nothing scrolls sideways.',
       'card.waveAria': 'Waveform comparison of original and restored audio',
       'card.legendOriginal': 'Original',
       'card.legendRestored': 'Restored',

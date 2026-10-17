@@ -326,6 +326,24 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await touchUp();
   };
   /**
+   * The same real-finger swipe, on the other axis: what a page pan and a
+   * drawer's own list scroll have to be distinguishable by.
+   * @param {number} x - start x, CSS pixels.
+   * @param {number} y - start y, CSS pixels.
+   * @param {number} dy - total vertical travel; negative drags upwards.
+   * @param {number} [steps] - how many move events to spread it over.
+   * @returns {Promise<void>}
+   */
+  const swipeV = async (x, y, dy, steps) => {
+    const n = steps || 14;
+    await touchDown(x, y, 1);
+    for (let i = 1; i <= n; i++) {
+      await page.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [touchPt(x, y + (dy * i) / n, 1)] });
+      await sleep(16);
+    }
+    await touchUp();
+  };
+  /**
    * Poll a page expression until it holds.
    * @param {string} expr - the expression, evaluated in the page.
    * @param {number} [tries] - attempts, 300 ms apart.
@@ -1277,11 +1295,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check('the phone render was photographed mid-flight', mobileShot === true);
   check('no sideways scroll on the phone while the docked bar is up',
     await evalJS(`document.documentElement.scrollWidth <= window.innerWidth + 1`));
+  const docked = await evalJS(`(() => { const card = document.querySelector('#fileList .card');
+    const bar = document.getElementById('globalProgress').getBoundingClientRect();
+    const r = card.getBoundingClientRect();
+    const cover = Math.max(0, Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0));
+    const hidden = bar.height ? Math.max(0, Math.min(r.bottom, bar.top) - Math.max(r.top, 0)) : cover;
+    return { cardTop: Math.round(r.top), cardBottom: Math.round(r.bottom),
+      barTop: Math.round(bar.top), barVisible: !document.getElementById('globalProgress').hidden,
+      shown: Math.round(hidden), cover: Math.round(cover), vh: window.innerHeight }; })()`);
   check('the docked bar does not swallow the card it belongs to',
-    await evalJS(`(() => { const card = document.querySelector('#fileList .card');
-      const bar = document.getElementById('globalProgress').getBoundingClientRect();
-      const r = card.getBoundingClientRect();
-      return r.bottom <= bar.top + 1 || r.top >= bar.bottom - 1 || r.bottom < window.innerHeight; })()`));
+    docked.shown >= (docked.barVisible ? 120 : 1),
+    'card ' + docked.cardTop + '…' + docked.cardBottom + ' · bar ' + (docked.barVisible ? 'top ' + docked.barTop : 'away')
+      + ' · ' + docked.shown + ' px of the card left visible');
   await evalJS(`RSApp.State.format = 'wav'`);
   await evalJS(`RSApp.clearAll()`);
   await sleep(200);
@@ -1716,6 +1741,240 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check('the export format is back where the section found it',
     await evalJS(`RSApp.State.format === 'wav' && document.querySelector('[data-format="wav"]').classList.contains('is-active')`),
     await evalJS(`RSApp.State.format`));
+
+  /* ═════════ the phone inspector: a vertical drawer, and no gesture fights ══
+     The brief's two conflicts are tested where they actually happen: a real
+     finger on the card (does the drawer open), a real vertical drag inside it
+     (does the page behind stay put), a real vertical drag on the page after it
+     is closed (does the page pan again), and a real horizontal swipe on the
+     main rack (does the global carousel still page). Nothing here writes a
+     scroll offset to make a gesture "work". */
+  section('beta · the phone inspector, and the gestures it must not steal');
+  await useDevice('iphone14pro');
+  await evalJS(`RSApp.closeInspector(); scrollTo(0, 0); true`);
+  await sleep(300);
+  const beforeIx = await evalJS(`({ open: RSApp.sheet.isOpen(), small: RSApp.sheet.isSmallViewport(),
+    gridInCard: !!document.querySelector('.card > .card-grid'),
+    inspectVisible: getComputedStyle(document.querySelector('.card [data-act="inspect"]')).display })`);
+  check('the drawer starts closed, and the card still owns its controls',
+    beforeIx.open === false && beforeIx.small === true && beforeIx.gridInCard === true,
+    'open ' + beforeIx.open + ' · small viewport ' + beforeIx.small + ' · grid in card ' + beforeIx.gridInCard);
+  check('…and the card shows an explicit settings button of its own',
+    beforeIx.inspectVisible !== 'none', 'display ' + beforeIx.inspectVisible);
+
+  /* The card is taller than the phone screen, so the tap has to be aimed at a
+     part of it that is actually under the thumb. The file-name row is the
+     card's own chrome: no control lives there, which is exactly the target the
+     whole-card gesture is for. */
+  await evalJS(`document.querySelector('.card [data-slot="name"]').scrollIntoView({ block: 'center', behavior: 'instant' });
+    scrollBy(0, -70); true`);
+  await sleep(350);
+  const cardBody = await pointAt('.card [data-slot="name"]');
+  check('the card body is under the thumb before the gesture starts',
+    !!cardBody && cardBody.w > 40 && cardBody.y > 60 && cardBody.y < 852,
+    cardBody ? Math.round(cardBody.w) + '×' + Math.round(cardBody.h) + ' px at ' + Math.round(cardBody.x)
+      + ',' + Math.round(cardBody.y) : 'no card');
+  const pageBefore = await evalJS(`Math.round(scrollY)`);
+  await tapAt(cardBody.x, cardBody.y, 40);
+  await sleep(600);
+  const ix = await evalJS(`(() => {
+    const s = document.getElementById('cardSheet');
+    const b = document.getElementById('cardSheetBody');
+    const g = document.querySelector('.card-grid');
+    const fields = Array.from(g.querySelectorAll('.field'));
+    const box = s.getBoundingClientRect();
+    const cs = getComputedStyle(b);
+    const scs = getComputedStyle(s);
+    const rects = fields.map((f) => { const r = f.getBoundingClientRect();
+      return { top: Math.round(r.top), left: Math.round(r.left), w: Math.round(r.width) }; });
+    return {
+      open: RSApp.sheet.isOpen(), hidden: s.hidden, role: s.getAttribute('role'), modal: s.getAttribute('aria-modal'),
+      fixed: scs.position, bottomEdge: Math.round(innerHeight - box.bottom), w: Math.round(box.width),
+      vw: innerWidth, h: Math.round(box.height), vh: innerHeight,
+      inSheet: !!g && g.parentNode === b, fields: fields.length, rects,
+      scrollW: b.scrollWidth, clientW: b.clientWidth,
+      touchAction: cs.touchAction, overflowY: cs.overflowY,
+      overscrollY: cs.overscrollBehaviorY || cs.overscrollBehavior,
+      locked: document.body.style.position, inert: document.querySelector('main').hasAttribute('inert'),
+      sheetTouch: scs.touchAction, title: document.getElementById('cardSheetTitle').textContent,
+      cardName: RSApp.State.cards[0] ? RSApp.State.cards[0].name : '',
+    };
+  })()`);
+  check('a thumb on the card slides the inspector up from the bottom edge',
+    ix.open === true && ix.hidden === false && ix.fixed === 'fixed' && ix.bottomEdge === 0 && ix.w === ix.vw,
+    ix.fixed + ' · ' + ix.w + ' px wide on a ' + ix.vw + ' px screen · ' + ix.bottomEdge + ' px from the bottom · '
+      + ix.h + ' of ' + ix.vh + ' px tall');
+  check('it is a real modal dialog, named by the file it belongs to',
+    ix.role === 'dialog' && ix.modal === 'true' && ix.title === ix.cardName,
+    'role ' + ix.role + ' · aria-modal ' + ix.modal + ' · "' + ix.title + '"');
+  check('the four per-file controls moved into it, one per row, full width',
+    ix.inSheet === true && ix.fields === 4 && ix.rects.every((r, i) => r.w >= Math.round(ix.w * 0.8)
+      && (i === 0 || r.top > ix.rects[i - 1].top)),
+    ix.inSheet ? ix.fields + ' fields · ' + ix.rects.map((r) => r.w + 'px@' + r.top).join(' · ') : 'grid not in the sheet');
+  check('nothing inside the drawer can be scrolled sideways',
+    ix.scrollW <= ix.clientW + 1, ix.scrollW + ' px of content in ' + ix.clientW + ' px');
+  check('the drawer body pans vertically only, and never chains that scroll to the page',
+    ix.touchAction === 'pan-y' && ix.overflowY === 'auto' && /contain/.test(ix.overscrollY),
+    'touch-action ' + ix.touchAction + ' · overflow-y ' + ix.overflowY + ' · overscroll-behavior-y ' + ix.overscrollY);
+  check('the page behind is pinned and inert while it is open',
+    ix.locked === 'fixed' && ix.inert === true, 'body position ' + ix.locked + ' · main inert ' + ix.inert);
+  await shotAt1x('26-iphone14pro-inspector');
+
+  /* A vertical drag inside the drawer must not move the page behind it: the
+     scrim is a separate layer and the body is pinned, so the only thing that
+     could scroll is the drawer's own list. */
+  const pageY0 = await evalJS(`scrollY`);
+  const sheetBodyPt = await pointAt('#cardSheetBody');
+  // start on the drawer's own padding, not on a slider's thumb: the point of
+  // the row is that the *body* pans, not that a control happened to accept a drag
+  await swipeV(sheetBodyPt.left + 8, sheetBodyPt.top + Math.round(sheetBodyPt.h * 0.5), -170);
+  await sleep(500);
+  const afterDrag = await evalJS(`({ y: scrollY, locked: document.body.style.position,
+    sheetScroll: document.getElementById('cardSheetBody').scrollTop, open: RSApp.sheet.isOpen() })`);
+  check('a vertical swipe inside the drawer never scrolls the page behind it',
+    afterDrag.y === pageY0 && afterDrag.locked === 'fixed' && afterDrag.open === true,
+    'page ' + pageY0 + ' → ' + afterDrag.y + ' px · body ' + afterDrag.locked + ' · drawer scrollTop '
+      + afterDrag.sheetScroll);
+
+  /* The grabber is the one element that drags the panel, and it is the only
+     one with `touch-action: none` — which is why it cannot fight the list. */
+  const grab = await pointAt('#cardSheetGrab');
+  const grabTouch = await evalJS(`getComputedStyle(document.getElementById('cardSheetGrab')).touchAction`);
+  check('the grabber is the only drag handle, and it opts out of native panning',
+    grabTouch === 'none' && grab.h > 0, 'touch-action ' + grabTouch + ' · ' + Math.round(grab.w) + '×' + Math.round(grab.h) + ' px');
+  await touchDown(grab.x, grab.y, 1);
+  for (let i = 1; i <= 12; i++) {
+    await page.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [touchPt(grab.x, grab.y + i * 12, 1)] });
+    await sleep(16);
+  }
+  await touchUp();
+  await sleep(600);
+  const afterDismiss = await evalJS(`({ open: RSApp.sheet.isOpen(),
+    backInCard: !!document.querySelector('.card > .card-grid'),
+    body: document.body.style.position, y: scrollY })`);
+  check('dragging the grabber down dismisses the drawer',
+    afterDismiss.open === false, 'open ' + afterDismiss.open);
+  check('…and the controls are back inside the card, with the page unlocked where it was',
+    afterDismiss.backInCard === true && afterDismiss.body === '' && Math.abs(afterDismiss.y - pageBefore) <= 1,
+    'grid in card ' + afterDismiss.backInCard + ' · body position "' + afterDismiss.body + '" · scrollY '
+      + afterDismiss.y + ' (the page was at ' + pageBefore + ' when the drawer opened)');
+
+  /* With the drawer gone, the page has to pan again on the same finger. */
+  await evalJS(`scrollTo(0, 0)`);
+  await sleep(250);
+  await swipeV(Math.round(393 / 2), Math.round(852 * 0.72), -300);
+  await sleep(700);
+  const panned = await evalJS(`scrollY`);
+  check('a vertical swipe pans the page again once the drawer is closed',
+    panned > 60, 'scrollY ' + panned);
+
+  /* …and the global rack keeps its horizontal swipe, which is the gesture the
+     drawer must never have taken over. */
+  await evalJS(`document.getElementById('ctlRack').scrollIntoView({ block: 'center', behavior: 'instant' });
+    document.getElementById('ctlRack').scrollLeft = 0; true`);
+  await sleep(600);
+  /* The swipe starts in the rack's own gutter, between two snap pages — the
+     one part of the rack that is the scroller itself rather than a control
+     inside one of its pages. */
+  const rackAim = await evalJS(`(() => {
+    const r = document.getElementById('ctlRack');
+    const b = r.getBoundingClientRect();
+    if (!b.height) return { bad: 'the rack has no height', visible: false };
+    const y = Math.round(b.top + b.height / 2);
+    const xs = [Math.round(b.right - 6), Math.round(b.left + 6), Math.round(b.left + b.width / 2)];
+    for (const x of xs) {
+      const el = document.elementFromPoint(x, y);
+      if (el && (el === r || r.contains(el)) && !(el.closest && el.closest('.ctl-group'))) {
+        return { x, y, w: b.width, h: b.height, left: b.left, top: b.top,
+          hit: el.tagName + (el.id ? '#' + el.id : '') + '.' + (el.className || ''),
+          hidden: document.getElementById('controls').hidden, bad: null };
+      }
+    }
+    const under = document.elementFromPoint(xs[0], y);
+    return { x: xs[0], y, w: b.width, h: b.height, left: b.left, top: b.top,
+      hit: under ? under.tagName + '#' + under.id + '.' + under.className : 'nothing',
+      hidden: document.getElementById('controls').hidden, bad: 'no gutter point on the rack' };
+  })()`);
+  check('the rack is on screen and its own gutter is under the finger',
+    !rackAim.bad && rackAim.h > 20 && rackAim.w > 200 && rackAim.y > 0 && rackAim.y < 852,
+    rackAim.bad || (Math.round(rackAim.w) + '×' + Math.round(rackAim.h) + ' px at '
+      + Math.round(rackAim.x) + ',' + rackAim.y + ' hit ' + rackAim.hit));
+  await swipe(rackAim.x, rackAim.y, -Math.round(rackAim.w * 0.6));
+  await sleep(900);
+  const rackAfter = await evalJS(`(() => { const r = document.getElementById('ctlRack');
+    return { left: Math.round(r.scrollLeft), page: Array.from(document.getElementById('ctlDots').children)
+      .findIndex((d) => d.classList.contains('is-active')), visible: !document.getElementById('controls').hidden }; })()`);
+  check('the main rack still pages horizontally — no gesture is being stolen from it',
+    rackAfter.left > 40 && rackAfter.page === 1,
+    'scrollLeft ' + rackAfter.left + ' · page ' + (rackAfter.page + 1) + ' · controls visible ' + rackAfter.visible);
+
+  /* Android Chrome has the Vibration API; iOS Safari does not. Both paths are
+     exercised through the same helper, on the same real touch stack. */
+  await useDevice('pixel7');
+  await evalJS(`RSApp.closeInspector(); window.__buzz = 0;
+    Object.defineProperty(navigator, 'vibrate', { value: (p) => { window.__buzz++; return true; }, configurable: true });
+    document.querySelector('.card [data-act="inspect"]').scrollIntoView({ block: 'center', behavior: 'instant' });
+    true`);
+  await sleep(300);
+  /* Watch the button's class list while the finger lands: the fallback lasts
+     420 ms and is then gone again, so it has to be caught as it happens
+     rather than inspected after the fact. */
+  await evalJS(`(() => {
+    window.__hap = { seen: false, anim: '', dur: '', n: 0 };
+    const b = document.querySelector('.card [data-act="inspect"]');
+    new MutationObserver(() => {
+      if (!b.classList.contains('is-haptic')) return;
+      const cs = getComputedStyle(b);
+      window.__hap = { seen: true, anim: cs.animationName, dur: cs.animationDuration, n: window.__hap.n + 1 };
+    }).observe(b, { attributes: true, attributeFilter: ['class'] });
+  })()`);
+  const pxTap = await pointAt('.card [data-act="inspect"]');
+  await tapAt(pxTap.x, pxTap.y, 40);
+  await sleep(600);
+  const android = await evalJS(`({ open: RSApp.sheet.isOpen(), buzz: window.__buzz,
+    inSheet: !!document.querySelector('#cardSheetBody .card-grid'),
+    pulsed: window.__hap.seen, mode: typeof RSApp.vibrate })`);
+  check('the same drawer opens on the Pixel 7 profile',
+    android.open === true && android.inSheet === true, 'open ' + android.open + ' · grid in sheet ' + android.inSheet);
+  check('Android Chrome gets a real vibration, and no animation on top of it',
+    android.buzz > 0 && android.pulsed === false, android.buzz + ' vibrate() call(s) · pulsed ' + android.pulsed);
+  await evalJS(`RSApp.sheet.close(); true`);
+  await sleep(400);
+
+  /* iOS Safari emulation: the Vibration API is simply absent there, which is
+     the one thing about Safari this Chromium-based harness can reproduce
+     honestly. The visual fallback is what has to carry the feedback. */
+  await evalJS(`Object.defineProperty(navigator, 'vibrate', { value: undefined, configurable: true });
+    RSApp.closeInspector();
+    document.querySelector('.card [data-act="inspect"]').scrollIntoView({ block: 'center', behavior: 'instant' });
+    true`);
+  await sleep(300);
+  await evalJS(`(() => {
+    window.__hap = { seen: false, anim: '', dur: '', n: 0 };
+    const b = document.querySelector('.card [data-act="inspect"]');
+    new MutationObserver(() => {
+      if (!b.classList.contains('is-haptic')) return;
+      const cs = getComputedStyle(b);
+      window.__hap = { seen: true, anim: cs.animationName, dur: cs.animationDuration, n: window.__hap.n + 1 };
+    }).observe(b, { attributes: true, attributeFilter: ['class'] });
+  })()`);
+  const iosTap = await pointAt('.card [data-act="inspect"]');
+  await tapAt(iosTap.x, iosTap.y, 40);
+  await sleep(450);
+  const ios = await evalJS(`(() => { const b = document.querySelector('.card [data-act="inspect"]');
+    return { supported: RSUI.hapticSupported(), open: RSApp.sheet.isOpen(),
+      pulsed: window.__hap.seen, anim: window.__hap.anim, dur: window.__hap.dur, n: window.__hap.n,
+      mode: RSApp.vibrate(8, b) }; })()`);
+  check('without the Vibration API the control itself acknowledges the touch',
+    ios.supported === false && ios.pulsed === true && ios.mode === 'visual',
+    'hapticSupported ' + ios.supported + ' · class ' + ios.pulsed + ' · mode ' + ios.mode);
+  check('…through a real running animation, not a class nobody styles',
+    /hapticKnock/.test(ios.anim) && parseFloat(ios.dur) > 0,
+    'animation ' + ios.anim + ' · ' + ios.dur);
+  await evalJS(`RSApp.closeInspector(); true`);
+  await sleep(400);
+  check('the drawer is closed again before the rest of the suite runs',
+    (await evalJS(`RSApp.sheet.isOpen()`)) === false);
 
   /* reduced motion is a preference the app already implements — check the
      implementation, not the intention */

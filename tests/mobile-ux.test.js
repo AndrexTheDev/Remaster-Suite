@@ -72,9 +72,36 @@ function staticChecks() {
     'the FAB is fixed and clears the home-indicator safe area');
 
   section('static · haptic feedback is wired through a safe helper');
-  ok(/function vibrate\(pattern\)/.test(appJs), 'a dedicated vibrate() helper exists');
+  ok(/function vibrate\(pattern, anchor\)/.test(appJs), 'a dedicated vibrate() helper exists, and takes the control it belongs to');
+  ok(/UI\.haptic\(anchor \|\| null, pattern\)/.test(appJs),
+    'it goes through the UI layer, which owns the visual fallback for a platform without the Vibration API');
   const calls = (appJs.match(/\bvibrate\(/g) || []).length;
   ok(calls >= 6, 'vibrate() is actually called from several interactions, not just declared', calls + ' call sites');
+
+  section('static · the phone inspector drawer');
+  ok(/<section class="sheet" id="cardSheet" role="dialog" aria-modal="true"/.test(html),
+    'a real modal dialog lives in the markup, not a styled div');
+  ok(/aria-labelledby="cardSheetTitle"/.test(html) && /aria-describedby="cardSheetHint"/.test(html),
+    'the dialog is named and described for a screen reader');
+  ok(/<div class="sheet-body" id="cardSheetBody"><\/div>/.test(html), 'it has its own body slot for the adopted controls');
+  ok(/id="cardSheetGrab"/.test(html), 'a grabber is there, which is the only drag handle');
+  ok(/data-act="inspect"/.test(html) && /data-i18n-aria="card.inspect"/.test(html),
+    'each card carries its own labelled "settings" button, reachable by keyboard');
+  ok(/\.card-inspect\s*\{\s*display:\s*none/.test(css), 'that button is hidden where the card already shows its controls');
+
+  const m768 = css.slice(css.indexOf('@media (max-width: 768px)'));
+  ok(/\.card-inspect\s*\{\s*display:\s*grid/.test(m768), '…and appears exactly at the phone breakpoint');
+  ok(/\.card-grid\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*;?\s*\}/.test(m768),
+    'the per-file controls are one column on a phone — no sideways strip inside a card');
+  ok(!/\.card[^{]*(?:card-grid|field)[^{]*\{[^}]*overflow-x/.test(m768),
+    'no control inside a card is a horizontal scroller any more');
+  ok(/\.sheet-body\s*\{[^}]*touch-action:\s*pan-y/.test(css), 'the drawer body allows vertical panning only');
+  ok(/\.sheet-body\s*\{[^}]*overscroll-behavior:\s*contain/.test(css),
+    'a scroll inside the drawer never chains to the page behind it');
+  ok(/\.ctl-rack\s*\{[^}]*overscroll-behavior-x:\s*contain/s.test(css),
+    'the main rack keeps its horizontal swipe, and it stays inside the rack');
+  ok(/@keyframes hapticKnock/.test(css) && /\.is-haptic\s*\{[^}]*animation:\s*hapticKnock/.test(css),
+    'the haptic fallback is a real micro-animation, not just a class name');
 }
 
 /* ------------------------------------------------------------------- engine */
@@ -285,10 +312,152 @@ async function appChecks() {
   }
 }
 
+/* ---------------------------------------------------------------- inspector */
+
+async function inspectorChecks() {
+  section('app · the bottom-sheet inspector on a phone');
+  {
+    const win = boot(true);
+    Object.defineProperty(win, 'innerWidth', { value: 390, configurable: true });
+    Object.defineProperty(win, 'innerHeight', { value: 844, configurable: true });
+    const App = win.RSApp;
+    await new Promise((r) => setTimeout(r, 30));
+    await App.addFiles([wavFile(win, [tone(220, 3, SR), tone(220, 3, SR)], SR, 'inspector.wav')]);
+    const card = App.State.cards[0];
+    ok(!!card && !!card.el.grid, 'a card owns a grid element for its controls');
+
+    const order = Array.from(card.el.grid.children).map((n) => n.className);
+    const idx = (frag) => order.findIndex((c) => c.indexOf(frag) !== -1);
+    ok(idx('field') === 0 && order.length === 4,
+      'the grid holds exactly the four per-file blocks: profile, power, compare, save', order.join(' · '));
+    ok(idx('field') === 0, 'they are already in the reading order the drawer needs');
+
+    const homeIndex = Array.prototype.indexOf.call(card.el.card.children, card.el.grid);
+    const opened = App.openInspector(card);
+    ok(opened === true && App.sheet.isOpen() === true, 'opening the inspector presents the sheet');
+    ok(win.document.getElementById('cardSheet').hidden === false
+      && win.document.getElementById('cardSheetScrim').hidden === false,
+      'both the panel and its scrim are on screen');
+    ok(card.el.grid.parentNode === win.document.getElementById('cardSheetBody'),
+      'the card\'s own grid moved into the drawer — not a copy of it');
+    ok(!!card.el.grid.querySelector('[data-act="preset"]')
+      && !!card.el.grid.querySelector('[data-act="power"]')
+      && !!card.el.grid.querySelector('[data-act="ab"]')
+      && !!card.el.grid.querySelector('[data-act="download"]'),
+      'profile, power, the A/B pair and save are all inside the drawer');
+    ok(card.el.card.classList.contains('is-inspected'), 'the card is marked as the one being inspected');
+
+    const lock = {
+      body: win.document.body.style.position,
+      html: win.document.documentElement.classList.contains('sheet-open'),
+      inert: win.document.querySelector('main').hasAttribute('inert'),
+    };
+    ok(lock.body === 'fixed' && lock.html === true,
+      'the page behind is pinned, which is what actually stops iOS Safari scrolling it', lock.body);
+    ok(lock.inert === true, 'everything outside the drawer is inert — out of the tab order and the a11y tree');
+    ok(win.document.activeElement && win.document.activeElement.id === 'cardSheetClose',
+      'focus moved into the sheet, onto its own close button');
+
+    App.sheet.close();
+    ok(App.sheet.isOpen() === false, 'closing dismisses it');
+    ok(card.el.grid.parentNode === card.el.card
+      && Array.prototype.indexOf.call(card.el.card.children, card.el.grid) === homeIndex,
+      'the grid is back in exactly the slot it left', 'index ' + homeIndex);
+    ok(win.document.body.style.position === ''
+      && win.document.documentElement.classList.contains('sheet-open') === false,
+      'the page is unlocked again');
+    ok(win.document.querySelector('main').hasAttribute('inert') === false, 'and nothing is left inert');
+    ok(!card.el.card.classList.contains('is-inspected'), 'the card is no longer marked');
+
+    /* Every affordance closes it: the Done button, the scrim, and Escape. */
+    App.openInspector(card);
+    win.document.getElementById('cardSheetDone').click();
+    ok(App.sheet.isOpen() === false, 'the Done button closes the drawer');
+
+    App.openInspector(card);
+    win.document.getElementById('cardSheetScrim').click();
+    ok(App.sheet.isOpen() === false, 'a tap on the scrim closes it');
+
+    App.openInspector(card);
+    win.document.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    ok(App.sheet.isOpen() === false, 'Escape closes it');
+
+    /* A tap on the card body is the convenience path; a tap on a control is not. */
+    card.el.diagnosis.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+    ok(App.sheet.isOpen() === true, 'tapping the card body opens the drawer');
+    App.sheet.close();
+    App.openInspector(card);
+    App.sheet.close();
+    card.el.preset.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+    ok(App.sheet.isOpen() === false, 'tapping one of its controls does not — the gesture never steals a control');
+    card.el.inspect.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+    ok(App.sheet.isOpen() === true, 'the card\'s own settings button opens it too');
+    App.sheet.close();
+
+    /* A viewport that grows past the breakpoint must not leave a fixed panel
+       hovering over a desktop layout. */
+    App.openInspector(card);
+    Object.defineProperty(win, 'innerWidth', { value: 1280, configurable: true });
+    win.dispatchEvent(new win.Event('resize'));
+    ok(App.sheet.isOpen() === false && App.sheet.isSmallViewport() === false,
+      'resizing to a desktop width closes the drawer and returns the grid');
+
+    /* Removing the card while its grid is in the sheet must not strand it. */
+    Object.defineProperty(win, 'innerWidth', { value: 390, configurable: true });
+    App.openInspector(card);
+    App.removeCard(card);
+    ok(App.sheet.isOpen() === false && win.document.getElementById('cardSheetBody').children.length === 0,
+      'removing the inspected card closes the drawer and empties its body');
+
+    /* On a desktop the drawer is not offered at all. */
+    const desk = boot(false);
+    Object.defineProperty(desk, 'innerWidth', { value: 1440, configurable: true });
+    await new Promise((r) => setTimeout(r, 30));
+    await desk.RSApp.addFiles([wavFile(desk, [tone(220, 3, SR)], SR, 'desk.wav')]);
+    const dCard = desk.RSApp.State.cards[0];
+    ok(desk.RSApp.openInspector(dCard) === false && desk.RSApp.sheet.isOpen() === false,
+      'a desktop never gets the phone drawer — its card already shows every control');
+    ok(dCard.el.grid.parentNode === dCard.el.card, 'and the grid never moved');
+  }
+
+  section('app · haptic feedback on a platform without the Vibration API (iOS Safari)');
+  {
+    const win = boot(true);
+    const App = win.RSApp;
+    const UI = win.RSUI;
+    const el = win.document.getElementById('btnMagicFix');
+    ok(UI.hapticSupported() === false, 'jsdom has no navigator.vibrate — the same situation as iOS Safari');
+
+    const mode = App.vibrate(16, el);
+    ok(mode === 'visual' && el.classList.contains('is-haptic'),
+      'the call falls back to a visible knock on the control', mode);
+    ok(UI.pulse(el) === true && el.classList.contains('is-haptic'),
+      'the animation can also be asked for on its own (UI.pulse)');
+    await new Promise((r) => setTimeout(r, 520));
+    ok(!el.classList.contains('is-haptic'), 'the class cleans itself up — no stuck animation');
+
+    let seen = null;
+    Object.defineProperty(win.navigator, 'vibrate', { value: (p) => { seen = p; return true; }, configurable: true });
+    const buzz = App.vibrate([10, 20], el);
+    ok(buzz === 'vibrate' && Array.isArray(seen) && seen[0] === 10,
+      'where the API exists, it is the one used — no double feedback');
+    ok(!el.classList.contains('is-haptic'), 'and the visual fallback stays off');
+
+    Object.defineProperty(win.navigator, 'vibrate', { value: () => false, configurable: true });
+    const refused = App.vibrate(10, el);
+    ok(refused === 'visual' && el.classList.contains('is-haptic'),
+      'a policy that refuses the vibration still gets the visual answer');
+    Object.defineProperty(win.navigator, 'vibrate', { value: () => { throw new Error('blocked'); }, configurable: true });
+    ok(App.vibrate(10, el) === 'visual', 'a throwing implementation is handled the same way');
+    await new Promise((r) => setTimeout(r, 520));
+  }
+}
+
 async function main() {
   staticChecks();
   await engineChecks();
   await appChecks();
+  await inspectorChecks();
 
   console.log('\n' + '-'.repeat(60));
   console.log(failed ? failed + ' FAILED / ' + passed + ' passed' : 'ALL TESTS PASSED (' + passed + ')');
