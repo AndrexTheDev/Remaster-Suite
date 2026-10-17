@@ -202,6 +202,7 @@ function boot(touch) {
   win.URL.revokeObjectURL = () => {};
   Object.defineProperty(win.navigator, 'clipboard', { value: { writeText: async () => {} }, configurable: true });
   win.eval(fs.readFileSync(path.join(ROOT, 'assets/vendor/lame.min.js'), 'utf8'));
+  win.Worker = require('./encoding-worker-adapter.js');
   for (const f of ['dsp-utils.js', 'presets.js', 'i18n.js', 'library-loader.js', 'opfs-manager.js', 'codecs.js', 'analyzer.js', 'memory-guard.js', 'engine.js', 'ui.js', 'app.js']) {
     win.eval(fs.readFileSync(path.join(ROOT, 'assets/js', f), 'utf8'));
   }
@@ -271,9 +272,12 @@ async function appChecks() {
     await App.addFiles([wavFile(win, [tone(330, 5, SR), tone(330, 5, SR)], SR, 'take.wav')]);
 
     win.document.querySelector('#btnMagicFix').click();
-    await new Promise((r) => setTimeout(r, 300));
-
     const card = App.State.cards[0];
+    // The production WASM encoder boots in a real worker now. Await completion,
+    // not the old 300 ms mainthread-lamejs timing assumption.
+    const deadline = Date.now() + 15000;
+    while (card.status !== 'done' && Date.now() < deadline)
+      await new Promise((r) => setTimeout(r, 25));
     ok(card.status === 'done', '"auf Mobilgeräten soll dieser Button sofort … anwenden" — the file is fully processed, no extra tap needed', card.status);
     ok(!!card.result && (card.result.bytes || card.result.file), 'a real, saved-ready result came out of it');
   }

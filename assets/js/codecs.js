@@ -3,7 +3,7 @@
  * -----------------------------------------------------------------------------
  * Decoding : Web Audio (hardware independent) → optional FFmpeg.wasm rescue.
  * Encoding : WAV 16/24/32-bit written by hand (no dependency at all) and MP3 up
- *            to 320 kbps through lamejs, which runs inside a Web Worker so a
+ *            to 320 kbps through LAME WebAssembly, which runs inside a Web Worker so a
  *            long file never freezes the interface.
  * Packing  : JSZip, one click for the whole batch.
  * ========================================================================== */
@@ -14,8 +14,8 @@
  * Decoding: Web Audio first (hardware-independent, no dependency), with an
  * optional FFmpeg.wasm rescue for a container the browser itself refuses.
  * Encoding: WAV at 16, 24 or 32-bit float, written by hand, and MP3 up to
- * 320 kbps through lamejs — in a Web Worker when there is one, on the main
- * thread otherwise, but always in bounded chunks so a long file never freezes
+ * 320 kbps through LAME WebAssembly — in a Web Worker when there is one, never on the main
+ * thread, but always in bounded chunks so a long file never freezes
  * the interface and never sits encoded in the heap.
  * Packing: JSZip for the in-memory path, `RSOPFS.packZip` for the streamed one.
  *
@@ -72,6 +72,7 @@
    *   - encode one chunk's channels, in file order.
    * @property {function(): Promise<Object>} finish - flush and return the
    *   summary; must be called exactly once, and is idempotent.
+   * @property {function(): void} [abort] - discard an interrupted MP3 encoder lease.
    * @property {number} [rate] - the rate actually used (the MP3 encoder only).
    */
 
@@ -441,10 +442,8 @@
 
     await sink.write(new Uint8Array(DSP.wavHeader(nCh, sr, bitDepth || 16, dataSize)));
 
-    // ~4 MB per chunk: large enough to amortise the per-chunk overhead of a
-    // worker round-trip, small enough to keep peak memory bounded regardless
-    // of the file's total length
-    const samplesPerChunk = Math.max(4096, Math.floor((4 * 1024 * 1024) / Math.max(1, blockAlign)));
+    // Bound synchronous PCM packing to 16K frames, then yield to the UI.
+    const samplesPerChunk = 16384;
     for (let off = 0; off < len; off += samplesPerChunk) {
       const end = Math.min(len, off + samplesPerChunk);
       const chunk = DSP.wavChunk(channels, bitDepth || 16, off, end);
@@ -478,7 +477,7 @@
     return 'application/octet-stream';
   }
 
-  /* --- MP3: lamejs, streamed through a worker so the UI stays alive --------- */
+  /* --- MP3: LAME WASM in a bounded dedicated worker pool ------------------- */
 
   /**
    * Float → the integer scale lamejs actually encodes.
@@ -529,67 +528,73 @@
     return bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0;
   }
 
-  /**
-   * Source text of the MP3 encoding worker: loads lamejs inside the worker
-   * (`importScripts` on the URL `RSLibs.lameUrl()` resolved), builds one
-   * `Mp3Encoder`, then encodes chunk after chunk, transferring each result
-   * buffer back. Kept as a string because it is turned into a blob URL — the
-   * same trick `RSOPFS` uses for its own worker.
-   * @type {string}
-   */
-  const WORKER_SRC = [
-    "let lame = null, enc = null, nCh = 2;",
-    "self.onmessage = function (e) {",
-    "  const d = e.data;",
-    "  if (d.cmd === 'init') {",
-    "    try { importScripts(d.url); } catch (err) { self.postMessage({ ok: false, err: 'import:' + err }); return; }",
-    "    if (typeof lamejs === 'undefined') { self.postMessage({ ok: false, err: 'no lamejs' }); return; }",
-    "    nCh = d.nCh;",
-    "    try { enc = new lamejs.Mp3Encoder(nCh, d.sr, d.kbps); }",
-    "    catch (err2) { self.postMessage({ ok: false, err: 'init:' + err2 }); return; }",
-    "    if (typeof enc.encodeBuffer !== 'function') { self.postMessage({ ok: false, err: 'no-encodeBuffer' }); return; }",
-    "    self.postMessage({ ok: true });",
-    "    return;",
-    "  }",
-    "  if (d.cmd === 'chunk' && enc) {",
-    "    const parts = [];",
-    "    const view = nCh === 2 ? d.right : null;",
-    "    const mb = enc.encodeBuffer(d.left, view);",
-    "    if (mb.length) parts.push(mb);",
-    "    if (d.last) { const f = enc.flush(); if (f.length) parts.push(f); }",
-    "    const total = parts.reduce(function (a, b) { return a + b.length; }, 0);",
-    "    const out = new Uint8Array(total);",
-    "    let off = 0;",
-    "    for (const p of parts) { out.set(p, off); off += p.length; }",
-    "    self.postMessage({ ok: true, data: out.buffer }, [out.buffer]);",
-    "  }",
-    "};",
-  ].join('\n');
+  // Reserve at least one logical CPU for rendering/UI; cap memory at two WASM heaps.
+  const poolLimit = Math.max(1, Math.min(2, (global.navigator && global.navigator.hardwareConcurrency || 2) - 1));
+  const idleEncoders = [], encoderWaiters = [];
+  const pendingEncoderRequests = new WeakMap();
+  let encoderCount = 0;
+  const encodingWorkerUrl = global.document && global.document.currentScript
+    ? new URL('encoding-worker.js', global.document.currentScript.src).href : 'assets/js/encoding-worker.js';
 
-  /**
-   * The blob URL of {@link WORKER_SRC}, created once per page. Cached because
-   * creating (and revoking) a URL per file would churn the object registry, and
-   * never revoked because the worker may be spawned again at any time.
-   * @type {string|null}
+  /** Lease a dedicated worker. Backpressure bounds simultaneous WASM heaps.
+   * @returns {Promise<Worker>} exclusively owned worker.
    */
-  let workerUrl = null;
-  /**
-   * Blob URL of the MP3 worker, or `null` when the host refuses to create one
-   * (no `URL.createObjectURL`, a blocked blob URL) — the caller then encodes on
-   * the main thread instead of failing.
-   * @returns {string|null} the worker URL.
+  async function acquireEncoder() {
+    if (!global.Worker) throw new Error('MP3 export requires Web Workers and WebAssembly');
+    if (idleEncoders.length) return idleEncoders.pop();
+    if (encoderCount < poolLimit) {
+      const w = new global.Worker(encodingWorkerUrl);
+      encoderCount++;
+      return w;
+    }
+    return new Promise((resolve, reject) => encoderWaiters.push({ resolve, reject }));
+  }
+
+  /** Return a lease; discard poisoned workers and wake queued jobs.
+   * @param {Worker} worker - leased worker.
+   * @param {boolean} broken - terminate rather than reuse.
+   * @returns {void}
    */
-  function getWorkerUrl() {
-    if (workerUrl) return workerUrl;
-    try {
-      workerUrl = global.URL.createObjectURL(new Blob([WORKER_SRC], { type: 'application/javascript' }));
-    } catch (e) { workerUrl = null; }
-    return workerUrl;
+  function releaseEncoder(worker, broken) {
+    worker.onmessage = worker.onerror = worker.onmessageerror = null;
+    if (broken) {
+      const cancel = pendingEncoderRequests.get(worker);
+      if (cancel) cancel(new Error('MP3 encoding aborted'));
+      worker.terminate(); encoderCount--;
+      const next = encoderWaiters.shift();
+      if (next) acquireEncoder().then(next.resolve, next.reject);
+    } else {
+      const next = encoderWaiters.shift();
+      if (next) next.resolve(worker); else idleEncoders.push(worker);
+    }
+  }
+
+  /** Timeout/error-aware single request on an exclusively leased worker.
+   * @param {Worker} worker - leased worker.
+   * @param {Object} message - encoding command.
+   * @param {ArrayBuffer[]} [transfer] - owned PCM buffers.
+   * @returns {Promise<ArrayBuffer>} encoded data.
+   */
+  function encoderRequest(worker, message, transfer) {
+    return new Promise((resolve, reject) => {
+      const timer = global.setTimeout(() => done(new Error('MP3 worker timeout')), 30000);
+      function done(err, data) {
+        global.clearTimeout(timer);
+        pendingEncoderRequests.delete(worker);
+        worker.onmessage = worker.onerror = worker.onmessageerror = null;
+        if (err) reject(err); else resolve(data);
+      }
+      pendingEncoderRequests.set(worker, done);
+      worker.onmessage = ({ data }) => done(data.ok ? null : new Error(data.err), data.data);
+      worker.onerror = () => done(new Error('MP3 worker failed'));
+      worker.onmessageerror = () => done(new Error('MP3 worker message failed'));
+      try { worker.postMessage(message, transfer || []); } catch (err) { done(err); }
+    });
   }
 
   /**
    * A tiny accumulator with the same `write()` shape as an OPFS/memory sink —
-   * lets `encodeMp3`/`encodeMp3MainThread` always stream their output through
+   * lets the whole-file and incremental encoders stream their output through
    * one code path, whether or not the caller handed them a real sink.
    * @returns {{parts: Uint8Array[], write: function(Uint8Array): Promise<void>, length: number}}
    *   the sink; `parts` and `length` are its accumulated state.
@@ -620,124 +625,25 @@
    *   never a silently silent file.
    */
   async function encodeMp3(channels, sr, kbps, onProgress, sink) {
-    const nCh = Math.min(2, channels.length);
-    const len = channels[0].length;
-    const rate = MP3_RATES.indexOf(sr) === -1 ? mp3RateFor(sr) : sr;
-    const left = channels[0];
-    const right = nCh > 1 ? channels[1] : null;
-    const CHUNK = Math.max(1152 * 4, Math.floor(rate * 1.5));
-
-    const url = getWorkerUrl();
-    const lameUrl = Libs ? await Libs.lameUrl() : 'assets/vendor/lame.min.js';
-
-    let worker = null;
-    if (url && global.Worker) {
-      try {
-        worker = new global.Worker(url);
-        worker.postMessage({ cmd: 'init', url: lameUrl, nCh, sr: rate, kbps });
-        await new Promise((resolve, reject) => {
-          const to = global.setTimeout(() => reject(new Error('worker timeout')), 15000);
-          worker.onmessage = (e) => {
-            global.clearTimeout(to);
-            if (e.data && e.data.ok) resolve(true); else reject(new Error(e.data && e.data.err));
-          };
-        });
-      } catch (err) {
-        try { worker.terminate(); } catch (e) { /* ignore */ }
-        worker = null;
-      }
-    }
-
-    if (!worker) return encodeMp3MainThread(channels, rate, kbps, onProgress, sink);
-
+    if (!channels.length || !channels[0].length) throw new Error('mp3-empty');
     const out = sink || collectingSink();
-    let firstChunk = null;
-    let bytesWritten = 0;
-    /**
-     * Await the worker's answer to one `chunk` message. The handler is
-     * replaced per chunk rather than queued, which is what keeps this
-     * strictly request/response even though `onmessage` is a single slot.
-     * @returns {Promise<ArrayBuffer|Uint8Array>} the encoded bytes of one
-     *   chunk.
-     */
-    const once = () => new Promise((resolve, reject) => {
-      worker.onmessage = (e) => (e.data && e.data.ok ? resolve(e.data.data) : reject(new Error('mp3 chunk failed')));
-    });
-    for (let off = 0; off < len; off += CHUNK) {
-      const end = Math.min(len, off + CHUNK);
-      const last = end >= len;
-      // 16-bit chunks, handed over rather than copied: they are ours alone, and
-      // the worker is the one place the PCM still exists at full length
-      const l = toInt16(left, off, end);
-      const r = right ? toInt16(right, off, end) : null;
-      const transfer = r ? [l.buffer, r.buffer] : [l.buffer];
-      worker.postMessage({ cmd: 'chunk', left: l, right: r, last }, transfer);
-      const data = await once();
-      if (data && data.byteLength) {
-        const bytes = new Uint8Array(data);
-        // A copy of the header, taken *before* the write: a real sink may take
-        // ownership of the buffer it is handed (the OPFS writer transfers it to
-        // its own worker), which detaches this view — and the gate at the end
-        // still has to read those first bytes.
-        if (!firstChunk) firstChunk = bytes.slice(0, 4);
-        bytesWritten += bytes.length;
-        await out.write(bytes);
+    let firstChunk = null, bytesWritten = 0;
+    const writer = { async write(bytes) {
+      if (!firstChunk && bytes.length) firstChunk = bytes.slice(0, 4);
+      bytesWritten += bytes.length;
+      await out.write(bytes);
+    } };
+    const encoder = await createMp3StreamEncoder(sr, kbps, channels.length, writer);
+    try {
+      const len = channels[0].length, chunk = 16384;
+      for (let off = 0; off < len; off += chunk) {
+        const end = Math.min(len, off + chunk);
+        await encoder.appendChannels(channels.map(c => c.subarray(off, end)), end === len);
+        if (onProgress) onProgress(end / len);
       }
-      if (onProgress) onProgress(end / len);
-      if (!last) await tick();
-    }
-    worker.terminate();
-    return finishMp3Stream(out, firstChunk, bytesWritten, rate, len, sink);
-  }
-
-  /**
-   * The same encoding without a worker — for browsers where blob workers are
-   * blocked (some embedded web views) or `lamejs` can only be resolved on the
-   * main thread. Fed the same chunks, and gated by the same checks, so its
-   * output is interchangeable with the worker path.
-   * @param {Float32Array[]} channels - 1 or 2 channels.
-   * @param {number} rate - an already-validated {@link RSCodecs.MP3_RATES}
-   *   member (the caller maps the source rate first).
-   * @param {number} kbps - target bitrate.
-   * @param {function(number): void} [onProgress] - 0…1 progress.
-   * @param {Object} [sink] - optional streaming sink.
-   * @returns {Promise<EncodeResult>} the result.
-   */
-  async function encodeMp3MainThread(channels, rate, kbps, onProgress, sink) {
-    const lamejs = await Libs.lame();
-    const nCh = Math.min(2, channels.length);
-    const enc = new lamejs.Mp3Encoder(nCh, rate, kbps);
-    const len = channels[0].length;
-    const left = channels[0];
-    const right = nCh > 1 ? channels[1] : null;
-    const out = sink || collectingSink();
-    let firstChunk = null;
-    let bytesWritten = 0;
-    const CHUNK = Math.max(1152 * 4, Math.floor(rate * 1.5));
-    for (let off = 0; off < len; off += CHUNK) {
-      const end = Math.min(len, off + CHUNK);
-      const l = toInt16(left, off, end);
-      const r = right ? toInt16(right, off, end) : null;
-      const mb = enc.encodeBuffer(l, r);
-      if (mb.length) {
-        const bytes = new Uint8Array(mb);
-        if (!firstChunk) firstChunk = bytes.slice(0, 4);   // before the sink can take it
-        bytesWritten += bytes.length;
-        await out.write(bytes);
-      }
-      if (end >= len) {
-        const f = enc.flush();
-        if (f.length) {
-          const bytes = new Uint8Array(f);
-          if (!firstChunk) firstChunk = bytes.slice(0, 4);
-          bytesWritten += bytes.length;
-          await out.write(bytes);
-        }
-      }
-      if (onProgress) onProgress(end / len);
-      await tick();
-    }
-    return finishMp3Stream(out, firstChunk, bytesWritten, rate, len, sink);
+      await encoder.finish();
+      return finishMp3Stream(out, firstChunk, bytesWritten, encoder.rate, len, sink);
+    } catch (err) { encoder.abort(); throw err; }
   }
 
   /**
@@ -873,8 +779,7 @@
   }
 
   /**
-   * An incremental MP3 encoder: the same worker-backed (main-thread
-   * fallback otherwise) lamejs pipeline `encodeMp3()`/`encodeMp3MainThread()`
+   * An incremental MP3 encoder: the same pooled LAME WASM pipeline as `encodeMp3()`
    * use, kept alive across repeated `appendChannels()` calls instead of
    * looping over one whole-file array itself.
    * @param {number} sr - source rate; mapped to a legal MP3 rate with
@@ -884,97 +789,63 @@
    * @param {{write: function(Uint8Array): Promise<void>}} sink - the writer to
    *   stream into.
    * @returns {Promise<StreamEncoder>} the encoder, with its `rate` property set
-   *   to the rate actually used. Spawning the worker (and loading lamejs inside
+   *   to the rate actually used. Leasing the worker (and loading LAME WASM inside
    *   it) happens here, so the first `appendChannels()` is pure encoding.
    */
   async function createMp3StreamEncoder(sr, kbps, nCh, sink) {
-    const rate = MP3_RATES.indexOf(sr) === -1 ? mp3RateFor(sr) : sr;
+    const rate = MP3_RATES.includes(sr) ? sr : mp3RateFor(sr);
     const ch = Math.min(2, Math.max(1, nCh || 1));
-    const url = getWorkerUrl();
-    const lameUrl = Libs ? await Libs.lameUrl() : 'assets/vendor/lame.min.js';
-
-    let worker = null;
-    if (url && global.Worker) {
-      try {
-        worker = new global.Worker(url);
-        worker.postMessage({ cmd: 'init', url: lameUrl, nCh: ch, sr: rate, kbps });
-        await new Promise((resolve, reject) => {
-          const to = global.setTimeout(() => reject(new Error('worker timeout')), 15000);
-          worker.onmessage = (e) => {
-            global.clearTimeout(to);
-            if (e.data && e.data.ok) resolve(true); else reject(new Error(e.data && e.data.err));
-          };
-        });
-      } catch (err) {
-        try { worker.terminate(); } catch (e) { /* ignore */ }
-        worker = null;
-      }
-    }
-
-    let mainEnc = null;
-    if (!worker) mainEnc = new (await Libs.lame()).Mp3Encoder(ch, rate, kbps);
-
-    let bytesWritten = 0;
-    let finished = false;
-
-    /**
-     * Encode one PCM window — through the worker when there is one, on the
-     * main thread otherwise — and count what came back, so the caller can
-     * estimate the finished file's size.
-     * @param {Int16Array} l - left channel, 16-bit, transferred when a worker
-     *   is used (the array must not be touched afterwards in that case).
-     * @param {?Int16Array} r - right channel, or `null` for mono.
-     * @param {boolean} last - `true` for the final window, which makes the
-     *   encoder flush.
-     * @returns {Promise<void>} resolves once the chunk's bytes are written.
+    const worker = await acquireEncoder();
+    let released = false, finished = false, bytesWritten = 0;
+    let chain = Promise.resolve();
+    /** Release this file's lease exactly once.
+     * @param {boolean} broken - discard failed encoder.
+     * @returns {void}
      */
-    async function encodeOne(l, r, last) {
-      if (worker) {
-        const transfer = r ? [l.buffer, r.buffer] : [l.buffer];
-        const resultP = new Promise((resolve, reject) => {
-          worker.onmessage = (e) => (e.data && e.data.ok ? resolve(e.data.data) : reject(new Error('mp3 chunk failed')));
-        });
-        worker.postMessage({ cmd: 'chunk', left: l, right: r, last }, transfer);
-        const data = await resultP;
-        if (data && data.byteLength) {
-          const bytes = new Uint8Array(data);
-          bytesWritten += bytes.length;
-          await sink.write(bytes);
-        }
-      } else {
-        const mb = mainEnc.encodeBuffer(l, r);
-        if (mb.length) { bytesWritten += mb.length; await sink.write(new Uint8Array(mb)); }
-        if (last) {
-          const f = mainEnc.flush();
-          if (f.length) { bytesWritten += f.length; await sink.write(new Uint8Array(f)); }
-        }
-      }
+    function release(broken) {
+      if (!released) { released = true; releaseEncoder(worker, broken); }
     }
-
+    try { await encoderRequest(worker, { cmd: 'init', sr: rate, kbps, nCh: ch }); }
+    catch (err) { release(true); throw err; }
+    /** Encode bounded PCM slices with sink backpressure.
+     * @param {Float32Array[]} channels - source PCM.
+     * @param {boolean} last - finalize after this chunk.
+     * @returns {Promise<void>}
+     */
+    async function send(channels, last) {
+      if (released) throw new Error('MP3 encoder closed');
+      try {
+        for (let off = 0; off < Math.max(1, channels[0].length); off += 16384) {
+          if (released) throw new Error('MP3 encoder closed');
+          const end = Math.min(channels[0].length, off + 16384);
+          // Transfer copies: the source AudioBuffer must remain usable for A/B.
+          const pcm = Array.from({ length: ch }, (_, c) => (channels[c] || channels[0]).slice(off, end));
+          const data = await encoderRequest(worker, { cmd: 'chunk', channels: pcm,
+            last: last && end === channels[0].length }, pcm.map(c => c.buffer));
+          if (data.byteLength) { bytesWritten += data.byteLength; await sink.write(new Uint8Array(data)); }
+        }
+        if (last) finished = true;
+      } catch (err) { release(true); throw err; }
+    }
     return {
       rate,
-      /**
-       * Encode one render chunk's channels. `isLast` tells the encoder (and,
-       * for the worker path, the lamejs instance it owns) this is the final
-       * call — any internal buffering is flushed as part of it.
-       * @param {Float32Array[]} channels - the chunk's channels.
-       * @param {boolean} [isLast] - `true` for the final chunk, which flushes any
-       *   internal buffering.
-       * @returns {Promise<void>} resolves when the chunk is in the sink.
-       */
-      async appendChannels(channels, isLast) {
-        if (finished) return;
-        const left = toInt16(channels[0], 0, channels[0].length);
-        const right = ch > 1 ? toInt16(channels[1] || channels[0], 0, channels[0].length) : null;
-        await encodeOne(left, right, !!isLast);
-        if (isLast) finished = true;
+      appendChannels(channels, isLast) {
+        if (released || finished) return Promise.reject(new Error('MP3 encoder closed'));
+        chain = chain.then(() => {
+          if (finished) throw new Error('MP3 encoder already finalized');
+          return send(channels, !!isLast);
+        });
+        return chain;
       },
-      /** Terminate the worker (if any) and return the final byte count. Always call this once, even if the last `appendChannels()` already marked `isLast`. */
       async finish() {
-        if (!finished) { await encodeOne(new Int16Array(0), ch > 1 ? new Int16Array(0) : null, true); finished = true; }
-        if (worker) worker.terminate();
-        return { sampleRate: rate, bytesWritten };
+        try {
+          await chain;
+          if (!finished) await send([new Float32Array(0)], true);
+          release(false);
+          return { sampleRate: rate, bytesWritten };
+        } catch (err) { release(true); throw err; }
       },
+      abort() { release(true); },
     };
   }
 

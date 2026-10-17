@@ -482,6 +482,7 @@ assets/
     opfs-manager.js            Origin Private File System scratch storage: streaming
                                  WAV/MP3 writers and a streamed ZIP packer, both backed by
                                  FileSystemSyncAccessHandle in a Worker (RSOPFS)
+    encoding-worker.js           dedicated pooled LAME WASM encoder worker
     codecs.js                    decode, WAV/MP3 encode (in memory or streamed), ZIP, download (RSCodecs)
     analyzer.js                  file → measurements, diagnosis, waveform envelopes (RSAnalyzer)
     neural-controller.js         main-thread handle onto neural-worker.js — one Promise-returning
@@ -545,7 +546,7 @@ tests/
                                  level-preserving crossfades, the streaming WAV/MP3 encoders,
                                  the mid-render shrink, the abort path that a failing onChunk
                                  triggers, and a sink that takes the buffer it is handed —
-                                 the way the OPFS writer does (53 checks)
+                                 the way the OPFS writer does; failed/aborted pool leases (57 checks)
   stage0.test.js                 the pre-DSP neural stage: the SharedArrayBuffer ring under
                                  back-pressure (wrap-around, refused-not-truncated blocks, the
                                  underrun counter, the plain-buffer fallback), the chunk plan's
@@ -553,6 +554,9 @@ tests/
                                  resampling, stem mixes, the \{applied:false\} contract, and the
                                  engine wiring that makes C measurably cleaner than B with no
                                  buffer underruns (86 checks)
+  encoding-worker-adapter.js     worker_threads adapter for the unmodified production worker
+  audio-quality.test.js          known-clean reference metrics and real-worklet gain (9 checks)
+  encoding-batch.test.js         real Chromium batch and frame pacing (5 checks)
   mobile-ux.test.js              the carousel effect rack, the gold "AI Magic Fix" button,
                                  the live A/B/C compare FAB and the phone's card inspector:
                                  markup/CSS, the focus trap, the exact restore index, the
@@ -617,8 +621,10 @@ belong to the test suite.
 
 ## Tests
 
-**12 dependency-free suites · 1236 checks.** Every count below is the suite's own
-(`ALL TESTS PASSED (n)`); `node scripts/validate-docs.js --run` re-runs them and
+**14 dependency-free suites · 1254 checks.** Counts are declared checks, not a claim
+that all acceptance criteria currently pass. **Prompt 5.1 is blocked:** audio-quality
+currently passes 7/9 checks; clipping and broadband noise miss the +8 dB target.
+The encoding batch additionally requires optional Chromium. `node scripts/validate-docs.js --run` re-runs them and
 fails if this file, `tests/` and `package.json` ever disagree.
 
 | Suite | File | Checks | Covers |
@@ -632,13 +638,15 @@ fails if this file, `tests/` and `package.json` ever disagree.
 | Cross-origin isolation | `tests/coi.test.js` | 19 | coi-serviceworker.js as a Service Worker and as a page script: the COOP/COEP rewrite, the one-reload rule, never a reload loop |
 | Neural | `tests/neural.test.js` | 127 | the controller/worker contract, T-frame alignment, STFT round-trips, the capability probe, WebGPU-first provider order, quantised-variant selection, **the model manager** (cache hit, CDN download, progress, variant fallback, short-read and HTML-refusal aborts, inflight dedup, cache report), the watchdog and the Stage-7 coupling |
 | Memory guard | `tests/memory-guard.test.js` | 21 | the heap watchdog on a host without `performance.memory`: the honest no-signal default, the one-way shrink ramp, a stop function that never leaks a timer |
-| Chunked render | `tests/chunked-render.test.js` | 53 | chunk boundaries and level-preserving crossfades, the streaming WAV/MP3 encoders, the mid-render shrink, the abort a failing onChunk triggers, a sink that takes ownership of the buffer it is handed |
+| Chunked render | `tests/chunked-render.test.js` | 57 | chunk boundaries and level-preserving crossfades, the streaming WAV/MP3 encoders, the mid-render shrink, the abort a failing onChunk triggers, a sink that takes ownership of the buffer it is handed; poisoned lease recovery, idempotent abort, unavailable-worker rejection |
 | Stage 0 (pre-DSP) | `tests/stage0.test.js` | 86 | the SAB ring (exact round-trips, wrap, all-or-nothing writes, the underrun/overflow counters, the non-shared fallback), the chunk plan and its seam crossfades, the 48 kHz resampling, stem mixing, the fallback contract, and the engine wiring: C really is Stage 0 + DSP, and a missing model leaves B bit-identical |
 | Mobile UX | `tests/mobile-ux.test.js` | 103 | the carousel effect rack, the gold "AI Magic Fix" button, the live A/B/C compare FAB, **the phone's card inspector** (markup, focus trap, the grid handed back to its exact index, haptic fallback), navigator.vibrate safety, switchBuffer() position preservation, seek() clamping and its no-buffer no-op, tap/hold |
+| Audio quality | `tests/audio-quality.test.js` | 9 | SI-SDR/LSD identities and edge cases; real-worklet clipping/noise/hum gain ≥8 dB (currently 2 failures) |
+| Encoding batch | `tests/encoding-batch.test.js` | 5 | ten real WASM MP3 encodes with browser decode, ten streamed WAVs, source ownership, rAF gaps and long tasks |
 
 ```bash
 npm install          # only for the test suite and the static analysis (jsdom, acorn)
-npm test             # runs all twelve dependency-free suites
+npm test             # runs all fourteen suites; audio-quality currently exits 1
 node scripts/validate-docs.js        # README ↔ tests/ ↔ package.json consistency
 node scripts/validate-docs.js --run  # the same, and re-counts every suite
 node scripts/analyze-code.js         # static analysis of the shipped JavaScript
@@ -762,3 +770,27 @@ Tips are voluntary and not a purchase — the suite stays free, with no commitme
 | A file will not open | The browser cannot decode that container. Try WAV/FLAC/OGG, or enable the FFmpeg rescue path. |
 | The result sounds too strong | Lower the restoration power — the chain is deliberately a little bold at 100 %. |
 | Very large batches | Use MP3 for the ZIP; several hundred megabytes of WAV will exhaust browser memory. |
+
+### Objective quality and encoding (Prompt 5.1)
+
+`RSDSP.siSdr(clean, estimate)` is zero-mean SI-SDR in dB. It projects the
+estimate onto the clean reference, then measures the orthogonal residual.
+`RSDSP.logSpectralDistance(reference, estimate, fftSize=1024)` uses Hann STFT
+with 50% overlap, a one-sided power spectrum and a normalized 1e-12 power floor.
+Both require finite, nonempty, equal-length **time-aligned** mono signals.
+A processed-vs-original LSD measures change, not proof of improvement; quality
+gain requires a separate known-clean reference. Silence has undefined SI-SDR.
+
+MP3 encoding uses local `wasm-media-encoders@0.7.0` (LAME), exclusively in a
+bounded pool of 1–2 dedicated workers. Files hold exclusive leases, PCM is
+copied/transferred in 16K-frame slices, and the sink provides backpressure.
+There is no UI-thread encoding fallback: unavailable workers/WASM fail explicitly.
+Streaming callers must call `finish()` or `abort()` to return a lease.
+WAV streaming also packs only 16K frames per UI event-loop turn; the app's
+in-memory path now uses that same yielding writer.
+
+Run `node tests/audio-quality.test.js` and `node tests/encoding-batch.test.js`.
+See [measured results and remaining acceptance gaps](docs/AUDIO-QUALITY.md).
+
+Tooling bridge: `tools/encode-mp3.js` feeds the production async worker codec from
+the synchronous `tools/util.js` probe API; it does not duplicate the encoder.

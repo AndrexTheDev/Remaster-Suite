@@ -1990,11 +1990,12 @@
     const sink = await OPFS.createWriter(key);
     const nCh = Math.min(2, dec.buffer.numberOfChannels);
     const totalSamples = Math.max(1, Math.round((dec.buffer.length * rate) / dec.buffer.sampleRate));
+    let mp3Enc = null;
     try {
       card._workT0 = nowMs();
       setCardWork(card, 'render', 0);
       const isMp3 = State.format === 'mp3';
-      const mp3Enc = isMp3 ? await Codecs.createMp3StreamEncoder(rate, State.mp3Rate, nCh, sink) : null;
+      mp3Enc = isMp3 ? await Codecs.createMp3StreamEncoder(rate, State.mp3Rate, nCh, sink) : null;
       const wavEnc = isMp3 ? null : Codecs.createWavStreamEncoder(totalSamples, rate, State.wavDepth, sink);
       const chunked = await Engine.renderChunked(dec.buffer, rate, params, {
         chunkSeconds: CONFIG.chunkSeconds,
@@ -2026,6 +2027,7 @@
       return { file, size: closed.size, name, format: State.format, rate: stats.sampleRate || rate,
         signature, stale: false, opfsKey: key, stage0: stage0Stats };
     } catch (err) {
+      if (mp3Enc) mp3Enc.abort();
       await sink.abort();
       throw err;
     }
@@ -2170,8 +2172,12 @@
           const out = await Codecs.encodeMp3(res.channels, res.sampleRate, State.mp3Rate, onEncodeProgress);
           bytes = out.bytes;
         } else {
-          setCardWork(card, 'encode', null); // a WAV write is fast, but not instant
-          bytes = Codecs.encodeWav(res.channels, res.sampleRate, State.wavDepth);
+          const pieces = [];
+          const stats = await Codecs.encodeWavStream(res.channels, res.sampleRate, State.wavDepth,
+            { async write(chunk) { pieces.push(chunk); } }, onEncodeProgress);
+          bytes = new Uint8Array(stats.bytesWritten);
+          let offset = 0;
+          for (const chunk of pieces) { bytes.set(chunk, offset); offset += chunk.length; }
         }
         result = { bytes, name, format: State.format, rate: res.sampleRate, signature, stale: false, stage0: res.stage0 };
       }

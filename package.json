@@ -2,9 +2,9 @@
   "name": "remaster-suite",
   "version": "1.6.0",
   "private": true,
-  "description": "Harmonic Restoration · Remaster Suite — 100 % client-side audio restoration in vanilla HTML/CSS/JS",
+  "description": "Harmonic Restoration \u00b7 Remaster Suite \u2014 100 % client-side audio restoration in vanilla HTML/CSS/JS",
   "scripts": {
-    "test": "node tests/dsp.test.js && node tests/web.test.js && node tests/audit.test.js && node tests/e2e.test.js && node tests/tuning.test.js && node tests/opfs.test.js && node tests/stage0.test.js && node tests/coi.test.js && node tests/neural.test.js && node tests/memory-guard.test.js && node tests/chunked-render.test.js && node tests/mobile-ux.test.js",
+    "test": "node tests/dsp.test.js && node tests/web.test.js && node tests/audit.test.js && node tests/e2e.test.js && node tests/tuning.test.js && node tests/opfs.test.js && node tests/stage0.test.js && node tests/coi.test.js && node tests/neural.test.js && node tests/memory-guard.test.js && node tests/chunked-render.test.js && node tests/mobile-ux.test.js && node tests/encoding-batch.test.js && node tests/audio-quality.test.js",
     "test:dsp": "node tests/dsp.test.js",
     "test:web": "node tests/web.test.js",
     "test:audit": "node tests/audit.test.js",
@@ -22,7 +22,9 @@
     "validate:docs": "node scripts/validate-docs.js",
     "validate:docs:run": "node scripts/validate-docs.js --run",
     "analyze:code": "node scripts/analyze-code.js",
-    "analyze:code:dead": "node scripts/analyze-code.js --dead"
+    "analyze:code:dead": "node scripts/analyze-code.js --dead",
+    "test:audio-quality": "node tests/audio-quality.test.js",
+    "test:encoding-batch": "node tests/encoding-batch.test.js"
   },
   "devDependencies": {
     "jsdom": "^22.1.0",

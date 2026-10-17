@@ -60,6 +60,7 @@ function boot() {
   win.URL.revokeObjectURL = () => {};
   Object.defineProperty(win.navigator, 'clipboard', { value: { writeText: async () => {} }, configurable: true });
   win.eval(fs.readFileSync(path.join(ROOT, 'assets/vendor/lame.min.js'), 'utf8'));
+  win.Worker = require('./encoding-worker-adapter.js');
   for (const f of ['dsp-utils.js', 'presets.js', 'i18n.js', 'library-loader.js', 'opfs-manager.js', 'codecs.js', 'analyzer.js', 'memory-guard.js', 'engine.js', 'ui.js', 'app.js']) {
     win.eval(fs.readFileSync(path.join(ROOT, 'assets/js', f), 'utf8'));
   }

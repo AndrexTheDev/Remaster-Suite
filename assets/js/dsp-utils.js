@@ -3649,6 +3649,8 @@
    * @property {RSDSP.Spectrum} spec - the averaged spectrum behind all of it.
    *
    * @typedef {Object} RSDSPApi
+   * @property {function(Float32Array, Float32Array): number} siSdr - aligned-reference SI-SDR in dB.
+   * @property {function(Float32Array, Float32Array, number=): number} logSpectralDistance - mean STFT log-power distance in dB.
    * @property {function(Float32Array[], number): RSDSP.Measurement} measure
    * @property {function(Float32Array[], number, ?function(number, string): void, ?Object): Promise<RSDSP.Measurement>} measureAsync
    * @property {function(number): number} qualityScore
@@ -3659,7 +3661,77 @@
    * @property {function(ArrayBuffer): ({channels: Float32Array[], sampleRate: number}|null)} decodeWav
    * @property {function(Float32Array[], number, ?number): ArrayBuffer} encodeWav
    */
+  /** Validate aligned, finite mono samples; no implicit truncation or alignment.
+   * @param {Float32Array} reference - clean reference.
+   * @param {Float32Array} estimate - restored or degraded signal.
+   * @returns {void}
+   */
+  function qualityInputs(reference, estimate) {
+    if (!reference || !estimate || !reference.length || reference.length !== estimate.length)
+      throw new RangeError('Quality metrics require non-empty equal-length aligned signals');
+    for (let i = 0; i < reference.length; i++)
+      if (!Number.isFinite(reference[i]) || !Number.isFinite(estimate[i]))
+        throw new RangeError('Quality metrics require finite samples');
+  }
+
+  /** Zero-mean scale-invariant signal-to-distortion ratio in dB.
+   * alpha = dot(estimate, reference) / energy(reference). The residual is
+   * estimate - alpha * reference (not a separately supplied noise signal).
+   * Constant references are undefined (NaN); perfect reconstruction is +Infinity,
+   * a zero/orthogonal estimate is -Infinity. Inputs must already be time aligned.
+   * @param {Float32Array} reference - clean signal.
+   * @param {Float32Array} estimate - processed signal.
+   * @returns {number} SI-SDR in dB.
+   */
+  function siSdr(reference, estimate) {
+    qualityInputs(reference, estimate);
+    const n = reference.length;
+    let sm = 0, em = 0;
+    for (let i = 0; i < n; i++) { sm += reference[i]; em += estimate[i]; }
+    sm /= n; em /= n;
+    let ss = 0, dot = 0;
+    for (let i = 0; i < n; i++) { const s = reference[i] - sm; ss += s * s; dot += s * (estimate[i] - em); }
+    if (!ss) return NaN;
+    const alpha = dot / ss;
+    let residual = 0;
+    for (let i = 0; i < n; i++) { const e = estimate[i] - em - alpha * (reference[i] - sm); residual += e * e; }
+    const target = alpha * alpha * ss;
+    return target === 0 ? -Infinity : residual === 0 ? Infinity : 10 * Math.log10(target / residual);
+  }
+
+  /** Mean per-frame RMS log-power spectral distance, in dB (lower is better).
+   * Hann STFT, 50% overlap, one-sided spectrum including DC/Nyquist, absolute
+   * power floor 1e-12 after window-energy normalization. Last frame zero-padded.
+   * @param {Float32Array} reference - aligned original or known clean signal.
+   * @param {Float32Array} estimate - processed signal, same rate and length.
+   * @param {number} [fftSize=1024] - power-of-two frame size.
+   * @returns {number} log-spectral distance in dB.
+   */
+  function logSpectralDistance(reference, estimate, fftSize = 1024) {
+    qualityInputs(reference, estimate);
+    if (!Number.isInteger(fftSize) || fftSize < 4 || fftSize > 32768 || (fftSize & (fftSize - 1)))
+      throw new RangeError('fftSize must be a power of two in [4, 32768]');
+    const window = hann(fftSize), bins = fftSize / 2 + 1;
+    let norm = 0, total = 0, frames = 0;
+    for (const w of window) norm += w * w;
+    for (let start = 0; start < reference.length; start += fftSize / 2) {
+      const spectra = [reference, estimate].map(signal => {
+        const re = new Float64Array(fftSize), im = new Float64Array(fftSize);
+        for (let j = 0; j < fftSize; j++) re[j] = (signal[start + j] || 0) * window[j];
+        fft(re, im);
+        return Array.from({ length: bins }, (_, k) => 10 * Math.log10(Math.max(1e-12, (re[k] * re[k] + im[k] * im[k]) / norm)));
+      });
+      let sum = 0;
+      for (let k = 0; k < bins; k++) sum += (spectra[0][k] - spectra[1][k]) ** 2;
+      total += Math.sqrt(sum / bins); frames++;
+      if (start + fftSize >= reference.length) break;
+    }
+    return total / frames;
+  }
+
+  /** @type {RSDSPApi} */
   const API = {
+    siSdr, logSpectralDistance,
     flatTopStep,
     TWO_PI, clamp, db, lin,
     hann, blackman, fft, spectrum, bandLevel, bandMedian, smoothSpec,

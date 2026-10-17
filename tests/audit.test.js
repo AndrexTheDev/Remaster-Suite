@@ -63,7 +63,7 @@ section('audit · repository hygiene');
   // via a <script src>: dsp-utils.js through importScripts()/require() inside
   // workers and the Node test harness, neural-worker.js as a dedicated Worker
   // script (`new Worker('assets/js/neural-worker.js')` in neural-controller.js).
-  const orphans = jsFiles.filter((f) => !referenced.has(f) && f.indexOf('dsp-utils') === -1 && f.indexOf('neural-worker') === -1);
+  const orphans = jsFiles.filter((f) => !referenced.has(f) && f.indexOf('dsp-utils') === -1 && f.indexOf('neural-worker') === -1 && f.indexOf('encoding-worker') === -1);
   ok(orphans.length === 0, 'no orphaned JavaScript file', orphans.join(', '));
   ok(referenced.has('assets/css/app.css'), 'stylesheet is referenced');
 
@@ -2308,20 +2308,21 @@ section('audit · codecs');
     const i16 = RSCodecs.toInt16(src, 0, src.length);
     const want = [0, 16384, -16384, 32767, -32768, 8192, 0, 0, 0];
     const bad = want.filter((w, i) => Math.abs(i16[i] - w) > 1);
-    ok(bad.length === 0, 'the PCM handed to the MP3 encoder is 16-bit-scaled and clipped',
+    ok(bad.length === 0, 'the legacy Int16 utility remains scaled and clipped',
       Array.from(i16).join(' '));
     ok(Math.abs(i16[1] / 32768 - 0.5) < 0.001, '…at exactly the amplitude it was given');
     const chunk = RSCodecs.toInt16(src, 3, 5);
     ok(chunk.length === 2 && chunk[0] === 32767, 'and a slice of the signal is sliced correctly',
       Array.from(chunk).join(' '));
-    // The worker path cannot run under jsdom, so its half of the same contract
-    // is checked in the source: every encodeBuffer call site must be preceded
-    // by a toInt16 conversion of the very samples it is given.
+    // Float PCM is intentional for WASM (the legacy lamejs API required Int16).
+    // A real browser decode/audibility test protects against silent exports.
     const codecsSrc = read('assets/js/codecs.js');
-    const postsScaled = /const l = toInt16\(left, off, end\);[\s\S]{0,240}left: l, right: r, last/.test(codecsSrc);
-    const mainScaled = /const l = toInt16\(left, off, end\);[\s\S]{0,240}enc\.encodeBuffer\(l, r\)/.test(codecsSrc);
-    ok(postsScaled && mainScaled, 'both encoder paths convert first (the worker path too)',
-      (postsScaled ? 'worker ✓' : 'worker ✗') + ' · ' + (mainScaled ? 'fallback ✓' : 'fallback ✗'));
+    const workerSrc = read('assets/js/encoding-worker.js');
+    const transfersFloat = /channels: pcm/.test(codecsSrc) && /pcm.map\(c => c.buffer\)/.test(codecsSrc);
+    const wasmOnly = /self.WasmMediaEncoder.createEncoder/.test(workerSrc)
+      && /encoder.encode\(d.channels\)/.test(workerSrc) && !/Libs.lame\(/.test(codecsSrc);
+    ok(transfersFloat && wasmOnly, 'MP3 uses transferred Float32 PCM and worker-only WASM',
+      'legacy Int16 helper retained only for compatibility');
   }
 
   // MP3 at every rate lamejs supports
@@ -2408,9 +2409,9 @@ section('audit · codecs');
     'worst delivered ' + (-2 - Presets.codecMargin('mp3', 192) + WORST[192]).toFixed(2) + ' dBTP on a hot master at 192 kbit/s');
   ok(/Presets\.codecMargin\(State\.format, State\.mp3Rate\)/.test(read('assets/js/app.js')),
     'the app applies it where the export format is known');
-  ok(/Math\.max\(1152 \* 4, Math\.floor\(rate \* 1\.5\)\)/.test(read('assets/js/codecs.js'))
-    && /Math\.max\(1152 \* 4, Math\.floor\(rate \* 1\.5\)\)/.test(read('tools/util.js')),
-    'the tooling export mirrors the app chunking, so the measured file is the delivered one');
+  ok(/tools\/encode-mp3.js/.test(read('tools/util.js'))
+    && /Codecs.encodeMp3\(input.channels/.test(read('tools/encode-mp3.js')),
+    'the tooling export calls the production codec rather than mirroring a stale encoder');
   const gm = DSP.measure([H.garageSim(DSP, SRX, 6)], SRX);
   ok(Presets.buildParams('auto', gm, 0.7).tpCeil === -1,
     'and the chain itself still asks for the platform ceiling — the margin is the export addition',

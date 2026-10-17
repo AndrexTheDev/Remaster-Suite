@@ -1,0 +1,24 @@
+{
+  "browser": "Chromium 153.0.8010.0",
+  "sizes": [
+    720979,
+    720979,
+    720979,
+    720979,
+    720979,
+    720979,
+    720979,
+    720979,
+    720979,
+    720979
+  ],
+  "wavBytes": 52920440,
+  "workersCreated": 2,
+  "hardwareConcurrencyHint": 4,
+  "frames": 352,
+  "meanFps": 60.00236941174665,
+  "p95FrameMs": 16.670000000000073,
+  "maxFrameMs": 16.670000000000073,
+  "over20ms": 0,
+  "longTasks": []
+}

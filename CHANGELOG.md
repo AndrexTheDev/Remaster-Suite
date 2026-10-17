@@ -6,6 +6,25 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Round 36 — pooled LAME WASM export and objective quality gates (Prompt 5.1, partial)
+
+* MP3 whole-file and incremental export now share a bounded 1–2-worker LAME
+  WebAssembly pool. No mainthread fallback; owned 16K-frame Float32 transfers,
+  sink backpressure, worker errors/timeouts and failed-lease disposal.
+* WAV streaming uses 16K-frame packing turns, including the app's memory path.
+  Failed chunked renders abort their MP3 lease as well as the OPFS sink.
+* Added zero-mean SI-SDR and Hann-STFT log-spectral distance to `RSDSP`, with
+  finite/aligned-input validation, defined silence behaviour and analytic tests.
+* Added real-worklet known-clean clipping/noise/hum fixtures. **Acceptance is
+  incomplete:** +2.51 / −0.01 / +11.60 dB SI-SDR gain respectively; the first
+  two fail the requested +8 dB gate. The test intentionally exits 1.
+* Added real-Chromium ten-file MP3 plus ten-file WAV encoding/frame benchmark:
+  two workers, decoded audible output, 60.00 FPS, max 16.67 ms frame gap,
+  no long tasks in the isolated run. No physical-device/full-workflow claim.
+* Node/jsdom export integrations run the actual WASM worker via worker_threads.
+  Sources/licences and measurements are recorded in `assets/vendor/NOTICE.md`
+  and `docs/AUDIO-QUALITY.md`.
+
 ### Round 35 — the card inspector: one drawer instead of three gestures fighting
 
 **A phone had one thumb and three gestures competing for it: the page pans vertically, the effect
