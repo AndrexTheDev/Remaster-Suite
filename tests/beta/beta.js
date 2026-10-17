@@ -1774,6 +1774,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     !!cardBody && cardBody.w > 40 && cardBody.y > 60 && cardBody.y < 852,
     cardBody ? Math.round(cardBody.w) + '×' + Math.round(cardBody.h) + ' px at ' + Math.round(cardBody.x)
       + ',' + Math.round(cardBody.y) : 'no card');
+  // a toast on screen when the drawer opens is the case the first screenshot
+  // caught: it sat exactly on the drawer's save row. Give it a reason to exist.
+  await evalJS(`RSUI.toast('Regression: this toast must not cover the drawer.', 'ok', 2500); true`);
+  await sleep(200);
   const pageBefore = await evalJS(`Math.round(scrollY)`);
   await tapAt(cardBody.x, cardBody.y, 40);
   await sleep(600);
@@ -1807,6 +1811,22 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check('it is a real modal dialog, named by the file it belongs to',
     ix.role === 'dialog' && ix.modal === 'true' && ix.title === ix.cardName,
     'role ' + ix.role + ' · aria-modal ' + ix.modal + ' · "' + ix.title + '"');
+  const overToast = await evalJS(`(() => { const t = document.getElementById('toasts');
+    const btn = document.getElementById('cardSheetDone');
+    const r = btn.getBoundingClientRect();
+    // what a thumb would actually hit at the middle of the drawer's own button
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    const inSheet = !!(hit && (hit === btn || btn.contains(hit) || hit.closest('#cardSheet')));
+    return { count: t.children.length, opacity: getComputedStyle(t).opacity,
+      z: getComputedStyle(document.getElementById('cardSheet')).zIndex,
+      tz: getComputedStyle(t).zIndex, inert: t.hasAttribute('inert'),
+      hit: hit ? hit.tagName + (hit.id ? '#' + hit.id : '') : 'nothing', inSheet }; })()`);
+  check('a toast that was already on screen cannot paint over the drawer',
+    overToast.count >= 1 && parseFloat(overToast.opacity) === 0 && overToast.inert === true
+      && overToast.inSheet === true && Number(overToast.z) > Number(overToast.tz),
+    overToast.count + ' toast(s) behind the drawer · opacity ' + overToast.opacity + ' · inert '
+      + overToast.inert + ' · a thumb on the Done button hits ' + overToast.hit + ' · z '
+      + overToast.z + ' over ' + overToast.tz);
   check('the four per-file controls moved into it, one per row, full width',
     ix.inSheet === true && ix.fields === 4 && ix.rects.every((r, i) => r.w >= Math.round(ix.w * 0.8)
       && (i === 0 || r.top > ix.rects[i - 1].top)),

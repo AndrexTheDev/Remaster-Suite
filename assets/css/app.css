@@ -556,14 +556,18 @@ dialog.dialog:not([open]) { display: none; }
 
 .card-inspect { display: none; }
 .sheet-scrim {
-  position: fixed; inset: 0; z-index: 80;
+  position: fixed; inset: 0; z-index: 96;
   background: rgba(4, 6, 9, .64); backdrop-filter: blur(3px);
   opacity: 0; transition: opacity .22s var(--ease);
 }
 .sheet-scrim[hidden] { display: none; }
 .sheet-scrim.is-open { opacity: 1; }
 .sheet {
-  position: fixed; left: 0; right: 0; bottom: 0; z-index: 81;
+  /* above the toast layer (90) and the compare FAB (70): a leftover toast must
+     never paint over the drawer's own controls — the screenshot that caught it
+     had "Alle Dateien sind fertig" sitting exactly on the save row. The toast
+     layer is inert while the sheet is open anyway, so it is hidden too. */
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 97;
   display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto;
   max-height: min(86vh, 720px);
   background: linear-gradient(180deg, var(--panel), var(--bg-2));
@@ -606,6 +610,8 @@ dialog.dialog:not([open]) { display: none; }
 .sheet-foot .btn { width: 100%; }
 /* the page behind is pinned, so the document must not paint a second scrollbar */
 html.sheet-open, html.sheet-open body { overflow: hidden; }
+/* …and a toast from before the drawer opened is not allowed to sit on it */
+html.sheet-open .toasts { opacity: 0; }
 
 /* ------------------------------------------------------- haptic micro-animations
    The Vibration API is Android-Chrome-only; iOS Safari has never shipped it. A

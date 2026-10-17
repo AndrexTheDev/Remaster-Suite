@@ -19,7 +19,8 @@ waveform — does the same, while every control inside it keeps its own gesture.
 `role="dialog"` with `aria-modal`, labelled by the file name, closed by Escape, the close button, the
 scrim, or a downward drag that starts on the grabber and nowhere else. Profile, power, A/B and save
 stack full width in one column; the body pans on `pan-y` only and `overscroll-behavior: contain`
-stops the scroll from chaining into the page behind it.
+stops the scroll from chaining into the page behind it. It also stacks above the toast layer and
+hides any toast that predates it: the first beta screenshot showed one sitting exactly on the save row.
 
 **2 — the page stays where it was.** Opening pins `body` at its current offset (the `overflow: hidden`
 trick alone does not hold on iOS Safari), marks `main`, the top bar, the footer, the compare FAB and
@@ -43,9 +44,9 @@ the control it belongs to, so on iOS Safari — which has never shipped the Vibr
 control knocks and glows for 420 ms instead. `prefers-reduced-motion` removes the animation along
 with every other one in the app.
 
-**Measured, not asserted.** `tests/mobile-ux.test.js` grows from 53 to 101 checks (the markup, the
-focus trap, the exact restore index, the fallback contract), the whole suite goes from 1186 to 1234,
-and the real-browser beta suite grows to **195 checks and 26 screenshots**: it taps a real card with
+**Measured, not asserted.** `tests/mobile-ux.test.js` grows from 53 to 103 checks (the markup, the
+focus trap, the exact restore index, the fallback contract), the whole suite goes from 1186 to 1236,
+and the real-browser beta suite grows to **196 checks and 26 screenshots**: it taps a real card with
 a real finger on an iPhone 14 Pro profile, confirms the sheet is `fixed` to the bottom edge at full
 width, that its four fields are one per row, that a vertical swipe inside it leaves `scrollY` at 0
 and the body pinned, that the grabber dismisses it and the page pans again afterwards, that the main

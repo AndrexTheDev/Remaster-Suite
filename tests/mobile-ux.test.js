@@ -102,6 +102,19 @@ function staticChecks() {
     'the main rack keeps its horizontal swipe, and it stays inside the rack');
   ok(/@keyframes hapticKnock/.test(css) && /\.is-haptic\s*\{[^}]*animation:\s*hapticKnock/.test(css),
     'the haptic fallback is a real micro-animation, not just a class name');
+
+  // The drawer has to win the stacking contest against the toast layer: a
+  // leftover toast once sat exactly on its save row (docs/beta/26-…png).
+  const zOf = (sel) => {
+    const m = new RegExp('\\' + sel + '\\s*\\{[^}]*z-index:\\s*(\\d+)').exec(css);
+    return m ? Number(m[1]) : NaN;
+  };
+  const toastZ = zOf('.toasts');
+  ok(Number.isFinite(toastZ) && zOf('.sheet') > toastZ && zOf('.sheet-scrim') > toastZ,
+    'the drawer and its scrim stack above the toast layer (' + zOf('.sheet') + '/' + zOf('.sheet-scrim')
+      + ' vs ' + toastZ + ')');
+  ok(/html\.sheet-open \.toasts\s*\{[^}]*opacity:\s*0/.test(css),
+    'a toast that predates the drawer is hidden while it is open, not left on top of it');
 }
 
 /* ------------------------------------------------------------------- engine */
