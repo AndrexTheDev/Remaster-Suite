@@ -283,7 +283,7 @@ async function testMobileAndWebNN() {
     } finally { Object.defineProperty(global, 'navigator', { value: realNavigator, configurable: true }); }
   }
 
-  section('neural · selectVariant() prefers the smallest quantised weight file on mobile, fp16/fp32 elsewhere');
+  section('neural · variantOrder() — INT4 on a phone, INT8 as the standard use, fp16/fp32 as the last resorts');
   const defAll = { files: { fp32: 'm.fp32.onnx', fp16: 'm.fp16.onnx', int8: 'm.int8.onnx', int4: 'm.int4.onnx' } };
   const defNoQuant = { files: { fp32: 'm.fp32.onnx', fp16: 'm.fp16.onnx' } };
   ok(RSNeuralWorker.selectVariant(defAll, { mobile: true, webgpu: { available: false, fp16: false } }) === 'int4',
@@ -295,12 +295,18 @@ async function testMobileAndWebNN() {
     'mobile with no quantised files at all still gets fp16 when the adapter supports it, never straight to fp32');
   ok(RSNeuralWorker.selectVariant(defNoQuant, { mobile: true, webgpu: { available: false, fp16: false } }) === 'fp32',
     'mobile with neither quantised files nor fp16 support lands on fp32, same as desktop would');
-  ok(RSNeuralWorker.selectVariant(defAll, { mobile: false, webgpu: { available: true, fp16: true } }) === 'fp16',
-    'desktop ignores the quantised files even when published — fp16 wins on a capable adapter, unchanged baseline behaviour');
-  ok(RSNeuralWorker.selectVariant(defAll, { mobile: false, webgpu: { available: false, fp16: false } }) === 'fp32',
-    'desktop without WebGPU fp16 support still lands on fp32, never on a mobile-only quantised file');
+  ok(RSNeuralWorker.selectVariant(defAll, { mobile: false, webgpu: { available: true, fp16: true } }) === 'int8',
+    'desktop takes INT8 as the standard-use default, ahead of fp16 even on an fp16-capable adapter');
+  ok(RSNeuralWorker.selectVariant(defAll, { mobile: false, webgpu: { available: false, fp16: false } }) === 'int8',
+    'desktop without WebGPU still takes INT8 — quantisation is not a mobile-only path');
+  ok(RSNeuralWorker.variantOrder(defAll, { mobile: false, webgpu: { available: true, fp16: true } }).join(',') === 'int8,fp16,fp32',
+    'and the full desktop order is int8 → fp16 → fp32, so a channel with only the fp32 file still works',
+    RSNeuralWorker.variantOrder(defAll, { mobile: false, webgpu: { available: true, fp16: true } }).join(','));
+  ok(RSNeuralWorker.variantOrder(defAll, { mobile: true, webgpu: { available: false, fp16: false } }).join(',') === 'int4,int8,fp32',
+    'the phone order is int4 → int8 → fp32 (fp16 only when the adapter advertises shader-f16)',
+    RSNeuralWorker.variantOrder(defAll, { mobile: true, webgpu: { available: false, fp16: false } }).join(','));
 
-  section('neural · createSession() execution-provider ordering (WebNN > WebGPU > WASM on mobile, WebGPU > WebNN > WASM elsewhere)');
+  section('neural · createSession() execution-provider ordering — WebGPU first, WASM/SIMD last, everywhere');
   function fakeOrt(behaviour) {
     const attempts = [];
     return {
@@ -321,13 +327,21 @@ async function testMobileAndWebNN() {
     const ort = fakeOrt({ webnn: 'ok', webgpu: 'ok', wasm: 'ok' });
     const r = await RSNeuralWorker.createSession(ort, new Uint8Array([1]),
       { mobile: true, webnn: { available: true, deviceType: 'npu' }, webgpu: { available: true, fp16: false } });
-    ok(r.provider === 'webnn' && ort.attempts.join(',') === 'webnn', 'mobile with WebNN available tries WebNN first and stops there', ort.attempts.join(','));
+    ok(r.provider === 'webgpu' && ort.attempts.join(',') === 'webgpu',
+      'a phone with both accelerators gets WebGPU first and stops there — the prompt\'s explicit preference', ort.attempts.join(','));
   }
   {
-    const ort = fakeOrt({ webnn: 'fail', webgpu: 'ok', wasm: 'ok' });
+    const ort = fakeOrt({ webnn: 'ok', webgpu: 'fail', wasm: 'ok' });
     const r = await RSNeuralWorker.createSession(ort, new Uint8Array([1]),
       { mobile: true, webnn: { available: true, deviceType: 'npu' }, webgpu: { available: true, fp16: false } });
-    ok(r.provider === 'webgpu' && ort.attempts.join(',') === 'webnn,webgpu', 'mobile falls through a failed WebNN attempt to WebGPU, not straight to WASM', ort.attempts.join(','));
+    ok(r.provider === 'webnn' && ort.attempts.join(',') === 'webgpu,webnn',
+      'and a failed WebGPU attempt falls through to the NPU before it gives up on hardware', ort.attempts.join(','));
+  }
+  {
+    const order = RSNeuralWorker.providerOrder({ webgpu: { available: true }, webnn: { available: false } });
+    ok(order.join(',') === 'webgpu,wasm', 'with no NPU the chain is exactly WebGPU → WASM', order.join(','));
+    const none = RSNeuralWorker.providerOrder({ webgpu: { available: false }, webnn: { available: false } });
+    ok(none.join(',') === 'wasm', 'with no accelerator at all it is exactly WASM — no failed attempt is made first', none.join(','));
   }
   {
     const ort = fakeOrt({ webnn: 'ok', webgpu: 'ok', wasm: 'ok' });
@@ -339,7 +353,7 @@ async function testMobileAndWebNN() {
     const ort = fakeOrt({ webnn: 'fail', webgpu: 'fail', wasm: 'ok' });
     const r = await RSNeuralWorker.createSession(ort, new Uint8Array([1]),
       { mobile: true, webnn: { available: true, deviceType: 'npu' }, webgpu: { available: true, fp16: false } });
-    ok(r.provider === 'wasm' && ort.attempts.join(',') === 'webnn,webgpu,wasm', 'WASM is still the last-resort fallback when every accelerator fails', ort.attempts.join(','));
+    ok(r.provider === 'wasm' && ort.attempts.join(',') === 'webgpu,webnn,wasm', 'WASM is still the last-resort fallback when every accelerator fails — and it is tried last', ort.attempts.join(','));
   }
   {
     const ort = fakeOrt({ wasm: 'ok' });
@@ -570,6 +584,310 @@ function testWorklet() {
   }
 }
 
+/* ====================================================================== *
+ * The model manager: first start, the CDN, the OPFS cache
+ * ====================================================================== */
+
+/** A model store with the same surface as `RSOPFS.models`, in memory. */
+function fakeModelStore() {
+  const files = new Map();          // 'model/file' -> Uint8Array
+  const writes = [];
+  return {
+    files,
+    writes,
+    dir: 'models',
+    path: (m, f) => 'models/' + m + '/' + f,
+    async stat(m, f) {
+      const b = files.get(m + '/' + f);
+      return { exists: !!b, size: b ? b.length : 0, path: 'models/' + m + '/' + f };
+    },
+    async read(m, f) { const b = files.get(m + '/' + f); return b ? b.slice() : null; },
+    async list(m) {
+      const out = [];
+      for (const [k, v] of files) {
+        if (k.indexOf(m + '/') === 0) out.push({ name: k.slice(m.length + 1), size: v.length, path: 'models/' + k });
+      }
+      return out;
+    },
+    async remove(m, f) { files.delete(m + '/' + f); },
+    async clear() { files.clear(); },
+    async createWriter(m, f) {
+      const parts = [];
+      let size = 0;
+      let closed = false;
+      const rec = { key: 'models/' + m + '/' + f, chunks: 0 };
+      writes.push(rec);
+      return {
+        key: rec.key,
+        async write(chunk) {
+          if (closed) throw new Error('writer already closed');
+          const u8 = chunk instanceof Uint8Array ? chunk.slice() : new Uint8Array(chunk.slice(0));
+          // the real store posts the buffer to its worker with `transfer`,
+          // which detaches the caller's view — the loader has to have counted
+          // its bytes before that happens, so the fake store detaches too
+          try { structuredClone(chunk, { transfer: [chunk.buffer] }); } catch (e) { /* not transferable */ }
+          parts.push(u8); size += u8.length; rec.chunks++;
+        },
+        async close() {
+          closed = true;
+          const all = new Uint8Array(size);
+          let off = 0;
+          for (const part of parts) { all.set(part, off); off += part.length; }
+          files.set(m + '/' + f, all);
+          return { size, key: rec.key };
+        },
+        async abort() { closed = true; parts.length = 0; size = 0; rec.aborted = true; },
+      };
+    },
+  };
+}
+
+/**
+ * A `fetch` that answers from a route table and streams the body in chunks, the
+ * way a CDN does. Every requested URL is recorded.
+ */
+function fakeFetch(routes) {
+  const calls = [];
+  const fn = async (url) => {
+    calls.push(url);
+    const r = routes[url];
+    if (!r) {
+      return { ok: false, status: 404, headers: { get: () => null } };
+    }
+    const bytes = r.bytes;
+    let off = 0;
+    return {
+      ok: true,
+      status: 200,
+      headers: {
+        get: (name) => {
+          const n = String(name).toLowerCase();
+          if (n === 'content-length') return r.length === null ? null : String(r.length === undefined ? bytes.length : r.length);
+          if (n === 'content-type') return r.type || 'application/octet-stream';
+          return null;
+        },
+      },
+      body: {
+        getReader() {
+          return {
+            async read() {
+              if (off >= bytes.length) return { done: true };
+              const chunk = bytes.slice(off, Math.min(bytes.length, off + (r.chunk || 65536)));
+              off += chunk.length;
+              return { done: false, value: chunk };
+            },
+          };
+        },
+      },
+      async arrayBuffer() { return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength); },
+    };
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+/** Run `fn` with `globalThis.RSOPFS` / `globalThis.fetch` replaced, then put
+ *  the originals back whatever happens. */
+async function withGlobals(replacement, fn) {
+  const hadRSOPFS = Object.prototype.hasOwnProperty.call(global, 'RSOPFS');
+  const prevRSOPFS = global.RSOPFS;
+  const prevFetch = global.fetch;
+  const prevNav = global.navigator;
+  try {
+    if ('RSOPFS' in replacement) global.RSOPFS = replacement.RSOPFS;
+    if ('fetch' in replacement) global.fetch = replacement.fetch;
+    if ('navigator' in replacement) Object.defineProperty(global, 'navigator', { value: replacement.navigator, configurable: true });
+    return await fn();
+  } finally {
+    if (hadRSOPFS) global.RSOPFS = prevRSOPFS; else delete global.RSOPFS;
+    global.fetch = prevFetch;
+    if ('navigator' in replacement) Object.defineProperty(global, 'navigator', { value: prevNav, configurable: true });
+  }
+}
+
+async function testModelManager() {
+  section('neural · the weight-file registry agrees with the worker (one file name, three modules)');
+
+  ok(RSNeural.modelDir === 'models', 'the loader stores under `models/` in OPFS', RSNeural.modelDir);
+  ok(RSNeural.MODEL_FILES.deepfilternet3.int8 === RSNeuralWorker.MODELS.deepfilternet3.files.int8,
+    'the INT8 file name the loader downloads is the one the worker looks for',
+    RSNeural.MODEL_FILES.deepfilternet3.int8);
+  ok(RSNeural.MODEL_FILES.deepfilternet3.int4 === RSNeuralWorker.MODELS.deepfilternet3.files.int4,
+    'and so is the INT4 name', RSNeural.MODEL_FILES.deepfilternet3.int4);
+  ok(RSNeural.MODEL_FILES.deepfilternet3.int8 === 'deepfilternet3_int8.onnx',
+    'the INT8 file is named as the brief names it', RSNeural.MODEL_FILES.deepfilternet3.int8);
+
+  section('neural · ensureModel() on a first start — the CDN, the progress, the OPFS file');
+
+  const modelBytes = new Uint8Array(300000);
+  for (let i = 0; i < modelBytes.length; i++) modelBytes[i] = (i * 37 + 11) & 0xff;
+  modelBytes[0] = 0x08;   // protobuf-looking, not '<'
+
+  {
+    const store = fakeModelStore();
+    const fetchFn = fakeFetch({
+      'https://cdn.test/models/deepfilternet3/deepfilternet3_int8.onnx': { bytes: modelBytes, chunk: 65536 },
+    });
+    const events = [];
+    const off = RSNeural.onModelProgress((p) => events.push(p));
+    const res = await withGlobals({ RSOPFS: { models: store }, fetch: fetchFn, navigator: { userAgent: 'Mozilla/5.0 (X11; Linux x86_64)' } }, async () => {
+      RSNeural.setModelSource(['https://cdn.test/models']);
+      return RSNeural.ensureModel('deepfilternet3');
+    });
+    off();
+    ok(res.ready === true && res.source === 'network', 'a cold start downloads the model and resolves ready', JSON.stringify(res));
+    ok(res.variant === 'int8' && res.path === 'models/deepfilternet3/deepfilternet3_int8.onnx',
+      'and it is stored as INT8 under models/', res.variant + ' · ' + res.path);
+    ok(res.bytes === modelBytes.length, 'the reported size is the file size', String(res.bytes));
+    const stored = store.files.get('deepfilternet3/deepfilternet3_int8.onnx');
+    ok(!!stored && stored.length === modelBytes.length, 'the bytes really landed in the store', stored ? String(stored.length) : 'nothing');
+    ok(!!stored && stored[0] === modelBytes[0] && stored[stored.length - 1] === modelBytes[modelBytes.length - 1],
+      'and they are the downloaded bytes, first and last');
+    const dl = events.filter((e) => e.phase === 'download');
+    ok(dl.length >= 4, 'progress was reported per chunk, not once at the end', dl.length + ' download events');
+    ok(dl.every((e, i) => i === 0 || e.loaded >= dl[i - 1].loaded), 'the byte count never runs backwards');
+    ok(dl[0].loaded < modelBytes.length && dl[dl.length - 1].ratio <= 1, 'and it starts below the total and never exceeds it',
+      dl[0].loaded + ' … ' + dl[dl.length - 1].ratio.toFixed(3));
+    ok(events[events.length - 1].phase === 'done' && events[events.length - 1].ratio === 1,
+      'the last event is the finished one, at 100 %', events[events.length - 1].phase);
+    ok(fetchFn.calls.length === 1, 'exactly one network request was made', fetchFn.calls.join(', '));
+  }
+
+  {
+    const store = fakeModelStore();
+    store.files.set('deepfilternet3/deepfilternet3_int8.onnx', modelBytes);
+    const fetchFn = fakeFetch({});
+    const res = await withGlobals({ RSOPFS: { models: store }, fetch: fetchFn, navigator: { userAgent: 'Mozilla/5.0 (X11; Linux x86_64)' } }, async () => {
+      RSNeural.setModelSource(['https://cdn.test/models']);
+      return RSNeural.ensureModel('deepfilternet3');
+    });
+    ok(res.ready === true && res.source === 'opfs', 'a second start finds the cached file and resolves from OPFS', JSON.stringify(res));
+    ok(fetchFn.calls.length === 0, 'and touches the network zero times', fetchFn.calls.join(', ') || 'no requests');
+  }
+
+  section('neural · variant fallback — INT4 where it exists, INT8 where it does not');
+
+  {
+    const store = fakeModelStore();
+    const fetchFn = fakeFetch({
+      'https://cdn.test/models/deepfilternet3/deepfilternet3_int8.onnx': { bytes: modelBytes, chunk: 65536 },
+    });
+    const res = await withGlobals({ RSOPFS: { models: store }, fetch: fetchFn, navigator: { userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)' } }, async () => {
+      RSNeural.setModelSource(['https://cdn.test/models']);
+      return RSNeural.ensureModel('deepfilternet3', { mobile: true });
+    });
+    ok(res.ready === true && res.variant === 'int8',
+      'a phone asks for INT4 first, gets a 404 and lands on INT8 instead of failing', res.variant || res.reason);
+    ok(fetchFn.calls[0].indexOf('deepfilternet3_int4.onnx') !== -1 && fetchFn.calls[1].indexOf('deepfilternet3_int8.onnx') !== -1,
+      'the requests were int4 first, then int8', fetchFn.calls.map((u) => u.split('/').pop()).join(' → '));
+  }
+
+  {
+    const store = fakeModelStore();
+    const fetchFn = fakeFetch({
+      'https://cdn.test/models/deepfilternet3/deepfilternet3_int4.onnx': { bytes: modelBytes.slice(0, 1000) },
+    });
+    const res = await withGlobals({ RSOPFS: { models: store }, fetch: fetchFn, navigator: { userAgent: 'Mozilla/5.0 (X11; Linux x86_64)' } }, async () => {
+      RSNeural.setModelSource(['https://cdn.test/models']);
+      return RSNeural.ensureModel('deepfilternet3', { variant: 'int4' });
+    });
+    ok(res.ready === true && res.variant === 'int4', 'an explicitly requested variant is the one that is fetched', res.variant || res.reason);
+  }
+
+  section('neural · a failed download leaves nothing behind and never rejects');
+
+  {
+    const store = fakeModelStore();
+    const fetchFn = fakeFetch({});
+    const res = await withGlobals({ RSOPFS: { models: store }, fetch: fetchFn, navigator: { userAgent: 'Mozilla/5.0 (X11; Linux x86_64)' } }, async () => {
+      RSNeural.setModelSource(['https://cdn.test/models']);
+      return RSNeural.ensureModel('deepfilternet3');
+    });
+    ok(res.ready === false && /^download-failed/.test(res.reason), 'every source 404ing is an answer, not a rejection', res.reason);
+    ok(store.files.size === 0, 'and no half-written model is left in the store', store.files.size + ' files');
+  }
+
+  {
+    const store = fakeModelStore();
+    const fetchFn = fakeFetch({
+      'https://cdn.test/models/deepfilternet3/deepfilternet3_int8.onnx': { bytes: modelBytes, chunk: 65536, length: modelBytes.length + 4096 },
+    });
+    const res = await withGlobals({ RSOPFS: { models: store }, fetch: fetchFn, navigator: { userAgent: 'Mozilla/5.0 (X11; Linux x86_64)' } }, async () => {
+      RSNeural.setModelSource(['https://cdn.test/models']);
+      return RSNeural.ensureModel('deepfilternet3');
+    });
+    ok(res.ready === false && /short read/.test(res.reason), 'a truncated body fails the download instead of caching a broken model', res.reason);
+    ok(store.files.size === 0 && store.writes[0].aborted === true, 'and the partial file was aborted and deleted');
+  }
+
+  {
+    const store = fakeModelStore();
+    const html = new Uint8Array(Buffer.from('<!doctype html><h1>404 not really</h1>'));
+    const fetchFn = fakeFetch({
+      'https://cdn.test/models/deepfilternet3/deepfilternet3_int8.onnx': { bytes: html, type: 'text/html' },
+    });
+    const res = await withGlobals({ RSOPFS: { models: store }, fetch: fetchFn, navigator: { userAgent: 'Mozilla/5.0 (X11; Linux x86_64)' } }, async () => {
+      RSNeural.setModelSource(['https://cdn.test/models']);
+      return RSNeural.ensureModel('deepfilternet3');
+    });
+    ok(res.ready === false && /HTML/i.test(res.reason), 'an error page served with a 200 is refused, not stored as a model', res.reason);
+    ok(store.files.size === 0, 'and nothing is cached');
+  }
+
+  section('neural · concurrency, configuration and the cache report');
+
+  {
+    const store = fakeModelStore();
+    const fetchFn = fakeFetch({
+      'https://cdn.test/models/deepfilternet3/deepfilternet3_int8.onnx': { bytes: modelBytes, chunk: 65536 },
+    });
+    const both = await withGlobals({ RSOPFS: { models: store }, fetch: fetchFn, navigator: { userAgent: 'Mozilla/5.0 (X11; Linux x86_64)' } }, async () => {
+      RSNeural.setModelSource(['https://cdn.test/models']);
+      const a = RSNeural.ensureModel('deepfilternet3');
+      const b = RSNeural.ensureModel('deepfilternet3');
+      ok(a === b, 'two calls in the same tick share one promise — one download, not two racing into one file');
+      return Promise.all([a, b]);
+    });
+    ok(both[0].ready && both[1].ready && fetchFn.calls.length === 1,
+      'and both resolve with the same single download', fetchFn.calls.length + ' request(s)');
+  }
+
+  {
+    const store = fakeModelStore();
+    store.files.set('deepfilternet3/deepfilternet3_int4.onnx', modelBytes.slice(0, 512));
+    let res;
+    await withGlobals({ RSOPFS: { models: store } }, async () => {
+      res = await RSNeural.modelStatus('deepfilternet3');
+      RSNeural.setModelSource([]);
+      ok(RSNeural.canLoadModels() === false, 'an empty source list disables downloading');
+      ok(RSNeural.getModelSource().length === 0, 'and getModelSource() reports it');
+      const off = RSNeural.ensureModel('deepfilternet3');
+      const failed = await off;
+      ok(failed.ready === false && /download-failed/.test(failed.reason), 'ensureModel() then fails cleanly rather than guessing a URL', failed.reason);
+      RSNeural.setModelSource('https://a.test/models/');
+      ok(RSNeural.getModelSource()[0] === 'https://a.test/models/', 'a single string is accepted, trailing slash and all');
+      RSNeural.setModelSource(['https://a.test/m', 'https://b.test/m']);
+      ok(RSNeural.getModelSource().length === 2, 'a list is accepted, in order');
+    });
+    ok(res.cached === true && res.variants.int4.cached === true && res.variants.int4.size === 512,
+      'modelStatus() reports what is cached without any network access', JSON.stringify(res.variants.int4));
+    ok(res.variants.int8.cached === false, 'and reports the variant that is not there as not there');
+  }
+
+  {
+    const res = await withGlobals({ navigator: { userAgent: 'Mozilla/5.0 (X11; Linux x86_64)' } }, async () => {
+      delete global.RSOPFS;
+      RSNeural.setModelSource(['https://cdn.test/models']);
+      return RSNeural.ensureModel('deepfilternet3');
+    });
+    ok(res.ready === false && res.reason === 'no-store', 'with no model store at all the answer is `no-store`, not a throw', res.reason);
+    ok(RSNeural.canLoadModels() === false, 'and canLoadModels() says so');
+  }
+
+  // leave the module as the rest of the suite expects to find it
+  RSNeural.setModelSource(['https://cdn.jsdelivr.net/gh/AndrexTheDev/Remaster-Suite@models', 'models']);
+}
+
 async function main() {
   testAlignment();
   testErbFilterbank();
@@ -577,6 +895,7 @@ async function main() {
   testStftRoundTrip();
   await testProbeAndFallback();
   await testMobileAndWebNN();
+  await testModelManager();
   await testHardwareFallbackNotification();
   testWorklet();
 

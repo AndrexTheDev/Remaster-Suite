@@ -229,6 +229,15 @@ code { font-family: var(--mono); }
 .ctl { display: flex; flex-direction: column; gap: 6px; min-width: 230px; }
 .ctl-row { display: flex; align-items: center; gap: 12px; }
 .ctl-hint { font-size: .74rem; color: var(--ink-mute); max-width: 34ch; }
+.model-progress { display: grid; gap: 4px; margin-top: 8px; width: 100%; max-width: 34ch; }
+/* `display: grid` above would otherwise beat the UA sheet's [hidden] rule —
+   the row must really be gone until a download needs it */
+.model-progress[hidden] { display: none; }
+.model-progress-head { display: flex; align-items: baseline; gap: 8px; font-size: .72rem; }
+.model-progress-text { flex: 1; min-width: 0; color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-progress-pct { color: var(--gold); font-weight: 800; font-variant-numeric: tabular-nums; }
+.model-progress.is-done .work-fill { background: var(--green); }
+.model-progress.is-failed .work-fill { background: var(--red); }
 .ctl-check { display: flex; align-items: center; gap: 8px; font-size: .86rem; font-weight: 650; cursor: pointer; }
 .ctl-check input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--gold); cursor: pointer; }
 .ctl-actions { flex-direction: row; align-items: center; gap: 10px; margin-left: auto; }

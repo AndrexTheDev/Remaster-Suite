@@ -20,7 +20,11 @@
  * CDNs. Every fetch is a classic `<script>` injection with a timeout, a
  * per-URL promise cache and a fallback chain, so a blocked or offline CDN
  * degrades to the bundled file instead of throwing at the call site. The CDN
- * URLs live in this file and nowhere else; the audit suite pins that.
+ * URLs for *libraries* live in this file and nowhere else; the audit suite
+ * pins that. The quantised neural weights are the one deliberate exception —
+ * they are not a library but a model, and their channel belongs to the model
+ * manager (`neural-controller.js`, overridable with `setModelSource()` or a
+ * `rs-model-cdn` meta tag).
  *
  * `ffmpegFactory()` and `ortUrls()` are the two exceptions to "always bundled":
  * both are CDN-only, lazily loaded emergency paths, never fetched unless the

@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="rs-model-cdn" content="">
 <title>Harmonic Restoration · Remaster Suite</title>
 <meta name="description" content="Harmonic Restoration — Remaster Suite. Repariert alte, dumpfe oder verrauschte Aufnahmen direkt im Browser: Signalverarbeitung direkt auf dem Gerät, keine Uploads, kein Server. / Restores old, muffled or noisy recordings right in your browser: 100 % client-side, no uploads, no server.">
 <meta name="theme-color" content="#0d0f12">
@@ -178,7 +179,17 @@
           <input type="checkbox" id="neuralToggle">
           <span data-i18n="ctl.neural">KI-Höhenrekonstruktion</span>
         </label>
-        <span class="ctl-hint" id="neuralStatus" data-i18n="ctl.neuralUnavailable">Kein Modell gefunden — reine DSP-Kette aktiv</span>
+        <span class="ctl-hint" id="neuralStatus">Kein Modell gefunden — reine DSP-Kette aktiv</span>
+        <div class="model-progress" id="modelProgress" hidden>
+          <div class="model-progress-head">
+            <span class="model-progress-text" id="modelProgressText">Modell wird geladen …</span>
+            <span class="model-progress-pct" id="modelProgressPct">0 %</span>
+          </div>
+          <div class="work-track" id="modelProgressTrack" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+               aria-valuenow="0" aria-label="Modell-Download" data-i18n-aria="ctl.modelAria">
+            <div class="work-fill" id="modelProgressBar"></div>
+          </div>
+        </div>
       </div>
     </div>
     <div class="ctl-dots" id="ctlDots" aria-hidden="true"></div>

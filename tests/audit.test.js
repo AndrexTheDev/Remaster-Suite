@@ -80,13 +80,27 @@ section('audit · repository hygiene');
   const abs = (appSrc + html).match(/(?:src|href)="\/(?!\/)[^"]*"/g) || [];
   ok(abs.length === 0, 'no root-absolute asset paths', abs.join(', '));
 
-  // the only remote hosts may live in the library loader
+  // The only remote hosts may live in the two modules that own a channel:
+  // the library loader (bundled ⇄ CDN libraries) and the model manager (the
+  // quantised weights). Everything a *page* references — markup, stylesheet,
+  // worklet — must stay relative, or a sub-folder deployment breaks.
   // data: URIs and XML namespaces are not requests — strip them before looking
   const stripData = (src) => src.replace(/data:[^"')\s]*/g, '').replace(/https?:\/\/www\.w3\.org[^"')\s]*/g, '');
-  const remoteInOthers = APP_JS.filter((f) => f !== 'assets/js/library-loader.js')
+  const REMOTE_OWNERS = ['assets/js/library-loader.js', 'assets/js/neural-controller.js'];
+  const remoteInOthers = APP_JS.filter((f) => REMOTE_OWNERS.indexOf(f) === -1)
     .concat(['index.html', 'assets/css/app.css', 'assets/worklets/remaster-processor.js'])
     .filter((f) => /https?:\/\//.test(stripData(read(f))));
-  ok(remoteInOthers.length === 0, 'no remote URL outside the library loader', remoteInOthers.join(', '));
+  ok(remoteInOthers.length === 0, 'no remote URL outside the two modules that own a channel', remoteInOthers.join(', '));
+
+  // …and the model manager's own URL is the project's model channel, not some
+  // third-party service the loader happens to reach: one host, the project's
+  // own repository, and a path that says `@models`
+  // comments may (and do) show example URLs; only code counts
+  const codeOnly = (src) => stripData(src).replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  const modelUrls = (codeOnly(read('assets/js/neural-controller.js')).match(/https?:\/\/[^"'`\s)]+/g) || []);
+  ok(modelUrls.length === 1 && /^https:\/\/cdn\.jsdelivr\.net\/gh\/AndrexTheDev\/Remaster-Suite@models$/.test(modelUrls[0]),
+    'the model channel is one URL, on the project\'s own jsDelivr path', modelUrls.join(', ') || 'none');
+
 
   const loader = read('assets/js/library-loader.js');
   ok(/unpkg\.com/.test(loader) && /cdnjs\.cloudflare\.com/.test(loader) && /jsdelivr\.net/.test(loader),

@@ -9,3 +9,7 @@ scratch/
 
 # build output of the probes (measurement work files)
 tools/work/
+
+# the beta suite's failure artefacts: a red-on-dim picture of what moved, per
+# failing visual row. Re-drawn on every failing run, never part of the record.
+docs/beta/diff/

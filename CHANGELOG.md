@@ -6,6 +6,72 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Round 33 — the model downloads itself now: a configurable channel, a progress bar, an OPFS cache
+
+**Until this round the neural stage was real code with no weights: every door led to
+`{applied: false, reason: 'weights-not-found'}`, and the only way to use it was to drop a model file into the
+Origin Private File System by hand.** That is not a feature a person can use. This round builds the missing
+half — the model manager — and makes the first start the product story it should have been: switch it on
+once, watch it download, never think about it again.
+
+**1 — a model channel that a deployment can point anywhere.** `neural-controller.js` learns
+`MODEL_FILES`, `setModelSource(url | [urls])`, `getModelSource()`, `canLoadModels()` and the
+`<meta name="rs-model-cdn" content="…">` override, defaulting to this project's own jsDelivr channel
+(`…@models`) with the page-relative `models/` folder as a fallback. One URL builder, trailing slashes
+trimmed, `<base>/<model>/<file>`; every request in the download path goes through that one list, which is
+also what makes the beta suite able to prove the whole path against a local fixture server with no internet.
+The audit suite's long-standing "no remote URL outside the library loader" rule becomes "outside the two
+modules that own a channel", plus a new row that pins the model channel to exactly one URL on the project's
+own path — the rule got narrower, not weaker, and the comment in `library-loader.js` that claimed to be the
+only home of a CDN URL now says which exception exists and why.
+
+**2 — `ensureModel()`: cache first, then the network, never a rejection.** It stats the preferred variants
+in OPFS (mobile int4 → int8, desktop int8 first, and `variant:` overrides both), then tries each source ×
+each variant, and always resolves a shape — `{ready, key, source: 'opfs' | 'network', variant, path, bytes,
+url}`, or `{ready: false, reason}`. Two calls in the same tick share one promise, so a double click cannot
+race two writers into one file. The download streams into the model store in the response's own chunks;
+`downloadToStore()` refuses a non-2xx, an HTML body (paid for with a real bug in a similar project: a CDN
+404 page served with a 200), an empty body and a short read — and on any of those aborts the write and
+deletes the partial file, because a half-written model that later reads as "cached" is worse than no model
+at all. `modelStatus()` reports what is on disk per variant; `onModelProgress()` feeds the bar.
+
+**3 — the model store is its own directory.** `opfs-manager.js` grows `RSOPFS.models` with
+`dir/path/stat/read/list/remove/clear/createWriter` and a memory fallback, writing `models/<model>/<file>`
+*outside* `rs-scratch/` — so the boot-time `resetScratch()` can keep deleting every leftover render without
+ever deleting a model somebody waited for a 40 MB download for. Both properties are pinned in
+`opfs.test.js`, whose simulator learned nested `getDirectoryHandle` to be able to express them.
+
+**4 — WebGPU first, WASM-SIMD always there.** The worker's provider order becomes an explicit, exported
+function: WebGPU (only once the adapter is really there), then WebNN where the browser offers it, then WASM
+with `ort.env.wasm.simd = true` and `enableCpuMemArena` — the floor never disappears. The quantised names
+are now the brief's own (`deepfilternet3_int8.onnx`, `deepfilternet3_int4.onnx`), and `loadWeights()` looks
+for every variant both nested and flat (`models/<file>`) before it ever fetches.
+
+**5 — a first start a person can see.** `ui.js` grows `modelLoader` (the same `.work-track`/`.work-fill`
+pair the render bars use, so a download looks like every other piece of work), and `app.js` rewires the
+settings row: with no weights and a working store the switch is offered, switching it on downloads, the row
+paints percent by percent, a toast reports the size, and the toggle ends up on a working model — or the
+attempt ends with a red bar and a toast, never a switch that lies. Nothing downloads at boot: the user's
+gesture is what starts the network. The status line's four states (available / installed-but-no-runtime /
+downloadable / unavailable) are now data plus a painter rather than three `if`s writing `textContent`, so a
+language switch re-translates the sentence instead of resetting it to the markup default.
+
+**6 — what the browser found that the unit test had not.** Three defects, each now a row:
+`downloadToStore()` counted `loaded += chunk.length` *after* handing the chunk to the store, and the real
+store transfers the buffer to its worker — the view is detached, `.length` is 0, and every download failed
+with "empty response" while the bytes were on disk. The fake store in `neural.test.js` learned to detach its
+input, so the test now fails for the same reason the browser did. `#modelProgress` carries `display: grid`,
+which beats the user agent's `[hidden]` rule, so the "hidden" row was on screen — one `[hidden] { display:
+none }` and the `hidden` attribute means something again. And `data-i18n` on the live status line made every
+language switch overwrite what the app had just learned with the HTML default.
+
+beta.js 155 → **174 checks** (nineteen rows over the channel, the cache, the network trace, the two starts,
+the bar, the language switch and the 404 cleanup), `opfs.test.js` 39 → **52**, `neural.test.js` 87 →
+**127**, `audit.test.js` 338 → **339**, the suite total 1 045 → **1 099**. Two visual baselines were
+re-recorded, and the reason is a real harness fix: the old desktop-empty baseline had been captured with
+three "Liste geleert." toasts still on screen. `visualRow()` now waits for a transient toast to leave before
+it looks, which is exactly the race the row exists to catch in the app rather than in the harness.
+
 ### Round 32 — the beta suite learns to use a thumb, and to look at what it drew
 
 **Round 30 put a carousel, a gold button and a floating A/B/C switch on the phone screen. Eleven node

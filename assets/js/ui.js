@@ -175,6 +175,121 @@
     return node;
   }
 
+  /* ------------------------------------------------------- model download */
+
+  /**
+   * The progress row a model download draws itself in: `#modelProgress` and
+   * its fill. Kept here rather than in `app.js` because it is pure DOM — the
+   * caller decides *what* is happening, this decides what the bar shows.
+   *
+   * It is deliberately the same `.work-track`/`.work-fill` pair the per-card
+   * render bars use: a second progress-bar look would be a second thing to
+   * keep consistent, and the whole point of the row is that a download looks
+   * like every other piece of work the app does.
+   * @typedef {Object} ModelLoader
+   * @property {function({ratio: number, text: (string|undefined)}): (Element|null)} update
+   * @property {function(string=): (Element|null)} done
+   * @property {function(string=): (Element|null)} fail
+   * @property {function(): void} reset
+   * @property {function(): (Element|null)} node
+   */
+
+  /**
+   * Clamp a ratio into 0…1 and turn it into a width. A NaN (a download with
+   * no known total that has not received anything yet) is 0, not "NaN %".
+   * @param {number} ratio - the raw share.
+   * @returns {string} a CSS width, e.g. `'42.0%'`.
+   */
+  function ratioWidth(ratio) {
+    const r = Number.isFinite(ratio) ? Math.max(0, Math.min(1, ratio)) : 0;
+    return (r * 100).toFixed(1) + '%';
+  }
+
+  /** @type {ModelLoader} */
+  const modelLoader = {
+    /**
+     * Show the row and paint one step. Creates nothing: the markup is in
+     * `index.html`, so a page without it (the Node suites) simply gets `null`.
+     * @param {{ratio: number, text: (string|undefined)}} p - the step.
+     * @returns {Element|null} the row, or `null` when there is no document or
+     *   no markup for it.
+     */
+    update(p) {
+      if (!doc) return null;
+      const box = $('#modelProgress');
+      if (!box) return null;
+      const step = p || { ratio: 0 };
+      box.hidden = false;
+      box.classList.remove('is-done', 'is-failed');
+      const bar = $('#modelProgressBar');
+      const pct = $('#modelProgressPct');
+      const text = $('#modelProgressText');
+      const track = $('#modelProgressTrack');
+      if (bar) bar.style.width = ratioWidth(step.ratio);
+      if (pct) pct.textContent = Math.round((Number.isFinite(step.ratio) ? Math.max(0, Math.min(1, step.ratio)) : 0) * 100) + ' %';
+      if (text && step.text) text.textContent = step.text;
+      if (track) track.setAttribute('aria-valuenow', String(Math.round((Number.isFinite(step.ratio) ? Math.max(0, Math.min(1, step.ratio)) : 0) * 100)));
+      return box;
+    },
+
+    /**
+     * Paint the finished state and fade the row out. The 100 % frame is shown
+     * first on purpose — a bar that vanishes at 97 % looks like a failure.
+     * @param {string} [text] - the final label.
+     * @returns {Element|null} the row.
+     */
+    done(text) {
+      const box = this.update({ ratio: 1, text });
+      if (!box) return null;
+      box.classList.add('is-done');
+      global.setTimeout(() => { if (box.isConnected) box.hidden = true; }, 1200);
+      return box;
+    },
+
+    /**
+     * Park the bar at whatever it reached, mark it failed and hide it: a
+     * failed download must not leave a half-full bar on the page implying
+     * that it is still working.
+     * @param {string} [text] - the failure label.
+     * @returns {Element|null} the row.
+     */
+    fail(text) {
+      if (!doc) return null;
+      const box = $('#modelProgress');
+      if (!box) return null;
+      if (text) {
+        const label = $('#modelProgressText');
+        if (label) label.textContent = text;
+      }
+      box.classList.add('is-failed');
+      global.setTimeout(() => { if (box.isConnected) { box.hidden = true; box.classList.remove('is-failed', 'is-done'); } }, 1600);
+      return box;
+    },
+
+    /**
+     * Hide the row and forget the last state, so the next download starts at
+     * zero rather than at whatever the previous one finished on.
+     * @returns {void}
+     */
+    reset() {
+      if (!doc) return;
+      const box = $('#modelProgress');
+      if (!box) return;
+      box.hidden = true;
+      box.classList.remove('is-done', 'is-failed');
+      const bar = $('#modelProgressBar');
+      if (bar) bar.style.width = '0%';
+      const pct = $('#modelProgressPct');
+      if (pct) pct.textContent = '0 %';
+    },
+
+    /**
+     * The row element itself, for callers that want to measure it.
+     * @returns {Element|null} `#modelProgress`.
+     */
+    node() { return doc ? $('#modelProgress') : null; },
+  };
+
   /* ----------------------------------------------------------------- dialogs */
 
   /**
@@ -719,13 +834,14 @@
    * @property {function(number): string} formatTime
    * @property {function(RSAnalyzer.Chips, ?RSAnalyzer.Chips=): Element[]} chipsFrom
    * @property {function(RSPresets.Diagnosis): string} diagnosisText
+   * @property {ModelLoader} modelLoader - the model-download progress row.
    */
 
   /** @type {RSUIApi} */
   const API = {
     formatValue, findingsList,
     $, $$, el, paintRange, scoreColor, copyText, toast, openDialog, closeDialog, bindDialogs,
-    Waveform, formatTime, chipsFrom, diagnosisText,
+    Waveform, formatTime, chipsFrom, diagnosisText, modelLoader,
   };
   /** @type {RSUIApi} */
   global.RSUI = API;

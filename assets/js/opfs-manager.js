@@ -71,6 +71,14 @@
 
   /** Directory name inside the OPFS root that holds every scratch file. */
   const SCRATCH_DIR = 'rs-scratch';
+  /**
+   * Directory name inside the OPFS root that holds downloaded model weights.
+   * Deliberately *not* the scratch directory: scratch storage is wiped at
+   * every boot (`resetScratch()`), and a model that had to be downloaded again
+   * after every reload would make the loader pointless. Layout:
+   * `models/<model>/<file>` — see {@link RSOPFS.models}.
+   */
+  const MODELS_DIR = 'models';
 
   /**
    * One entry of a `packZip()` call: either a scratch file (`key`) or literal
@@ -421,50 +429,72 @@
       return rootPromise;
     }
     /**
+     * Walk a directory chain below the OPFS root, creating it on demand. One
+     * helper for both stores this worker owns: `rs-scratch` (render output)
+     * and `models` (downloaded weights, which live at the root so the page and
+     * the neural worker can find them).
+     * @param {string[]} segments - path segments, outermost first.
+     * @param {boolean} create - create missing directories instead of failing.
+     * @returns {Promise<FileSystemDirectoryHandle>} the resolved directory.
+     */
+    async function dirAt(segments, create) {
+      let dir = await root();
+      for (const name of segments) {
+        dir = await dir.getDirectoryHandle(name, { create: !!create });
+      }
+      return dir;
+    }
+
+    /**
      * The scratch directory, created on first use.
      * @returns {Promise<FileSystemDirectoryHandle>} `rs-scratch` under the root.
      */
     async function scratchDir() {
-      const r = await root();
-      return r.getDirectoryHandle('rs-scratch', { create: true });
+      return dirAt(['rs-scratch'], true);
     }
 
     /**
-     * Open scratch files, keyed by a per-worker numeric id: the sync handle
-     * plus how far it has been written, so `write` can append without the
+     * Open files, keyed by a per-worker numeric id: the sync handle, how far it
+     * has been written, its name and the directory it came from (so `abort`
+     * can delete from the right store), so `write` can append without the
      * caller tracking offsets across the thread boundary.
-     * @type {Map<number, {sync: FileSystemSyncAccessHandle, pos: number, key: string}>}
+     * @type {Map<number, {sync: FileSystemSyncAccessHandle, pos: number, key: string,
+     *   dir: FileSystemDirectoryHandle}>}
      */
     const handles = new Map();
     /** Monotonic handle id; never reused, so a stale id cannot hit a new file. */
     let nextId = 1;
 
     /**
-     * Create (or truncate) a scratch file for writing and register a handle.
-     * @param {string} key - file name inside the scratch directory.
+     * Create (or truncate) a file for writing and register a handle.
+     * @param {string} key - file name inside `segments`.
+     * @param {string[]} [segments] - directory chain below the OPFS root; the
+     *   scratch directory when omitted.
      * @returns {Promise<number>} the handle id to send back to the main thread.
      */
-    async function openForWrite(key) {
-      const dir = await scratchDir();
+    async function openForWrite(key, segments) {
+      const dir = await dirAt(segments || ['rs-scratch'], true);
       const fh = await dir.getFileHandle(key, { create: true });
       const sync = await fh.createSyncAccessHandle();
       sync.truncate(0);
       const id = nextId++;
-      handles.set(id, { sync, pos: 0, key });
+      handles.set(id, { sync, pos: 0, key, dir });
       return id;
     }
 
     /**
-     * Open an existing scratch file for reading and register a handle.
-     * @param {string} key - file name inside the scratch directory.
+     * Open an existing file for reading and register a handle.
+     * @param {string} key - file name inside `segments`.
+     * @param {string[]} [segments] - directory chain below the OPFS root; the
+     *   scratch directory when omitted.
      * @returns {Promise<number>} the handle id.
      */
-    async function openForRead(key) {
-      const dir = await scratchDir();
+    async function openForRead(key, segments) {
+      const dir = await dirAt(segments || ['rs-scratch'], false);
       const fh = await dir.getFileHandle(key, { create: false });
       const sync = await fh.createSyncAccessHandle();
       const id = nextId++;
-      handles.set(id, { sync, pos: 0, key });
+      handles.set(id, { sync, pos: 0, key, dir });
       return id;
     }
 
@@ -625,9 +655,8 @@
           }
           case 'abort': {
             const h = handles.get(msg.id);
-            const key = h && h.key;
-            closeHandle(msg.id, false);
-            if (key) { try { (await scratchDir()).removeEntry(key); } catch (e) { /* ignore */ } }
+            if (h) closeHandle(msg.id, false);
+            if (h && h.dir) { try { await h.dir.removeEntry(h.key); } catch (e) { /* ignore */ } }
             reply({});
             break;
           }
@@ -649,6 +678,69 @@
           case 'pack': {
             const result = await doPack(msg);
             reply(result);
+            break;
+          }
+          /* ── the model store: the same sync-handle path, one directory
+             over. Weights land at `models/<model>/<file>` so the neural
+             worker (a different thread, the same origin) finds them with a
+             plain OPFS walk. ─────────────────────────────────────────────── */
+          case 'modelOpen': {
+            const id = await openForWrite(msg.key, ['models', msg.model]);
+            reply({ id });
+            break;
+          }
+          case 'modelStat': {
+            try {
+              const dir = await dirAt(['models', msg.model], false);
+              const fh = await dir.getFileHandle(msg.key, { create: false });
+              const file = await fh.getFile();
+              reply({ exists: true, size: file.size });
+            } catch (e) {
+              // "not there" is an answer, not a failure: this is the first
+              // question the loader asks on every start
+              reply({ exists: false, size: 0 });
+            }
+            break;
+          }
+          case 'modelRead': {
+            const dir = await dirAt(['models', msg.model], false);
+            const fh = await dir.getFileHandle(msg.key, { create: false });
+            const file = await fh.getFile();
+            const bytes = new Uint8Array(await file.arrayBuffer());
+            self.postMessage({ reqId: msg.reqId, ok: true, bytes }, [bytes.buffer]);
+            break;
+          }
+          case 'modelList': {
+            const files = [];
+            try {
+              const dir = await dirAt(['models', msg.model], false);
+              for await (const name of dir.keys()) {
+                try {
+                  const fh = await dir.getFileHandle(name, { create: false });
+                  const file = await fh.getFile();
+                  files.push({ name, size: file.size });
+                } catch (e) { /* not a regular file — skip */ }
+              }
+            } catch (e) { /* no such model directory: an empty list */ }
+            reply({ files });
+            break;
+          }
+          case 'modelRemove': {
+            try {
+              const dir = await dirAt(['models', msg.model], false);
+              await dir.removeEntry(msg.key);
+            } catch (e) { /* already gone */ }
+            reply({});
+            break;
+          }
+          case 'modelClear': {
+            try {
+              const models = await dirAt(['models'], false);
+              for await (const name of models.keys()) {
+                try { await models.removeEntry(name, { recursive: true }); } catch (e) { /* ignore */ }
+              }
+            } catch (e) { /* no models directory at all — nothing to clear */ }
+            reply({});
             break;
           }
           default:
@@ -1072,6 +1164,238 @@
     return { file: opfsFile, key, size, streamed: true };
   }
 
+  /* ====================================================================== *
+   * The model store — downloaded weights, kept out of the scratch directory
+   * ====================================================================== */
+
+  /**
+   * In-memory stand-ins for downloaded weights, used only when OPFS is
+   * unavailable. Keyed `'<model>/<file>'`. A page without OPFS can still use
+   * a model it downloads; it simply downloads it again next time, which is the
+   * same trade every other fallback in this module makes.
+   * @type {Map<string, Uint8Array>}
+   */
+  const MEMORY_MODELS = new Map();
+
+  /**
+   * The path a model file occupies inside the OPFS root. One place that spells
+   * it, because the neural worker walks the same tree from another thread.
+   * @param {string} model - model key, e.g. `'deepfilternet3'`.
+   * @param {string} file - weight file name, e.g. `'deepfilternet3_int8.onnx'`.
+   * @returns {string} `'models/<model>/<file>'`.
+   */
+  function modelPath(model, file) {
+    return MODELS_DIR + '/' + model + '/' + file;
+  }
+
+  /**
+   * Does a weight file exist, and how big is it? Never rejects: a missing
+   * store, a missing directory and a missing file are all `{exists:false}`,
+   * because this is the loader's first question on every start and "no" is a
+   * normal answer.
+   * @param {string} model - model key.
+   * @param {string} file - weight file name.
+   * @returns {Promise<{exists: boolean, size: number, path: string}>} the
+   *   answer, with the path that was asked about.
+   */
+  async function modelStat(model, file) {
+    const path = modelPath(model, file);
+    try {
+      const supported = await isSupported();
+      if (!supported) {
+        const bytes = MEMORY_MODELS.get(model + '/' + file);
+        return { exists: !!bytes, size: bytes ? bytes.length : 0, path };
+      }
+      const res = await call({ cmd: 'modelStat', model, key: file }, 10000);
+      return { exists: !!res.exists, size: res.size || 0, path };
+    } catch (e) {
+      return { exists: false, size: 0, path };
+    }
+  }
+
+  /**
+   * Read a weight file back. Used by the loader to prove what landed on disk
+   * and by anything that wants the bytes without a `File`.
+   * @param {string} model - model key.
+   * @param {string} file - weight file name.
+   * @returns {Promise<Uint8Array|null>} the bytes, or `null` when the file is
+   *   not there (or the store is unavailable).
+   */
+  async function readModel(model, file) {
+    try {
+      const supported = await isSupported();
+      if (!supported) {
+        const bytes = MEMORY_MODELS.get(model + '/' + file);
+        return bytes ? bytes.slice() : null;
+      }
+      const res = await call({ cmd: 'modelRead', model, key: file }, 30000);
+      return res.bytes ? new Uint8Array(res.bytes) : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * List the weight files of one model, with their sizes.
+   * @param {string} model - model key.
+   * @returns {Promise<Array<{name: string, size: number, path: string}>>} the
+   *   files; an empty array when there are none.
+   */
+  async function listModels(model) {
+    try {
+      const supported = await isSupported();
+      if (!supported) {
+        const prefix = model + '/';
+        const out = [];
+        for (const [k, v] of MEMORY_MODELS) {
+          if (k.indexOf(prefix) === 0) out.push({ name: k.slice(prefix.length), size: v.length, path: MODELS_DIR + '/' + k });
+        }
+        return out;
+      }
+      const res = await call({ cmd: 'modelList', model }, 10000);
+      return (res.files || []).map((f) => ({ name: f.name, size: f.size, path: modelPath(model, f.name) }));
+    } catch (e) {
+      return [];
+    }
+  }
+
+  /**
+   * Delete one weight file.
+   * @param {string} model - model key.
+   * @param {string} file - weight file name.
+   * @returns {Promise<void>} always resolves; a failed delete is housekeeping.
+   */
+  async function removeModel(model, file) {
+    try {
+      const supported = await isSupported();
+      if (!supported) { MEMORY_MODELS.delete(model + '/' + file); return; }
+      await call({ cmd: 'modelRemove', model, key: file });
+    } catch (e) { /* best effort */ }
+  }
+
+  /**
+   * Delete every downloaded weight file. Not called at boot — the whole point
+   * of this store is that it survives a reload — but exposed for a "free up
+   * space" action and for tests that need a cold start.
+   * @returns {Promise<void>} always resolves.
+   */
+  async function clearModels() {
+    try {
+      const supported = await isSupported();
+      if (!supported) { MEMORY_MODELS.clear(); return; }
+      await call({ cmd: 'modelClear' }, 15000);
+    } catch (e) { /* best effort */ }
+  }
+
+  /**
+   * A writer that streams a download straight into the model store — the same
+   * shape {@link RSOPFS.createWriter} returns, pointed at `models/` instead of
+   * `rs-scratch/`. Streaming (rather than one `arrayBuffer()`) is what keeps a
+   * quantised model from having to be resident twice: once as the network
+   * response and once as the thing being written.
+   * @param {string} model - model key.
+   * @param {string} file - weight file name.
+   * @returns {Promise<ScratchWriter>} the sink; `write()` appends, `close()`
+   *   reports the final size, `abort()` deletes the partial file.
+   */
+  async function createModelWriter(model, file) {
+    const supported = await isSupported();
+    if (!supported) {
+      const key = model + '/' + file;
+      const parts = [];
+      let size = 0;
+      return {
+        key: modelPath(model, file),
+        /**
+         * Buffer one chunk in memory (no OPFS on this host).
+         * @param {(Uint8Array|ArrayBuffer)} chunk - the bytes.
+         * @returns {Promise<void>} resolves immediately.
+         */
+        async write(chunk) {
+          const u8 = chunk instanceof Uint8Array ? chunk.slice() : new Uint8Array(chunk.slice(0));
+          parts.push(u8); size += u8.length;
+        },
+        /**
+         * Finish the in-memory file.
+         * @returns {Promise<{size: number, key: string}>} its final size.
+         */
+        async close() {
+          const all = new Uint8Array(size);
+          let off = 0;
+          for (const p of parts) { all.set(p, off); off += p.length; }
+          MEMORY_MODELS.set(key, all);
+          return { size, key: modelPath(model, file) };
+        },
+        /**
+         * Throw the partial file away.
+         * @returns {Promise<void>} resolves.
+         */
+        async abort() { parts.length = 0; size = 0; },
+      };
+    }
+    const { id } = await call({ cmd: 'modelOpen', model, key: file });
+    let closed = false;
+    return {
+      key: modelPath(model, file),
+      /**
+       * Append one chunk through the worker's sync handle.
+       * @param {(Uint8Array|ArrayBuffer)} chunk - the bytes to append.
+       * @returns {Promise<void>} resolves when the write landed.
+       */
+      async write(chunk) {
+        if (closed) throw new Error('writer already closed');
+        const buf = chunk instanceof ArrayBuffer ? chunk
+          : chunk.buffer.byteLength === chunk.byteLength ? chunk.buffer
+            : chunk.slice().buffer;
+        await call({ cmd: 'write', id, buf }, 15000);
+      },
+      /**
+       * Close the file and report its size.
+       * @returns {Promise<{size: number, key: string}>} the final size.
+       */
+      async close() {
+        if (closed) return { size: 0, key: modelPath(model, file) };
+        closed = true;
+        const res = await call({ cmd: 'close', id }, 15000);
+        return { size: res.size, key: modelPath(model, file) };
+      },
+      /**
+       * Delete the half-written file.
+       * @returns {Promise<void>} always resolves.
+       */
+      async abort() {
+        if (closed) return;
+        closed = true;
+        await call({ cmd: 'abort', id }).catch(() => {});
+      },
+    };
+  }
+
+  /**
+   * The model store's public surface.
+   * @typedef {Object} ModelStore
+   * @property {string} dir - the directory name inside the OPFS root.
+   * @property {function(string, string): string} path - `models/<model>/<file>`.
+   * @property {function(string, string): Promise<{exists: boolean, size: number, path: string}>} stat
+   * @property {function(string, string): Promise<?Uint8Array>} read
+   * @property {function(string): Promise<Array<{name: string, size: number, path: string}>>} list
+   * @property {function(string, string): Promise<void>} remove
+   * @property {function(): Promise<void>} clear
+   * @property {function(string, string): Promise<ScratchWriter>} createWriter
+   */
+
+  /** @type {ModelStore} */
+  const models = {
+    dir: MODELS_DIR,
+    path: modelPath,
+    stat: modelStat,
+    read: readModel,
+    list: listModels,
+    remove: removeModel,
+    clear: clearModels,
+    createWriter: createModelWriter,
+  };
+
   /**
    * The public surface, assigned to `global.RSOPFS` below. Every member
    * degrades instead of throwing wherever a browser is simply too old.
@@ -1087,6 +1411,7 @@
    * @property {function(): Promise<void>} resetScratch
    * @property {function(ZipEntry[], string, function(Object)=): Promise<{size: number}>} packZip
    * @property {function((File|Blob), string, Object=): Promise<StreamedFile>} streamFileIntoScratch
+   * @property {ModelStore} models - the downloaded-weight store (`models/`).
    * @property {string} scratchDirName - read-only name of the scratch directory.
    */
 
@@ -1101,6 +1426,7 @@
     resetScratch,
     packZip,
     streamFileIntoScratch,
+    models,
     /** @returns {string} the scratch directory's name inside the OPFS root. */
     get scratchDirName() { return SCRATCH_DIR; },
   };

@@ -323,16 +323,32 @@
   }
 
   /**
-   * Create a session. The execution-provider order depends on `caps.mobile`:
-   * on a phone/tablet with WebNN available, WebNN is tried *first* (its
-   * whole reason to exist is reaching an NPU that WebGPU cannot), then
-   * WebGPU, then WASM; everywhere else the order is WebGPU, WebNN, WASM —
-   * WebNN is still attempted opportunistically on desktop (e.g. Chrome/Edge
-   * with a DirectML-backed NPU) but never ahead of an already-proven WebGPU
-   * path there. Every provider is a try/catch of its own: a missing
-   * provider, an unsupported op, or a device creation failure mid-session
-   * all fall through to the next one, and the caller never sees the
-   * difference except in the returned `provider` name. WASM is the only
+   * The execution providers to try, in order. **WebGPU is first, always** —
+   * `onnxruntime-web` gets `executionProviders: [{name:'webgpu', …}]` before
+   * anything else is considered, and the WASM/SIMD provider is the automatic
+   * last resort. WebNN is kept as an opportunistic step between the two (its
+   * whole reason to exist is reaching an NPU WebGPU cannot), but it never
+   * displaces WebGPU the way it did before: a machine with both gets the GPU
+   * path, and a phone without WebGPU still gets the NPU before it falls back
+   * to WASM.
+   * @param {DeviceCaps} caps - the device profile.
+   * @returns {string[]} provider names in try order — always ending in
+   *   `'wasm'`, because WASM is what every host has.
+   */
+  function providerOrder(caps) {
+    const order = ['webgpu'];
+    if (caps && caps.webnn && caps.webnn.available) order.push('webnn');
+    order.push('wasm');
+    return order.filter((p) => p !== 'webgpu' || (caps && caps.webgpu && caps.webgpu.available));
+  }
+
+  /**
+   * Create a session. The provider list comes from {@link providerOrder}:
+   * WebGPU first, WebNN where the host really created a context, WASM/SIMD
+   * last and unconditional. Every optional provider is a try/catch of its
+   * own: a missing provider, an unsupported op, or a device creation failure
+   * mid-session all fall through to the next one, and the caller never sees
+   * the difference except in the returned `provider` name. WASM is the only
    * provider that is never wrapped in a `try` — if it also throws, that is a
    * genuine `createSession()` failure, caught one level up by `getSession()`.
    * @param {*} ort - the loaded `onnxruntime-web` namespace.
@@ -377,8 +393,10 @@
         }),
       }
       : null;
-    if (caps.mobile) { if (webnnAttempt) attempts.push(webnnAttempt); if (webgpuAttempt) attempts.push(webgpuAttempt); }
-    else { if (webgpuAttempt) attempts.push(webgpuAttempt); if (webnnAttempt) attempts.push(webnnAttempt); }
+    for (const provider of providerOrder(caps)) {
+      if (provider === 'webgpu' && webgpuAttempt) attempts.push(webgpuAttempt);
+      if (provider === 'webnn' && webnnAttempt) attempts.push(webnnAttempt);
+    }
 
     for (const attempt of attempts) {
       try {
@@ -386,9 +404,15 @@
         return { session, provider: attempt.provider, fp16: attempt.fp16 };
       } catch (err) { /* fall through to the next provider, WASM last */ }
     }
+    // The automatic last resort. SIMD is the difference between a usable
+    // phone and a slideshow, so it is configured on the environment *and*
+    // stated in the session options; a build without SIMD support ignores it
+    // and runs scalar rather than failing.
+    if (ort.env && ort.env.wasm) ort.env.wasm.simd = true;
     const session = await ort.InferenceSession.create(bytes, {
       executionProviders: ['wasm'],
       graphOptimizationLevel: 'all',
+      enableCpuMemArena: true,
     });
     return { session, provider: 'wasm', fp16: false };
   }
@@ -853,10 +877,12 @@
       dir: 'models/deepfilternet3',
       files: {
         fp32: 'deepfilter.onnx', fp16: 'deepfilter.fp16.onnx', aux: 'deepfilter-auxiliary.bin',
-        // "DeepFilterNet-Mobile"-class quantised exports the brief names
-        // explicitly: same graph/IO contract as fp32/fp16 above, just
-        // weight-quantised, so no DSP-side change is needed to use them.
-        int8: 'deepfilter.int8.onnx', int4: 'deepfilter.int4.onnx',
+        // The quantised exports the brief names explicitly, under the names
+        // `neural-controller.js` downloads and stores them as: same graph/IO
+        // contract as fp32/fp16 above, just weight-quantised, so no DSP-side
+        // change is needed to use them. INT8 is the standard-use default,
+        // INT4 the phone variant when the channel publishes one.
+        int8: 'deepfilternet3_int8.onnx', int4: 'deepfilternet3_int4.onnx',
       },
       // soniqo/DeepFilterNet3-ONNX and aufklarer/DeepFilterNet3-ONNX (Hugging
       // Face): feat_erb [1,1,T,32], feat_spec [1,2,T,96] in;
@@ -953,29 +979,38 @@
   }
 
   /**
-   * Pick which weight file to ask for, given what the device can actually
-   * use. On mobile this prefers the smallest quantised export a model
-   * publishes — int4, then int8 — before ever considering fp16/fp32, which
-   * is what keeps resident weights under the brief's ~80 MB VRAM target;
-   * everywhere else the existing fp16-when-the-adapter-supports-it/fp32
-   * behaviour is unchanged. A variant is only chosen if `def.files` actually
-   * lists it — none do in this repository (see MODELS' own comment), so
-   * this always lands on `fp32` here, but it is exactly the lookup a project
-   * that *does* ship quantised weights needs with no further code changes.
+   * Every variant worth trying, in order. On mobile the smallest quantised
+   * export a model publishes comes first — int4, then int8 — because resident
+   * weights have to stay under the brief's ~80 MB VRAM target; everywhere else
+   * INT8 is the standard-use default the model manager downloads, with fp16
+   * (only when the adapter really advertises `shader-f16`) and fp32 behind it.
+   * Only variants `def.files` actually lists are returned, so a model that
+   * publishes no quantised file simply starts at fp16/fp32.
    * @param {ModelDefinition} def - the model definition (its `files` map is
    *   the set of published variants).
    * @param {DeviceCaps} caps - the device profile.
-   * @returns {string} the variant key to load; `'fp32'` when nothing smaller
-   *   is published.
+   * @returns {string[]} variant keys in try order; never empty.
    */
-  function selectVariant(def, caps) {
+  function variantOrder(def, caps) {
     const files = def.files;
     const wantFp16 = !!(caps && caps.webgpu && caps.webgpu.available && caps.webgpu.fp16);
     const order = (caps && caps.mobile)
       ? ['int4', 'int8', wantFp16 ? 'fp16' : null, 'fp32']
-      : [wantFp16 ? 'fp16' : null, 'fp32'];
-    for (const key of order) { if (key && files[key]) return key; }
-    return 'fp32';
+      : ['int8', wantFp16 ? 'fp16' : null, 'fp32'];
+    const out = order.filter((key) => key && files[key]);
+    return out.length ? out : ['fp32'];
+  }
+
+  /**
+   * The variant to ask for first — {@link variantOrder}'s head. Kept as the
+   * single-variant spelling because several call sites only want the answer,
+   * not the list.
+   * @param {ModelDefinition} def - the model definition.
+   * @param {DeviceCaps} caps - the device profile.
+   * @returns {string} the first variant from {@link variantOrder}.
+   */
+  function selectVariant(def, caps) {
+    return variantOrder(def, caps)[0];
   }
 
   /**
@@ -993,12 +1028,26 @@
   async function loadWeights(modelKey, caps) {
     const def = MODELS[modelKey];
     if (!def) return null;
-    const variant = selectVariant(def, caps);
-    const rel = def.dir + '/' + def.files[variant];
-    let bytes = await opfsBytes(rel);
-    if (bytes) return { bytes, source: 'opfs', file: rel, def, variant };
-    bytes = await fetchBytes(rel);
-    if (bytes) return { bytes, source: 'fetch', file: rel, def, variant };
+    const variants = variantOrder(def, caps);
+    // OPFS first for *every* variant, then the network: the model manager
+    // stores exactly one variant, and on a phone that is int4 while a desktop
+    // deployment may have put int8 next to the page — asking the disk for both
+    // costs nothing, asking a CDN for both costs a round trip per miss.
+    for (const variant of variants) {
+      const name = def.files[variant];
+      // `def.dir/<name>` is where the loader writes and where a deployment is
+      // documented to put it; `models/<name>` is the flat layout a hand-made
+      // install tends to end up with, and costs one extra walk to support.
+      for (const rel of [def.dir + '/' + name, 'models/' + name]) {
+        const bytes = await opfsBytes(rel);
+        if (bytes) return { bytes, source: 'opfs', file: rel, def, variant };
+      }
+    }
+    for (const variant of variants) {
+      const rel = def.dir + '/' + def.files[variant];
+      const bytes = await fetchBytes(rel);
+      if (bytes) return { bytes, source: 'fetch', file: rel, def, variant };
+    }
     return null;
   }
 
@@ -1318,6 +1367,15 @@
      * @returns {Promise<Object>} `{applied, gainsDb, bandsHz, reason?}`.
      */
     superres: async (msg) => superresCurve(msg.signal, msg.bandsHz || []),
+    /**
+     * Forget every cached session, positive or negative. Called by the model
+     * manager right after weights land in OPFS: a negative "no weights" entry
+     * from before the download would otherwise hide the new file until the
+     * page was reloaded.
+     * @returns {Promise<Object>} `{cleared: true}` — the count is not useful
+     *   across the thread boundary, and the caller only needs the ack.
+     */
+    reset: async () => { sessionCache.clear(); return { cleared: true }; },
   };
 
   /**
@@ -1353,7 +1411,8 @@
   ctx.RSNeuralWorker = {
     MODELS, alignT, padRowsTo, trimRowsTo, buildErbFilterbank, stft, istft, fftAny,
     vorbisWindow, hannWindow, probeWebGpu, probeWebNN, isMobileUA, createSession, loadOrt,
-    selectVariant, loadWeights, opfsBytes, fetchBytes, getSession, sessionCache,
+    variantOrder, selectVariant, loadWeights, opfsBytes, fetchBytes, getSession, sessionCache,
+    providerOrder,
     withTimeout, classifyInferenceError, resolveInferenceFailure, INFERENCE_TIMEOUT_MS,
     denoiseDFN3, separateBSR, superresCurve, probe,
   };

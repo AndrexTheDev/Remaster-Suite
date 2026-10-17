@@ -65,8 +65,44 @@ function fixture(name, channels, seconds) {
     (seconds ? '  (' + seconds + ' s of ' + channels.length + '-channel audio)' : ''));
   return bytes.length;
 }
+/* The weight file the model-manager section downloads. It is not a real ONNX
+   graph — no test in this repository has one — but it is exactly the shape the
+   loader cares about: a few hundred kilobytes of non-HTML bytes, served with a
+   Content-Length in bounded chunks, so the progress rows have something to
+   measure and the OPFS copy can be compared byte for byte. */
+const MODEL_BYTES = (() => {
+  const n = 786432;                       // 768 KiB, twelve 64 KiB chunks
+  const b = Buffer.alloc(n);
+  for (let i = 0; i < n; i++) b[i] = (i * 31 + 7) & 0xff;
+  b[0] = 0x08; b[1] = 0x07;               // protobuf-looking, certainly not '<'
+  return b;
+})();
+const MODEL_URL_PATH = '/model-cdn/deepfilternet3/deepfilternet3_int8.onnx';
+
 const fixtureServer = http.createServer((req, res) => {
-  const name = path.basename(decodeURIComponent(req.url.split('?')[0]));
+  const url = decodeURIComponent(req.url.split('?')[0]);
+  if (url.indexOf('/model-cdn/') === 0) {
+    if (url !== MODEL_URL_PATH) { res.writeHead(404); res.end('no model ' + url); return; }
+    res.writeHead(200, {
+      'Content-Type': 'application/octet-stream',
+      'Access-Control-Allow-Origin': '*',
+      'Content-Length': MODEL_BYTES.length,
+      'Cache-Control': 'no-store',
+    });
+    // dribble it out in 64 KiB slices so a progress bar has time to move and
+    // the screenshot-free rows still see several distinct readings
+    let off = 0;
+    const tick = () => {
+      if (off >= MODEL_BYTES.length) { res.end(); return; }
+      const end = Math.min(off + 65536, MODEL_BYTES.length);
+      res.write(MODEL_BYTES.subarray(off, end));
+      off = end;
+      setTimeout(tick, 12);
+    };
+    tick();
+    return;
+  }
+  const name = path.basename(url);
   const buf = fixtures.get(name);
   if (!buf) { res.writeHead(404); res.end('no fixture ' + name); return; }
   res.writeHead(200, {
@@ -498,6 +534,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
    */
   const visualRow = async (name, label, scrollTo) => {
     if (scrollTo !== undefined) { await evalJS(`scrollTo(0, ${Math.round(scrollTo)}); true`); }
+    // A toast is transient UI, and one that happens to still be up when the
+    // capture fires is not a visual regression — it is a race. Wait it out
+    // (bounded: an error toast can be sticky, and then the shot is the point).
+    for (let i = 0; i < 24 && await evalJS(`!!document.querySelector('#toasts .toast')`); i++) await sleep(250);
     await settle(340);
     const img = await captureViewport();
     const file = path.join(BASE_DIR, name + '.png');
@@ -518,6 +558,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       row.result = d.identical ? 'identical' : 'changed';
       if (!d.identical) {
         fs.writeFileSync(path.join(DIFF_DIR, name + '.png'), png.diffImage(png.decode(fs.readFileSync(file)), img, { tolerance: 1 }));
+        try { fs.mkdirSync('/tmp/rs-vis', { recursive: true }); fs.writeFileSync('/tmp/rs-vis/' + name + '.png', png.encode(img)); } catch (e) { /* diagnosis only */ }
       }
       if (ACCEPT_BASELINE && !d.identical) {
         fs.writeFileSync(file, png.encode(img));
@@ -2272,6 +2313,194 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await shot('02-desktop-en-empty');
 
   /* ------------------------------------------------------------ console ---- */
+  /* ══════════════ the model manager: a first start, the CDN, the cache ══════ */
+  {
+    section('beta · the model manager: a cold start, the download, the OPFS cache');
+    await useDevice('desktop');
+
+    /* A genuinely cold start: nothing in the model store. The neural row lives
+       in the settings rack, which only exists once there is a card — so this is
+       the user's own path: pick a file, then opt in. */
+    await evalJS(`RSOPFS.models.clear().then(() => { window.__modelCleared = true; }); true`);
+    const cleared = await until(`window.__modelCleared === true`, 40);
+    const coldStat = await evalJS(`RSOPFS.models.stat('deepfilternet3', 'deepfilternet3_int8.onnx')`);
+    check('a first start begins with no model anywhere',
+      cleared && coldStat.exists === false, 'models/ is empty · ' + coldStat.path);
+
+    await evalJS(`(async () => __drop([await __fixture('garage-6.wav', 'Modell-Kaltstart.wav')]))()`);
+    const coldCard = await until(`!!(RSApp.State.cards[0] && RSApp.State.cards[0].status === 'ready')`, 100);
+    check('a recording on the list brings up the settings rack the model row lives in', coldCard,
+      coldCard ? 'card ready' : 'the card never became ready');
+
+    const row = await evalJS(`(() => { const toggle = document.getElementById('neuralToggle');
+      const lang = document.documentElement.lang;
+      const b = toggle.getBoundingClientRect();
+      return { disabled: toggle.disabled, w: Math.round(b.width), h: Math.round(b.height),
+        status: document.getElementById('neuralStatus').textContent,
+        dict: RSi18n.DICT[lang]['ctl.neuralDownloadable'], barHidden: document.getElementById('modelProgress').hidden }; })()`);
+    check('…and the settings row offers the download on a real, tappable switch',
+      row.disabled === false && row.w > 0 && row.status === row.dict && row.barHidden === true,
+      row.w + '×' + row.h + ' px · “' + row.status.slice(0, 54) + '…”');
+
+    /* A language switch must re-translate this line, not blank it back to the
+       markup's default: it carries live state (what is installed), so the
+       i18n sweep has to leave it alone and the row repaints itself. */
+    const beforeLang = await evalJS(`document.documentElement.lang`);
+    const otherLang = beforeLang === 'de' ? 'en' : 'de';
+    await clickSelector('#langSwitch button[data-lang="' + otherLang + '"]');
+    await sleep(350);
+    const switched = await evalJS(`({ lang: document.documentElement.lang,
+      status: document.getElementById('neuralStatus').textContent,
+      dict: RSi18n.DICT['${otherLang}'] && RSi18n.DICT['${otherLang}']['ctl.neuralDownloadable'] })`);
+    check('a language switch re-translates the model row instead of resetting it',
+      switched.lang === otherLang && switched.status === switched.dict,
+      switched.lang + ' · “' + switched.status.slice(0, 54) + '…”');
+    await clickSelector('#langSwitch button[data-lang="' + beforeLang + '"]');
+    await sleep(300);
+
+    /* The CDN, pointed at the fixture server. From here on every URL the loader
+       builds comes out of this one call — the configurable-endpoint contract. */
+    await evalJS(`RSNeural.setModelSource(['http://127.0.0.1:${FIX_PORT}/model-cdn']);
+      window.__modelEvents = []; window.__barSeen = [];
+      RSNeural.onModelProgress((p) => window.__modelEvents.push(p));
+      window.__barPoll = setInterval(() => { const box = document.getElementById('modelProgress');
+        window.__barSeen.push({ hidden: box.hidden,
+          pct: document.getElementById('modelProgressPct').textContent,
+          width: document.getElementById('modelProgressBar').style.width }); }, 40);
+      true`);
+    const source = await evalJS(`RSNeural.getModelSource()`);
+    check('the model channel is configurable, and the loader uses it verbatim',
+      source.length === 1 && source[0] === 'http://127.0.0.1:' + FIX_PORT + '/model-cdn', source.join(', '));
+
+    /* The network trace: request, response and the bytes that actually crossed. */
+    const net = [];
+    const netOf = (url) => net.filter((e) => !url || (e.url && e.url.indexOf(url) !== -1));
+    page.on('Network.requestWillBeSent', (p) => {
+      if (p.request && p.request.url.indexOf('deepfilternet3_int8.onnx') !== -1) {
+        net.push({ kind: 'request', id: p.requestId, url: p.request.url, method: p.request.method });
+      }
+    });
+    page.on('Network.responseReceived', (p) => {
+      if (p.response && p.response.url.indexOf('deepfilternet3_int8.onnx') !== -1) {
+        net.push({ kind: 'response', id: p.requestId, url: p.response.url, status: p.response.status,
+          mime: p.response.mimeType, type: p.type,
+          length: Number((p.response.headers && (p.response.headers['Content-Length'] || p.response.headers['content-length'])) || 0) || 0 });
+      }
+    });
+    page.on('Network.loadingFinished', (p) => {
+      const req = net.find((e) => e.kind === 'request' && e.id === p.requestId);
+      if (req) net.push({ kind: 'finished', id: p.requestId, bytes: p.encodedDataLength });
+    });
+    await page.send('Network.enable');
+
+    /* One real click on the checkbox: the user's own gesture is what starts the
+       download, and everything after it has to be the app doing the work. */
+    step('click the neural toggle with no model installed');
+    await clickSelector('#neuralToggle');
+    const finished = await until(`window.__modelEvents.some((e) => e.phase === 'done')`, 120);
+    await evalJS(`clearInterval(window.__barPoll); true`);
+    const events = await evalJS(`window.__modelEvents`);
+    const bars = await evalJS(`window.__barSeen`);
+
+    const req = netOf(MODEL_URL_PATH).find((e) => e.kind === 'request');
+    const res = netOf(MODEL_URL_PATH).find((e) => e.kind === 'response');
+    const done = netOf(MODEL_URL_PATH).find((e) => e.kind === 'finished');
+    check('the browser really fetched the quantised file over the network',
+      !!req && req.method === 'GET' && req.url === 'http://127.0.0.1:' + FIX_PORT + MODEL_URL_PATH,
+      req ? req.url : 'no request seen');
+    check('…and the server answered 200 with the whole body',
+      !!res && res.status === 200 && res.length === MODEL_BYTES.length,
+      res ? res.status + ' · ' + res.mime + ' · ' + res.length + ' bytes announced'
+        + (done ? ' · ' + done.bytes + ' B in the CDP ledger' : '') : 'no response');
+
+    const stored = await evalJS(`(async () => {
+      const st = await RSOPFS.models.stat('deepfilternet3', 'deepfilternet3_int8.onnx');
+      const bytes = st.exists ? await RSOPFS.models.read('deepfilternet3', 'deepfilternet3_int8.onnx') : null;
+      return { st, len: bytes ? bytes.length : 0, head: bytes ? [bytes[0], bytes[1], bytes[2], bytes[3]] : null }; })()`);
+    check('the download landed in OPFS under /models/, at its full size',
+      stored.st.exists === true && stored.st.size === MODEL_BYTES.length && stored.len === MODEL_BYTES.length,
+      stored.st.path + ' · ' + stored.st.size + ' bytes');
+    check('…and the bytes on disk are the bytes the server sent, not an empty placeholder',
+      !!stored.head && stored.head[0] === MODEL_BYTES[0] && stored.head[1] === MODEL_BYTES[1]
+        && stored.head[2] === MODEL_BYTES[2] && stored.head[3] === MODEL_BYTES[3],
+      '[' + (stored.head || []).map((b) => '0x' + b.toString(16)).join(' ') + ']');
+
+    const downloads = events.filter((e) => e.phase === 'download');
+    check('progress was reported while it downloaded, from 0 to 1, never backwards',
+      finished && downloads.length >= 4
+        && downloads.every((e, i) => i === 0 || e.loaded >= downloads[i - 1].loaded)
+        && downloads[0].ratio < 1
+        && events[events.length - 1].phase === 'done' && events[events.length - 1].ratio === 1,
+      downloads.length + ' events · ' + (downloads[0] ? downloads[0].loaded : 0) + ' … '
+        + (downloads[downloads.length - 1] ? downloads[downloads.length - 1].loaded : 0) + ' bytes · last phase '
+        + (events.length ? events[events.length - 1].phase : 'none'));
+
+    const painted = bars.filter((b) => b.hidden === false);
+    const mid = painted.filter((b) => b.width && b.width !== '0%' && b.width !== '100%');
+    check('the progress bar was on screen during the download, not only afterwards',
+      painted.length > 0, painted.length + ' frames with the row visible');
+    check('…and it was really painting a share, not sitting at 0 % or 100 %',
+      mid.length > 0, mid.length + ' frames in between · e.g. ' + (mid[0] ? mid[0].width + ' / ' + mid[0].pct : '—'));
+    check('…and it ended at 100 % before it was hidden',
+      painted.some((b) => b.pct === '100 %') || bars.some((b) => b.pct === '100 %'),
+      painted.length ? painted[painted.length - 1].pct : 'never shown');
+
+    const afterRow = await evalJS(`(() => { const lang = document.documentElement.lang;
+      return { status: document.getElementById('neuralStatus').textContent,
+        dictNoRuntime: RSi18n.DICT[lang]['ctl.neuralInstalledNoRuntime'],
+        dictUnavailable: RSi18n.DICT[lang]['ctl.neuralUnavailable'] }; })()`);
+    check('the row now says the model is installed (the runtime itself is not reachable offline here)',
+      afterRow.status === afterRow.dictNoRuntime, '“' + afterRow.status.slice(0, 60) + '…”');
+
+    /* Second start: same page, same store, the client-side cache has to answer
+       and the network must stay silent. */
+    const netBefore = net.length;
+    await evalJS(`window.__modelEvents = []; true`);
+    // the first start left the switch on; off and on again is the user asking
+    // for the model a second time, which must now come off the disk
+    const checkedNow = await evalJS(`document.getElementById('neuralToggle').checked`);
+    if (checkedNow) { await clickSelector('#neuralToggle'); await sleep(150); }
+    await clickSelector('#neuralToggle');
+    const second = await until(`window.__modelEvents.some((e) => e.phase === 'done')`, 60);
+    const secondEvents = await evalJS(`window.__modelEvents`);
+    check('a second start resolves from OPFS, with no download at all',
+      second && secondEvents.length > 0 && secondEvents[secondEvents.length - 1].phase === 'done'
+        && net.length === netBefore,
+      net.length === netBefore ? 'no new network request' : (net.length - netBefore) + ' new requests');
+
+    const direct = await evalJS(`RSNeural.ensureModel('deepfilternet3')`);
+    check('…and ensureModel() itself reports the cache as the source',
+      direct.ready === true && direct.source === 'opfs' && direct.bytes === MODEL_BYTES.length,
+      direct.ready ? direct.source + ' · ' + direct.variant + ' · ' + direct.bytes + ' bytes' : String(direct.reason));
+    const status = await evalJS(`RSNeural.modelStatus('deepfilternet3')`);
+    check('modelStatus() tells the settings row what is cached', status.cached === true
+      && status.variants.int8.cached === true && status.variants.int4.cached === false,
+      'int8 ' + status.variants.int8.size + ' B · int4 ' + status.variants.int4.size + ' B');
+
+    /* A failed download must not leave a model behind — the row knows the file
+       is broken, the next start must not trust it. */
+    await evalJS(`RSOPFS.models.clear().then(() => { window.__modelCleared = true; }); true`);
+    await until(`window.__modelCleared === true`, 40);
+    await evalJS(`RSNeural.setModelSource(['http://127.0.0.1:${FIX_PORT}/no-such-channel']); true`);
+    const failed = await evalJS(`RSNeural.ensureModel('deepfilternet3')`);
+    const leftovers = await evalJS(`RSOPFS.models.list('deepfilternet3')`);
+    check('a download that 404s is a clean answer, and leaves nothing in the store',
+      failed.ready === false && /download-failed/.test(failed.reason) && leftovers.length === 0,
+      failed.reason ? failed.reason.slice(0, 64) : 'ready');
+
+    /* Put the page back the way the next section finds it: default channel, an
+       empty model store and an empty list. */
+    await evalJS(`RSNeural.setModelSource(['https://cdn.jsdelivr.net/gh/AndrexTheDev/Remaster-Suite@models', 'models']);
+      RSOPFS.models.clear().then(() => { window.__modelCleared = true; }); true`);
+    await until(`window.__modelCleared === true`, 40);
+    await page.send('Network.disable');
+    await clickSelector('#btnClear');
+    await sleep(400);
+    check('…and clearing the list puts the page back, model store and all',
+      (await evalJS(`RSApp.State.cards.length + ':' + document.getElementById('controls').hidden`)) === '0:true',
+      await evalJS(`RSApp.State.cards.length + ' card(s)'`));
+  }
+
   section('beta · console hygiene');
   const realNoise = consoleNoise.filter((l) => !/Autoplay|deprecat/i.test(l));
   check('no console errors or page exceptions during the whole session', realNoise.length === 0,

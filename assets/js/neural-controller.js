@@ -265,6 +265,346 @@
     });
   }
 
+  /* ====================================================================== *
+   * The model manager — first start, the CDN, and the OPFS cache
+   * ====================================================================== */
+
+  /**
+   * Where a model's weight files live inside the OPFS root. The same string
+   * `opfs-manager.js` writes under and `neural-worker.js` reads from; the
+   * suite asserts that all three agree rather than trusting the comment.
+   * @type {string}
+   */
+  const MODELS_DIR = 'models';
+
+  /**
+   * Every weight file this build knows how to fetch, per model key and
+   * variant. The file names are the worker's own (`neural-worker.js`'s
+   * `MODELS`), kept here as well because this module has to name the file
+   * *before* a worker exists — and cross-checked by `tests/neural.test.js` so
+   * the two lists cannot drift apart.
+   * @type {Object<string, Object<string, string>>}
+   */
+  const MODEL_FILES = Object.freeze({
+    deepfilternet3: Object.freeze({
+      int8: 'deepfilternet3_int8.onnx',
+      int4: 'deepfilternet3_int4.onnx',
+      fp32: 'deepfilter.onnx',
+      fp16: 'deepfilter.fp16.onnx',
+    }),
+  });
+
+  /**
+   * Variant preference, smallest-first: a phone gets INT4 when the channel
+   * publishes it and INT8 otherwise, a desktop takes INT8 (the prompt's
+   * "standard use" quantisation) and never falls back to fp32 on its own — a
+   * 40 MB download is the user's decision, not a default.
+   * @param {boolean} mobile - the device looks like a phone or tablet.
+   * @returns {string[]} variant keys in try order.
+   */
+  function preferredVariants(mobile) {
+    return mobile ? ['int4', 'int8'] : ['int8'];
+  }
+
+  /**
+   * The project's own model channel. A deployment can point this anywhere —
+   * `RSNeural.setModelSource()`, or `<meta name="rs-model-cdn" content="…">`
+   * in the page — and the beta suite points it at a local fixture server to
+   * prove the whole path without touching the internet.
+   * @type {string}
+   */
+  const DEFAULT_MODEL_BASE = 'https://cdn.jsdelivr.net/gh/AndrexTheDev/Remaster-Suite@models';
+
+  /**
+   * Where weights are looked for, in order. `'models'` is a relative base and
+   * deliberately second: a deployment that ships its own weights next to the
+   * page answers that request without leaving the origin, and the CDN is the
+   * standard path. Replaced wholesale by {@link RSNeural.setModelSource}.
+   * @type {string[]}
+   */
+  let modelSources = [DEFAULT_MODEL_BASE, 'models'];
+
+  /**
+   * A deployment can point the channel somewhere else without editing this
+   * file: `<meta name="rs-model-cdn" content="https://example.org/models">`.
+   * Read once, at load — a meta tag that appears later is what
+   * {@link RSNeural.setModelSource} is for.
+   * @returns {void}
+   */
+  (function readMetaSource() {
+    const d = global.document;
+    if (!d || typeof d.querySelector !== 'function') return;
+    const meta = d.querySelector('meta[name="rs-model-cdn"]');
+    const content = meta && meta.getAttribute('content');
+    if (content && content.trim()) modelSources = [content.trim()];
+  })();
+
+  /**
+   * Resolve `<base>/<model>/<file>`. A base that already ends in a slash is
+   * accepted, so `https://host/models/` and `https://host/models` mean the
+   * same thing — the kind of difference that otherwise shows up as a 404 on a
+   * doubled slash.
+   * @param {string} base - the source base URL.
+   * @param {string} model - model key.
+   * @param {string} file - weight file name.
+   * @returns {string} the absolute (or page-relative) URL to fetch.
+   */
+  function modelUrl(base, model, file) {
+    return String(base).replace(/\/+$/, '') + '/' + model + '/' + file;
+  }
+
+  /**
+   * One step of a model download, as handed to {@link RSNeural.onModelProgress}
+   * listeners and to `ensureModel()`'s own `onProgress`.
+   * @typedef {Object} ModelProgress
+   * @property {string} model - model key.
+   * @property {string} variant - `'int8'`, `'int4'`, …
+   * @property {('download'|'done'|'failed')} phase - what is happening.
+   * @property {number} loaded - bytes received so far.
+   * @property {number} total - bytes expected (0 when the server sent no
+   *   `Content-Length`).
+   * @property {number} ratio - 0…1, `loaded/total` when the total is known and
+   *   a saturating estimate otherwise — what a progress bar draws.
+   * @property {string} [url] - the source being read, when there is one.
+   */
+
+  /**
+   * What {@link RSNeural.ensureModel} resolves with. Always resolves — a
+   * download that fails every source is an answer with a reason, never a
+   * rejection, exactly like every other method on this module.
+   * @typedef {Object} ModelStatus
+   * @property {boolean} ready - the weight file is in OPFS and usable.
+   * @property {string} key - model key.
+   * @property {('opfs'|'network')} [source] - where it came from this time.
+   * @property {string} [variant] - the variant that is now stored.
+   * @property {string} [path] - `models/<model>/<file>`.
+   * @property {number} [bytes] - its size.
+   * @property {string} [url] - the URL it was downloaded from, when it was.
+   * @property {string} [reason] - present when `ready` is false.
+   */
+
+  /**
+   * Subscribers registered through {@link RSNeural.onModelProgress}.
+   * @type {Set<function(ModelProgress): void>}
+   */
+  const modelListeners = new Set();
+  /**
+   * Downloads in flight, keyed `model:variant`, so two callers that ask for
+   * the same model at the same moment share one download instead of racing
+   * two into the same OPFS file.
+   * @type {Map<string, Promise<ModelStatus>>}
+   */
+  const modelInflight = new Map();
+
+  /**
+   * Fan one progress step out to every listener and to the caller's own
+   * callback. A listener that throws is swallowed: this is a progress bar, not
+   * a step of the download.
+   * @param {ModelProgress} p - the step.
+   * @param {function(ModelProgress=): void} [own] - the caller's callback.
+   * @returns {void}
+   */
+  function emitModelProgress(p, own) {
+    if (typeof own === 'function') { try { own(p); } catch (e) { /* a UI callback must not break the download */ } }
+    for (const cb of modelListeners) { try { cb(p); } catch (e) { /* same */ } }
+  }
+
+  /**
+   * The model store, or `null` when this host has no `RSOPFS` at all. Read
+   * lazily on every use so tests (and a page that loads the modules in another
+   * order) can install the global after this file has been evaluated.
+   * @returns {?ModelStore} `globalThis.RSOPFS.models`.
+   */
+  function modelStore() {
+    const opfs = global.RSOPFS;
+    return opfs && opfs.models ? opfs.models : null;
+  }
+
+  /**
+   * Tell the worker to forget the sessions it built from a *negative* answer.
+   * `getSession()` caches "no weights" so a missing model is not re-read on
+   * every call — which would hide a model that has just been downloaded.
+   * Best effort: with no worker running there is no cache to clear.
+   * @returns {Promise<void>} resolves whether or not a worker answered.
+   */
+  async function resetWorkerSessions() {
+    try { await call('reset', {}); } catch (e) { /* no worker, nothing cached */ }
+  }
+
+  /**
+   * Stream one weight file from a URL into the model store, reporting progress
+   * as it goes. Writes in the response's own chunks (a quantised model is a
+   * few MB; a 64 KiB reader buffer would make thousands of round trips).
+   *
+   * Failure is all-or-nothing: a short read, an HTML error page and an empty
+   * body each abort the write and delete the partial file, so a failed
+   * download can never be mistaken for a cached model on the next start.
+   * @param {string} url - where to read.
+   * @param {string} key - model key.
+   * @param {string} file - weight file name.
+   * @param {string} variant - variant key, for the progress events.
+   * @param {ModelStore} store - the model store.
+   * @param {function(ModelProgress): void} emit - progress sink.
+   * @returns {Promise<{bytes: number}>} the size that landed in OPFS.
+   * @throws {Error} the HTTP status, the short read, or the body sanity
+   *   failure — the caller records it and tries the next source.
+   */
+  async function downloadToStore(url, key, file, variant, store, emit) {
+    const res = await global.fetch(url, { cache: 'no-store', credentials: 'omit' });
+    if (!res || !res.ok) throw new Error('HTTP ' + (res ? res.status : 'no response') + ' · ' + url);
+    const type = (res.headers && typeof res.headers.get === 'function' && res.headers.get('content-type')) || '';
+    if (/text\/html/i.test(type)) throw new Error('answered with HTML, not a model · ' + url);
+    const total = Number((res.headers && typeof res.headers.get === 'function' && res.headers.get('content-length')) || 0) || 0;
+    const writer = await store.createWriter(key, file);
+    let loaded = 0;
+    let head = null;
+    /** Write one chunk and report it. @param {Uint8Array} chunk - bytes. @returns {Promise<void>} */
+    const put = async (chunk) => {
+      if (!chunk || !chunk.length) return;
+      // count before writing: the store hands the buffer to its worker with
+      // `transfer`, which detaches the view we pass in — reading `.length`
+      // afterwards would always be 0 and a whole download would look empty
+      const n = chunk.length;
+      if (!head) head = chunk.slice(0, 4);
+      await writer.write(chunk);
+      loaded += n;
+      emit({ model: key, variant, phase: 'download', loaded, total,
+        ratio: total ? Math.min(0.999, loaded / total) : Math.min(0.95, loaded / (loaded + 262144)), url });
+    };
+    try {
+      if (res.body && typeof res.body.getReader === 'function') {
+        const reader = res.body.getReader();
+        for (;;) {
+          const step = await reader.read();
+          if (step.done) break;
+          await put(step.value instanceof Uint8Array ? step.value : new Uint8Array(step.value));
+        }
+      } else {
+        const all = new Uint8Array(await res.arrayBuffer());
+        for (let off = 0; off < all.length; off += 262144) await put(all.subarray(off, off + 262144));
+      }
+      if (!loaded) throw new Error('empty response · ' + url);
+      // an HTML error page served with a 200 is the classic CDN failure; ONNX
+      // is protobuf and never starts with '<'
+      if (head && head[0] === 0x3c) throw new Error('the body is HTML, not a model · ' + url);
+      if (total && loaded !== total) throw new Error('short read: ' + loaded + ' of ' + total + ' bytes · ' + url);
+      await writer.close();
+      return { bytes: loaded };
+    } catch (err) {
+      await writer.abort();
+      throw err;
+    }
+  }
+
+  /**
+   * The body of {@link RSNeural.ensureModel}: check the cache, then try every
+   * configured source for every preferred variant, then report.
+   * @param {string} key - model key.
+   * @param {Object} opts - the caller's options.
+   * @returns {Promise<ModelStatus>} the outcome; never rejects.
+   */
+  async function runEnsureModel(key, opts) {
+    const files = MODEL_FILES[key];
+    if (!files) return { ready: false, key, reason: 'unknown-model: ' + key };
+    const store = modelStore();
+    if (!store) return { ready: false, key, reason: 'no-store' };
+    const variants = opts.variant ? [opts.variant] : preferredVariants(!!opts.mobile);
+    const missing = variants.filter((v) => !files[v]);
+    if (missing.length === variants.length) return { ready: false, key, reason: 'unknown-variant: ' + variants.join(',') };
+
+    // 1 · the cache: a file that is already there costs no network at all
+    for (const variant of variants) {
+      if (!files[variant]) continue;
+      const st = await store.stat(key, files[variant]);
+      if (st.exists && st.size > 0) {
+        emitModelProgress({ model: key, variant, phase: 'done', loaded: st.size, total: st.size, ratio: 1 }, opts.onProgress);
+        return { ready: true, key, source: 'opfs', variant, path: st.path, bytes: st.size };
+      }
+    }
+
+    // 2 · the network: each source × each variant, first usable answer wins
+    const errors = [];
+    for (const variant of variants) {
+      if (!files[variant]) continue;
+      for (const base of modelSources) {
+        const url = modelUrl(base, key, files[variant]);
+        try {
+          const { bytes } = await downloadToStore(url, key, files[variant], variant, store, (p) => emitModelProgress(p, opts.onProgress));
+          await resetWorkerSessions();
+          emitModelProgress({ model: key, variant, phase: 'done', loaded: bytes, total: bytes, ratio: 1, url }, opts.onProgress);
+          return { ready: true, key, source: 'network', variant, path: store.path(key, files[variant]), bytes, url };
+        } catch (err) {
+          errors.push(String((err && err.message) || err));
+        }
+      }
+    }
+    const reason = 'download-failed: ' + (errors[0] || 'no source configured');
+    emitModelProgress({ model: key, variant: variants[0], phase: 'failed', loaded: 0, total: 0, ratio: 0 }, opts.onProgress);
+    return { ready: false, key, reason };
+  }
+
+  /**
+   * Make sure a model's weights are in OPFS, downloading them if they are not.
+   * This is the whole first-start story: the result is the same whether the
+   * bytes were already on disk or arrived over the network just now, and a
+   * failure is a `{ready:false, reason}` answer like every other fallback on
+   * this module — never a rejection, never a half-written model left behind.
+   * @param {string} [key='deepfilternet3'] - model key.
+   * @param {Object} [opts] - options.
+   * @param {string} [opts.variant] - force one variant instead of the
+   *   device's preference order.
+   * @param {boolean} [opts.mobile] - treat this as a phone (prefer INT4).
+   *   Defaults to what `navigator` says.
+   * @param {function(ModelProgress): void} [opts.onProgress] - per-chunk
+   *   progress, in addition to the global listeners.
+   * @returns {Promise<ModelStatus>} the outcome.
+   */
+  function ensureModel(key, opts) {
+    const k = key || 'deepfilternet3';
+    const o = opts || {};
+    const mobile = typeof o.mobile === 'boolean' ? o.mobile : isMobileNavigator();
+    const cacheKey = k + ':' + (o.variant || (mobile ? 'mobile' : 'desktop'));
+    const running = modelInflight.get(cacheKey);
+    if (running) return running;
+    const p = runEnsureModel(k, Object.assign({}, o, { mobile }))
+      .catch((err) => ({ ready: false, key: k, reason: 'download-failed: ' + (err && err.message || String(err)) }))
+      .finally(() => { modelInflight.delete(cacheKey); });
+    modelInflight.set(cacheKey, p);
+    return p;
+  }
+
+  /**
+   * Is this device a phone or tablet, from the same regex the worker uses?
+   * Kept local because `ensureModel()` must answer before any worker exists.
+   * @returns {boolean} `true` for a mobile user agent.
+   */
+  function isMobileNavigator() {
+    const ua = (global.navigator && global.navigator.userAgent) || '';
+    return /Mobi|Android|iPhone/i.test(ua);
+  }
+
+  /**
+   * What is cached right now, without touching the network — the question the
+   * settings row asks on boot.
+   * @param {string} [key='deepfilternet3'] - model key.
+   * @returns {Promise<{key: string, cached: boolean, variants: Object<string,
+   *   {cached: boolean, size: number, path: string}>}>} the cache report; an
+   *   empty `variants` map when this host has no model store.
+   */
+  async function modelStatus(key) {
+    const k = key || 'deepfilternet3';
+    const files = MODEL_FILES[k] || {};
+    const store = modelStore();
+    const variants = {};
+    let cached = false;
+    for (const variant of Object.keys(files)) {
+      const st = store ? await store.stat(k, files[variant]) : { exists: false, size: 0, path: MODELS_DIR + '/' + k + '/' + files[variant] };
+      variants[variant] = { cached: !!st.exists, size: st.size || 0, path: st.path };
+      if (st.exists) cached = true;
+    }
+    return { key: k, cached, variants };
+  }
+
   /**
    * The public surface, assigned to `global.RSNeural` below. Every method
    * resolves a {@link NeuralResult}; none of them ever rejects.
@@ -275,6 +615,14 @@
    * @property {function(Float32Array): Promise<NeuralResult>} denoise
    * @property {function(Float32Array): Promise<NeuralResult>} separate
    * @property {function(Float32Array, number[]=): Promise<NeuralResult>} superres
+   * @property {function(string=, Object=): Promise<ModelStatus>} ensureModel
+   * @property {function(string=): Promise<Object>} modelStatus
+   * @property {function(function(ModelProgress): void): function(): void} onModelProgress
+   * @property {function((string|string[]|null)): string[]} setModelSource
+   * @property {function(): string[]} getModelSource
+   * @property {function(): boolean} canLoadModels
+   * @property {Object} MODEL_FILES
+   * @property {string} modelDir
    */
 
   /** @type {RSNeuralApi} */
@@ -362,6 +710,69 @@
       const copy = Float32Array.from(signal);
       return call('superres', { signal: copy, bandsHz: bandsHz || [] }, [copy.buffer]);
     },
+
+    /**
+     * Make sure a model's weights are on disk — see {@link RSNeural.ensureModel}.
+     * @param {string} [key] - model key, `'deepfilternet3'` by default.
+     * @param {Object} [opts] - `variant`, `mobile`, `onProgress`.
+     * @returns {Promise<ModelStatus>} always resolves.
+     */
+    ensureModel,
+
+    /**
+     * What is cached right now, without any network access.
+     * @param {string} [key] - model key.
+     * @returns {Promise<Object>} the cache report.
+     */
+    modelStatus,
+
+    /**
+     * Subscribe to model-download progress (both directions: this module's own
+     * `ensureModel()` calls and anything else that asks it to load). Returns
+     * an unsubscribe function, idempotent like the other subscription here.
+     * @param {function(ModelProgress): void} cb - subscriber.
+     * @returns {function(): void} `unsubscribe()`.
+     */
+    onModelProgress(cb) {
+      if (typeof cb !== 'function') return () => {};
+      modelListeners.add(cb);
+      return () => modelListeners.delete(cb);
+    },
+
+    /**
+     * Where weights are fetched from. Accepts one base URL, a list of them (in
+     * try order) or `null`/`''` to disable the network entirely — an offline
+     * deployment that ships its own `models/` folder next to the page can say
+     * so and never touch a CDN.
+     * @param {(string|string[]|null)} source - base URL(s); each is joined as
+     *   `<base>/<model>/<file>`.
+     * @returns {string[]} the source list now in effect.
+     */
+    setModelSource(source) {
+      if (source === null || source === undefined || source === '') modelSources = [];
+      else if (Array.isArray(source)) modelSources = source.filter((x) => typeof x === 'string' && x).slice();
+      else if (typeof source === 'string') modelSources = [source];
+      return modelSources.slice();
+    },
+
+    /**
+     * The source list currently in effect.
+     * @returns {string[]} a copy, so a caller cannot mutate the loader's list.
+     */
+    getModelSource() { return modelSources.slice(); },
+
+    /**
+     * Can this host download and keep a model at all? True when a source is
+     * configured and the model store exists; the settings row uses it to
+     * decide whether "no model installed" is a dead end or an offer.
+     * @returns {boolean} `true` when a download could be attempted.
+     */
+    canLoadModels() { return modelSources.length > 0 && !!modelStore(); },
+
+    /** The weight file names per model and variant (read-only). */
+    MODEL_FILES,
+    /** The OPFS directory the loader writes into (`'models'`). */
+    modelDir: MODELS_DIR,
   };
 
   /** @type {RSNeuralApi} */

@@ -370,31 +370,37 @@ before you pack.
 
 ## Optional neural enhancement
 
-**Off by default, and invisible unless both a model is installed and the toggle is turned on.** Next to
-the export format row is "AI high-frequency reconstruction" (`#neuralToggle`); it stays disabled, with a
-status line explaining why, until `neural-controller.js`'s probe finds at least one model and a working
-execution provider. Nothing about the pure-DSP chain changes when it is off — this is additive-only, not
-a different mode.
+**Off by default, and additive-only.** Next to the export format row is "AI high-frequency
+reconstruction" (`#neuralToggle`). With no weights on disk the row says so and offers the download;
+switching the toggle on is what fetches the quantised model — once — and keeps it. With no working
+runtime and no model store the switch stays disabled with its reason. Nothing about the pure-DSP chain
+changes when it is off — this is additive-only, not a different mode.
 
-* **Execution.** [`assets/js/neural-worker.js`](assets/js/neural-worker.js) runs `onnxruntime-web` in a
-  dedicated Worker. On a phone or tablet (`/Mobi|Android|iPhone/i` against `navigator.userAgent`) with
-  WebNN available, it tries WebNN first — the only web API that can reach an on-device NPU, probed
-  NPU → GPU → CPU device type — then WebGPU (with fp16 weights once the adapter confirms `shader-f16`),
-  then WASM-SIMD; everywhere else WebGPU still goes first. Every provider is its own try/catch, so an
+* **Execution — WebGPU first, WASM-SIMD always there.** [`assets/js/neural-worker.js`](assets/js/neural-worker.js)
+  runs `onnxruntime-web` in a dedicated Worker and tries **WebGPU first** everywhere, with the adapter's
+  own limits consulted before a session is asked for; WebNN follows where the browser offers it (the only
+  web API that can reach an on-device NPU), then **WASM with SIMD** as the guaranteed floor
+  (`ort.env.wasm.simd = true`, `enableCpuMemArena`). Every provider is its own try/catch, so an
   unsupported op or a refused context falls straight through to the next one, never to a failed call. The
   library itself is fetched from a CDN only once a model is actually used (see [Privacy](#privacy)) — it
   is never bundled (the npm package unpacks to ≈145 MB) and never loaded just because the toggle exists on
   the page.
-* **Models.** Two restoration models — [DeepFilterNet3](https://github.com/Rikorose/DeepFilterNet)
-  (noise suppression) and [BS-RoFormer](https://github.com/ZFTurbo/Music-Source-Separation-Training)
-  (stem separation: vocals / drums / bass / other) — and the Stage-7 air coupling below are all wired to
-  real, published ONNX export contracts, but **no weights ship with this repository.** Drop a model's
-  `.onnx` file (and its auxiliary weights, where the export needs one) into OPFS or a same-origin
-  `models/<name>/` folder to activate it; with nothing there, every call cleanly reports
+* **Models — fetched once, kept in OPFS.** The default model is **DeepFilterNet3 INT8**
+  ([DeepFilterNet](https://github.com/Rikorose/DeepFilterNet)). No weights ship with this repository:
+  the first time the toggle is switched on, `neural-controller.js` checks `/models/` in OPFS, and if the
+  file is not there it downloads it from a **configurable model channel** —
+  `RSNeural.setModelSource(url | [urls])`, or `<meta name="rs-model-cdn" content="…">` in the page —
+  whose default is this project's own jsDelivr channel, with the page-relative `models/` folder as a
+  fallback. The download streams into OPFS (`models/<model>/<file>`, outside the scratch directory, so a
+  boot-time scratch reset never deletes it) and paints the same progress row a render uses, in percent,
+  from the first byte to the last. Every later start resolves from OPFS with zero network requests. A
+  transfer that fails — a 404, a short read, an HTML error page served with a 200 — aborts and deletes the
+  partial file, so a broken download can never be mistaken for a cached model. [BS-RoFormer](https://github.com/ZFTurbo/Music-Source-Separation-Training)
+  (stem separation) and AudioSR are wired to their published ONNX contracts the same way, but are not
+  fetched by the toggle. With nothing installed and no store available, every call still reports
   `{applied: false, reason: 'weights-not-found'}` and the DSP chain runs exactly as it always has. On
-  mobile, the smallest quantised variant a model publishes (int4, then int8) is preferred over fp16/fp32,
-  to keep resident weights under ≈80 MB of VRAM — the same clean "nothing installed" fallback applies
-  either way.
+  mobile the smallest variant a model publishes is preferred (int4, then int8), on the desktop int8
+  first: quantised weights keep a phone's resident model under ≈80 MB of VRAM.
 * **Stage 7 coupling, not AudioSR.** A real AudioSR is a 258 M-parameter latent-diffusion model (UNet +
   VAE + HiFi-GAN, 50 sampling steps, over a gigabyte of weights) — nothing a browser tab can run at a
   usable speed. What ships instead keeps this project's existing, phase-correct `AirSynth` harmonic
@@ -426,9 +432,11 @@ a different mode.
   convert the file to WAV locally. It is never loaded unless a file needs it.
 * **Optional neural enhancement, same rule:** turning the "AI high-frequency reconstruction" toggle
   on (see [below](#optional-neural-enhancement)) is the only thing that fetches `onnxruntime-web`
-  from the jsDelivr/unpkg CDN (≈145 MB unpacked — far too large to vendor); the *audio* never leaves
-  the machine either way, inference runs entirely in a local Worker against weights that live in
-  OPFS or a local folder, never uploaded or referenced from the network.
+  (≈145 MB unpacked — far too large to vendor) *and*, on a first start, the quantised model file
+  itself (≈40 MB for DeepFilterNet3 INT8) from this project's own jsDelivr channel. Both are cached
+  locally — the runtime by the browser, the weights in OPFS — so a second start asks nobody. The
+  *audio* never leaves the machine either way: inference runs entirely in a local Worker, and the
+  only thing that crosses the wire is a weight file being downloaded, never a sample being sent.
 
 Full text: *Privacy* in the footer of the app.
 
@@ -493,7 +501,7 @@ tests/
                                  a rich-hum fixture, the effect budgets, the
                                  several-problems-at-once chain, and the chain-level
                                  scale-freedom row, the export's ceiling through the
-                                 codec, and the de-clicker's floor with its control (338
+                                 codec, and the de-clicker's floor with its control (339
                                  checks)
   e2e.test.js                    realistic journeys: five problem recordings, slider sweep,
                                  profile overrides, 10-file batch → ZIP, mono/32 k/96 k,
@@ -501,12 +509,13 @@ tests/
   opfs.test.js                   runs the actual shipped OPFS worker source in a Node vm
                                  against a simulated Origin Private File System: streaming
                                  writes, a multi-megabyte streamed ZIP cross-checked with
-                                 JSZip and unzip(1), the oversized-batch guard, and the
-                                 in-memory fallback (39 checks)
-  neural.test.js                 the neural path with no model installed: the shipped
-                                 controller/worker contract (never throws, always resolves
-                                 `{applied: false, reason}`), the provider order, tensor
-                                 alignment and the timeout watchdog (87 checks)
+                                 JSZip and unzip(1), the oversized-batch guard, the model
+                                 store under models/, and the in-memory fallback (52 checks)
+  neural.test.js                 the shipped controller/worker contract (never throws,
+                                 always resolves `{applied: false, reason}`), WebGPU-first
+                                 provider order, tensor alignment, the timeout watchdog, and
+                                 the model manager: OPFS cache, CDN download, progress,
+                                 variant fallback, failed-download cleanup (127 checks)
   memory-guard.test.js           the shipped heap watchdog without a `performance.memory`:
                                  the honest no-signal default, the one-way shrink ramp and a
                                  stop function that never leaks a timer (21 checks)
@@ -531,7 +540,7 @@ tests/
                                  rows, the progress bars, the phone layouts — and the
                                  three mobile-UX surfaces driven with real touch: the
                                  swipeable effect rack, the Magic Fix button, the live
-                                 A/B/C compare FAB (155 checks)
+                                 A/B/C compare FAB, the model download (174 checks)
     cdp.js                       minimal Chrome DevTools Protocol client over the
                                  platform WebSocket — no dependency beyond Node ≥ 22
     png.js                       PNG decoder/encoder and pixel differ in ~200 lines of
@@ -576,7 +585,7 @@ belong to the test suite.
 
 ## Tests
 
-**11 dependency-free suites · 1045 checks.** Every count below is the suite's own
+**11 dependency-free suites · 1099 checks.** Every count below is the suite's own
 (`ALL TESTS PASSED (n)`); `node scripts/validate-docs.js --run` re-runs them and
 fails if this file, `tests/` and `package.json` ever disagree.
 
@@ -585,11 +594,11 @@ fails if this file, `tests/` and `package.json` ever disagree.
 | DSP & engine | `tests/dsp.test.js` | 173 | transparency, sub, air, exciter, de-hiss, de-click, de-resonator, level match, power scaling, WAV/MP3/ZIP, classification |
 | Tuning law | `tests/tuning.test.js` | 17 | what the automatic mode may do to a file: octave bands, loudness, the level match, the soft-clip guard, level-normalised synthesis, honest extremes |
 | Web & DOM | `tests/web.test.js` | 137 | static integrity, bilingual coverage, boot, drop → analyse → render → save → ZIP, error handling, resampling |
-| Audit | `tests/audit.test.js` | 338 | repository hygiene, markup, stylesheet, contrast, bilingual coverage, parameter ranges, DSP edge cases, the several-problems-at-once chain, codec round-trips, budgets |
+| Audit | `tests/audit.test.js` | 339 | repository hygiene, markup, stylesheet, contrast, bilingual coverage, parameter ranges, DSP edge cases, the several-problems-at-once chain, codec round-trips, budgets |
 | End to end | `tests/e2e.test.js` | 108 | five problem recordings, slider sweep, profile overrides, 10-file batch → ZIP, mono/32 k/96 k, hostile input |
-| OPFS | `tests/opfs.test.js` | 39 | the shipped worker source against a simulated file system: streaming writes, a streamed ZIP cross-checked with JSZip and unzip(1), the oversized-batch guard, the in-memory fallback |
+| OPFS | `tests/opfs.test.js` | 52 | the shipped worker source against a simulated file system: streaming writes, a streamed ZIP cross-checked with JSZip and unzip(1), the oversized-batch guard, the model store under `models/` (write, read, list, clear, abort, surviving a scratch reset), the in-memory fallback |
 | Cross-origin isolation | `tests/coi.test.js` | 19 | coi-serviceworker.js as a Service Worker and as a page script: the COOP/COEP rewrite, the one-reload rule, never a reload loop |
-| Neural | `tests/neural.test.js` | 87 | the model path with no weights installed: the controller/worker contract, T-frame alignment, STFT round-trips, the capability probe, provider order, quantised-variant selection, the watchdog and the Stage-7 coupling |
+| Neural | `tests/neural.test.js` | 127 | the controller/worker contract, T-frame alignment, STFT round-trips, the capability probe, WebGPU-first provider order, quantised-variant selection, **the model manager** (cache hit, CDN download, progress, variant fallback, short-read and HTML-refusal aborts, inflight dedup, cache report), the watchdog and the Stage-7 coupling |
 | Memory guard | `tests/memory-guard.test.js` | 21 | the heap watchdog on a host without `performance.memory`: the honest no-signal default, the one-way shrink ramp, a stop function that never leaks a timer |
 | Chunked render | `tests/chunked-render.test.js` | 53 | chunk boundaries and level-preserving crossfades, the streaming WAV/MP3 encoders, the mid-render shrink, the abort a failing onChunk triggers, a sink that takes ownership of the buffer it is handed |
 | Mobile UX | `tests/mobile-ux.test.js` | 53 | the carousel effect rack, the gold "AI Magic Fix" button, the live A/B/C compare FAB, navigator.vibrate safety, switchBuffer() position preservation, seek() clamping and its no-buffer no-op, tap/hold |
@@ -629,7 +638,7 @@ node tests/beta/beta.js    # big beta: drives a real headless Chromium over the 
                            # phase. The two scale rows calibrate themselves: a 30-second take
                            # goes through the identical instrumented path seconds earlier on
                            # the same machine, and what the row holds the app to is the
-                           # machine's own rate, not an absolute budget. 155 checks
+                           # machine's own rate, not an absolute budget. 174 checks
 ```
 
 The beta writes `docs/BETA-REPORT.md`, the screenshot matrix to `docs/beta/` and — when a row

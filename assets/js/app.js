@@ -224,6 +224,14 @@
     // has weights installed *and* a WebGPU or WASM session could be built —
     // never true just because the feature exists in this build.
     neuralAvailable: false,
+    // set in initNeural(): nothing is installed but the model manager could
+    // fetch the quantised weights, so the toggle offers to do exactly that
+    // instead of sitting disabled.
+    neuralDownloadable: false,
+    // true while a model download is running — the toggle refuses a second one
+    _neuralLoading: false,
+    // the progress subscription is page-lifetime, not per-initNeural() call
+    _neuralProgressBound: false,
     // flips true the first time a render's neural call fails with a
     // hardware-limit reason (OOM/device-lost/timeout — see initNeural()'s
     // Neural.onHardwareFallback subscription); keeps the toast it triggers
@@ -314,6 +322,41 @@
   /* ---------------------------------------------------------------- neural */
 
   /**
+   * The neural row's status line as it was last decided, so a language switch
+   * can re-translate it without probing the hardware again — a second probe
+   * would also clear the user's switch, which is not what changing the page
+   * language should do.
+   * @type {?{key: ?string, models: ?string[], provider: ?string}}
+   */
+  let neuralStatus = null;
+
+  /** Paint the neural status line in the current language.
+   * @returns {void} */
+  function paintNeuralStatus() {
+    const status = $('#neuralStatus');
+    if (!status || !neuralStatus) return;
+    status.textContent = neuralStatus.models
+      ? neuralStatus.models.join(', ') + ' · ' + t(neuralStatus.provider)
+      : t(neuralStatus.key);
+  }
+
+  /**
+   * Remember and paint one status for the neural row.
+   * @param {?string} key - the i18n key to show, or null for the model list.
+   * @param {{models: string[], provider: string}} [extra] - for the "available"
+   *   case: the installed models and the provider's own i18n key.
+   * @returns {void}
+   */
+  function setNeuralStatus(key, extra) {
+    neuralStatus = {
+      key: key || null,
+      models: (extra && extra.models) || null,
+      provider: (extra && extra.provider) || null,
+    };
+    paintNeuralStatus();
+  }
+
+  /**
    *
    * Probe the optional neural pipeline once at boot: does WebGPU (or at
    * least WASM-SIMD) work here, and is any model's weights file actually
@@ -327,28 +370,51 @@
    */
   async function initNeural() {
     const toggle = $('#neuralToggle');
-    const status = $('#neuralStatus');
     if (!toggle) return;
-    if (!Neural || typeof Neural.probe !== 'function') { toggle.disabled = true; return; }
+    if (!Neural || typeof Neural.probe !== 'function') { toggle.disabled = true; setNeuralStatus('ctl.neuralUnavailable'); return; }
     let probe;
-    try { probe = await Neural.probe(); } catch (e) { toggle.disabled = true; return; }
+    try { probe = await Neural.probe(); } catch (e) { toggle.disabled = true; setNeuralStatus('ctl.neuralUnavailable'); return; }
     const models = (probe && probe.models) || {};
     const anyModel = Object.keys(models).some((k) => models[k] && models[k].available);
     State.neuralAvailable = !!anyModel;
-    toggle.disabled = !State.neuralAvailable;
+    // Nothing installed is no longer a dead end: the model manager can fetch
+    // the quantised weights once and keep them in OPFS. `canLoadModels()`
+    // answers whether that is even possible here (a source configured, a model
+    // store present), and the toggle only stays enabled when it is.
+    State.neuralDownloadable = !anyModel && !!(Neural.canLoadModels && Neural.canLoadModels());
+    let cached = null;
+    try { cached = Neural.modelStatus ? await Neural.modelStatus('deepfilternet3') : null; } catch (e) { cached = null; }
+    toggle.disabled = !(State.neuralAvailable || State.neuralDownloadable);
     toggle.checked = false;
-    if (status) {
-      if (State.neuralAvailable) {
-        // WebNN > WebGPU > WASM only as a *status label* here — which EP a
-        // given model session actually landed on (mobile-first WebNN order
-        // included) is `neural-worker.js`'s own call per model; this is just
-        // the best single-line summary of what this device can reach at all.
-        const provider = (probe.webnn && probe.webnn.available) ? t('ctl.neuralWebnn')
-          : (probe.webgpu && probe.webgpu.available) ? t('ctl.neuralWebgpu') : t('ctl.neuralWasm');
-        status.textContent = Object.keys(models).filter((k) => models[k] && models[k].available).join(', ') + ' · ' + provider;
-      } else {
-        status.textContent = t('ctl.neuralUnavailable');
-      }
+    if (State.neuralAvailable) {
+      // WebNN > WebGPU > WASM only as a *status label* here — which EP a
+      // given model session actually landed on (mobile-first WebNN order
+      // included) is `neural-worker.js`'s own call per model; this is just
+      // the best single-line summary of what this device can reach at all.
+      setNeuralStatus(null, {
+        models: Object.keys(models).filter((k) => models[k] && models[k].available),
+        provider: (probe.webnn && probe.webnn.available) ? 'ctl.neuralWebnn'
+          : (probe.webgpu && probe.webgpu.available) ? 'ctl.neuralWebgpu' : 'ctl.neuralWasm',
+      });
+    } else if (cached && cached.cached) {
+      // the weights are on disk but the runtime could not be loaded (an
+      // offline first run, a blocked CDN): say exactly that instead of
+      // claiming no model exists
+      setNeuralStatus('ctl.neuralInstalledNoRuntime');
+    } else if (State.neuralDownloadable) {
+      setNeuralStatus('ctl.neuralDownloadable');
+    } else {
+      setNeuralStatus('ctl.neuralUnavailable');
+    }
+    // one progress subscription for the page's lifetime: every download this
+    // module starts, including one a probe-triggered load started, paints the
+    // same bar
+    if (Neural.onModelProgress && !State._neuralProgressBound) {
+      State._neuralProgressBound = true;
+      Neural.onModelProgress((p) => {
+        if (!p || p.phase !== 'download') return;
+        UI.modelLoader.update({ ratio: p.ratio, text: t('ctl.neuralDownloading') });
+      });
     }
     // One quiet, one-time-per-session toast when a render actually attempted
     // neural inference and the hardware gave out mid-call (OOM/device-lost/
@@ -364,6 +430,51 @@
         State._neuralFallbackToastShown = true;
         UI.toast(t('toast.neuralFallback'), 'warn', 6000);
       });
+    }
+  }
+
+  /**
+   * Fetch the quantised model the neural stage needs, once, showing the
+   * download in the same progress row a render uses — the "first start"
+   * story in one function: nothing installed, one switch, weights in OPFS
+   * from then on.
+   *
+   * Runs from the toggle's own change handler, so the user's gesture is what
+   * starts the network access. Every outcome is a toast and a status line;
+   * the toggle never ends up on with a model that is not really there.
+   * @returns {Promise<void>} resolves when the attempt is over, successfully
+   *   or not.
+   */
+  async function loadNeuralModel() {
+    const toggle = $('#neuralToggle');
+    if (!Neural || typeof Neural.ensureModel !== 'function' || State._neuralLoading) return;
+    State._neuralLoading = true;
+    if (toggle) { toggle.disabled = true; toggle.checked = false; }
+    setNeuralStatus('ctl.neuralDownloading');
+    const label = t('ctl.neuralDownloading');
+    UI.modelLoader.update({ ratio: 0, text: label });
+    let res;
+    try {
+      res = await Neural.ensureModel('deepfilternet3', {});
+    } catch (err) {
+      res = { ready: false, reason: String((err && err.message) || err) };
+    }
+    State._neuralLoading = false;
+    if (!res || !res.ready) {
+      UI.modelLoader.fail(t('ctl.neuralUnavailable'));
+      UI.toast(t('toast.neuralDownloadFailed'), 'warn', 6000);
+      if (toggle) toggle.disabled = !State.neuralDownloadable;
+      setNeuralStatus('ctl.neuralUnavailable');
+      return;
+    }
+    UI.modelLoader.done(t('ctl.neuralDownloaded'));
+    UI.toast(t('toast.neuralDownloaded', { size: ((res.bytes || 0) / 1e6).toFixed(1) }), 'ok', 5000);
+    await initNeural();                       // re-probe: the weights are now there
+    const again = $('#neuralToggle');
+    if (again && !again.disabled) {
+      again.checked = true;
+      State.neuralEnabled = true;
+      markAllStale();
     }
   }
 
@@ -2282,6 +2393,7 @@
     const neural = $('#neuralToggle');
     if (neural) {
       neural.addEventListener('change', () => {
+        if (neural.checked && !State.neuralAvailable) { loadNeuralModel(); return; }
         State.neuralEnabled = neural.checked && State.neuralAvailable;
         markAllStale();   // the final export differs, so any cached render is now stale
       });
@@ -2532,6 +2644,7 @@
     const power = $('#power');
     if (power) $('#powerVal').textContent = t('ui.percent', { v: power.value });
     if (global.RSLibs && global.RSLibs._paint) global.RSLibs._paint();
+    paintNeuralStatus();
     paintDropzone();
     if (State.job) paintJob();
     refreshLibraryLabels();
