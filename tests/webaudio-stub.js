@@ -235,6 +235,7 @@ class BaseContextStub {
     this._workletClass = null;
     this.audioWorklet = {
       addModule: async (url) => {
+        if (/dsp-utils\.js$/.test(String(url))) { H.loadDsp(); return; }
         if (!/remaster-processor\.js$/.test(String(url))) throw new Error('unexpected module: ' + url);
         this._workletClass = H.loadProcessor(this.sampleRate);
         return undefined;
@@ -327,6 +328,7 @@ class AudioContextStub extends BaseContextStub {
     this.state = 'running';
   }
   get currentTime() { return this._t; }
+  async suspend() { this.state = 'suspended'; }
   createAudioWorkletNode(name, opts) { return new WorkletNodeStub(this, name, opts); }
 }
 

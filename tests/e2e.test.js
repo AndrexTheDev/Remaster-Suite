@@ -60,6 +60,7 @@ function boot() {
   win.URL.revokeObjectURL = () => {};
   Object.defineProperty(win.navigator, 'clipboard', { value: { writeText: async () => {} }, configurable: true });
   win.eval(fs.readFileSync(path.join(ROOT, 'assets/vendor/lame.min.js'), 'utf8'));
+  win.Worker = require('./encoding-worker-adapter.js');
   for (const f of ['dsp-utils.js', 'presets.js', 'i18n.js', 'library-loader.js', 'opfs-manager.js', 'codecs.js', 'analyzer.js', 'memory-guard.js', 'engine.js', 'ui.js', 'app.js']) {
     win.eval(fs.readFileSync(path.join(ROOT, 'assets/js', f), 'utf8'));
   }
@@ -398,8 +399,8 @@ async function run() {
     // Process All
     App.State.power = 0.7;
     await App.processAll();
-    ok(App.State.cards.every((c) => c.status === 'done' && c.result && c.result.bytes.length > 1000),
-      'every file was rendered and encoded', App.State.cards[0].result.bytes.length + ' bytes each');
+    ok(App.State.cards.every((c) => c.status === 'done' && c.result && (c.result.bytes ? c.result.bytes.length : c.result.file.size) > 1000),
+      'every file was rendered and encoded', (App.State.cards[0].result.bytes ? App.State.cards[0].result.bytes.length : App.State.cards[0].result.file.size) + ' bytes each');
     ok(App.State.cards.every((c) => c.result.name.indexOf('.wav') !== -1), 'names carry the right extension');
 
     // ZIP

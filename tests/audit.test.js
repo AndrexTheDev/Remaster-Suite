@@ -30,7 +30,7 @@ function ok(cond, label, detail) {
 function section(name) { console.log('\n▸ ' + name); }
 
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
-const APP_JS = ['dsp-utils', 'presets', 'i18n', 'library-loader', 'opfs-manager', 'codecs', 'analyzer', 'neural-controller', 'memory-guard', 'engine', 'ui', 'app']
+const APP_JS = ['dsp-utils', 'presets', 'i18n', 'library-loader', 'opfs-manager', 'codecs', 'analyzer', 'ring-buffer', 'neural-controller', 'memory-guard', 'engine', 'ui', 'app']
   .map((f) => 'assets/js/' + f + '.js');
 
 const html = read('index.html');
@@ -63,7 +63,12 @@ section('audit · repository hygiene');
   // via a <script src>: dsp-utils.js through importScripts()/require() inside
   // workers and the Node test harness, neural-worker.js as a dedicated Worker
   // script (`new Worker('assets/js/neural-worker.js')` in neural-controller.js).
-  const orphans = jsFiles.filter((f) => !referenced.has(f) && f.indexOf('dsp-utils') === -1 && f.indexOf('neural-worker') === -1);
+  // analyzer.js resolves its worker relative to the executing script. Recognize
+  // the real reference (not an unconditional whitelist for another source file).
+  if (/new URL\(['"]analysis-worker\.js['"]/.test(fs.readFileSync(path.join(ROOT, 'assets/js/analyzer.js'), 'utf8'))) {
+    referenced.add('assets/js/analysis-worker.js');
+  }
+  const orphans = jsFiles.filter((f) => !referenced.has(f) && f.indexOf('dsp-utils') === -1 && f.indexOf('neural-worker') === -1 && f.indexOf('encoding-worker') === -1);
   ok(orphans.length === 0, 'no orphaned JavaScript file', orphans.join(', '));
   ok(referenced.has('assets/css/app.css'), 'stylesheet is referenced');
 
@@ -80,13 +85,27 @@ section('audit · repository hygiene');
   const abs = (appSrc + html).match(/(?:src|href)="\/(?!\/)[^"]*"/g) || [];
   ok(abs.length === 0, 'no root-absolute asset paths', abs.join(', '));
 
-  // the only remote hosts may live in the library loader
+  // The only remote hosts may live in the two modules that own a channel:
+  // the library loader (bundled ⇄ CDN libraries) and the model manager (the
+  // quantised weights). Everything a *page* references — markup, stylesheet,
+  // worklet — must stay relative, or a sub-folder deployment breaks.
   // data: URIs and XML namespaces are not requests — strip them before looking
   const stripData = (src) => src.replace(/data:[^"')\s]*/g, '').replace(/https?:\/\/www\.w3\.org[^"')\s]*/g, '');
-  const remoteInOthers = APP_JS.filter((f) => f !== 'assets/js/library-loader.js')
+  const REMOTE_OWNERS = ['assets/js/library-loader.js', 'assets/js/neural-controller.js'];
+  const remoteInOthers = APP_JS.filter((f) => REMOTE_OWNERS.indexOf(f) === -1)
     .concat(['index.html', 'assets/css/app.css', 'assets/worklets/remaster-processor.js'])
     .filter((f) => /https?:\/\//.test(stripData(read(f))));
-  ok(remoteInOthers.length === 0, 'no remote URL outside the library loader', remoteInOthers.join(', '));
+  ok(remoteInOthers.length === 0, 'no remote URL outside the two modules that own a channel', remoteInOthers.join(', '));
+
+  // …and the model manager's own URL is the project's model channel, not some
+  // third-party service the loader happens to reach: one host, the project's
+  // own repository, and a path that says `@models`
+  // comments may (and do) show example URLs; only code counts
+  const codeOnly = (src) => stripData(src).replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  const modelUrls = (codeOnly(read('assets/js/neural-controller.js')).match(/https?:\/\/[^"'`\s)]+/g) || []);
+  ok(modelUrls.length === 1 && /^https:\/\/cdn\.jsdelivr\.net\/gh\/AndrexTheDev\/Remaster-Suite@models$/.test(modelUrls[0]),
+    'the model channel is one URL, on the project\'s own jsDelivr path', modelUrls.join(', ') || 'none');
+
 
   const loader = read('assets/js/library-loader.js');
   ok(/unpkg\.com/.test(loader) && /cdnjs\.cloudflare\.com/.test(loader) && /jsdelivr\.net/.test(loader),
@@ -157,7 +176,7 @@ section('audit · markup');
 
   // script order must match the dependency order of the modules
   const order = [...html.matchAll(/<script src="assets\/js\/([a-z0-9-]+)\.js">/g)].map((m) => m[1]);
-  const want = ['dsp-utils', 'presets', 'i18n', 'library-loader', 'opfs-manager', 'codecs', 'analyzer', 'neural-controller', 'memory-guard', 'engine', 'ui', 'app'];
+  const want = ['dsp-utils', 'presets', 'i18n', 'library-loader', 'opfs-manager', 'codecs', 'analyzer', 'ring-buffer', 'neural-controller', 'memory-guard', 'engine', 'ui', 'app'];
   ok(JSON.stringify(order) === JSON.stringify(want), 'scripts load in dependency order', order.join(' → '));
 
   // wiring audit: every id / data hook the JavaScript looks for must exist
@@ -2294,20 +2313,21 @@ section('audit · codecs');
     const i16 = RSCodecs.toInt16(src, 0, src.length);
     const want = [0, 16384, -16384, 32767, -32768, 8192, 0, 0, 0];
     const bad = want.filter((w, i) => Math.abs(i16[i] - w) > 1);
-    ok(bad.length === 0, 'the PCM handed to the MP3 encoder is 16-bit-scaled and clipped',
+    ok(bad.length === 0, 'the legacy Int16 utility remains scaled and clipped',
       Array.from(i16).join(' '));
     ok(Math.abs(i16[1] / 32768 - 0.5) < 0.001, '…at exactly the amplitude it was given');
     const chunk = RSCodecs.toInt16(src, 3, 5);
     ok(chunk.length === 2 && chunk[0] === 32767, 'and a slice of the signal is sliced correctly',
       Array.from(chunk).join(' '));
-    // The worker path cannot run under jsdom, so its half of the same contract
-    // is checked in the source: every encodeBuffer call site must be preceded
-    // by a toInt16 conversion of the very samples it is given.
+    // Float PCM is intentional for WASM (the legacy lamejs API required Int16).
+    // A real browser decode/audibility test protects against silent exports.
     const codecsSrc = read('assets/js/codecs.js');
-    const postsScaled = /const l = toInt16\(left, off, end\);[\s\S]{0,240}left: l, right: r, last/.test(codecsSrc);
-    const mainScaled = /const l = toInt16\(left, off, end\);[\s\S]{0,240}enc\.encodeBuffer\(l, r\)/.test(codecsSrc);
-    ok(postsScaled && mainScaled, 'both encoder paths convert first (the worker path too)',
-      (postsScaled ? 'worker ✓' : 'worker ✗') + ' · ' + (mainScaled ? 'fallback ✓' : 'fallback ✗'));
+    const workerSrc = read('assets/js/encoding-worker.js');
+    const transfersFloat = /channels: pcm/.test(codecsSrc) && /pcm.map\(c => c.buffer\)/.test(codecsSrc);
+    const wasmOnly = /self.WasmMediaEncoder.createEncoder/.test(workerSrc)
+      && /encoder.encode\(d.channels\)/.test(workerSrc) && !/Libs.lame\(/.test(codecsSrc);
+    ok(transfersFloat && wasmOnly, 'MP3 uses transferred Float32 PCM and worker-only WASM',
+      'legacy Int16 helper retained only for compatibility');
   }
 
   // MP3 at every rate lamejs supports
@@ -2394,9 +2414,9 @@ section('audit · codecs');
     'worst delivered ' + (-2 - Presets.codecMargin('mp3', 192) + WORST[192]).toFixed(2) + ' dBTP on a hot master at 192 kbit/s');
   ok(/Presets\.codecMargin\(State\.format, State\.mp3Rate\)/.test(read('assets/js/app.js')),
     'the app applies it where the export format is known');
-  ok(/Math\.max\(1152 \* 4, Math\.floor\(rate \* 1\.5\)\)/.test(read('assets/js/codecs.js'))
-    && /Math\.max\(1152 \* 4, Math\.floor\(rate \* 1\.5\)\)/.test(read('tools/util.js')),
-    'the tooling export mirrors the app chunking, so the measured file is the delivered one');
+  ok(/tools\/encode-mp3.js/.test(read('tools/util.js'))
+    && /Codecs.encodeMp3\(input.channels/.test(read('tools/encode-mp3.js')),
+    'the tooling export calls the production codec rather than mirroring a stale encoder');
   const gm = DSP.measure([H.garageSim(DSP, SRX, 6)], SRX);
   ok(Presets.buildParams('auto', gm, 0.7).tpCeil === -1,
     'and the chain itself still asks for the platform ceiling — the margin is the export addition',

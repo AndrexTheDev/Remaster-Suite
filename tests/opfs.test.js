@@ -36,7 +36,7 @@ function section(name) { console.log('\n▸ ' + name); }
  * ====================================================================== */
 
 function makeFakeOPFS() {
-  const files = new Map();      // key -> { bytes: Uint8Array, size: number, locked: boolean }
+  const files = new Map();      // full path ('rs-scratch/x.wav', 'models/m/f.onnx') -> { bytes, size }
 
   function growTo(rec, size) {
     if (rec.bytes.length >= size) return;
@@ -45,9 +45,9 @@ function makeFakeOPFS() {
     rec.bytes = next;
   }
 
-  function syncHandleFor(key) {
-    let rec = files.get(key);
-    if (!rec) { rec = { bytes: new Uint8Array(0), size: 0 }; files.set(key, rec); }
+  function syncHandleFor(full) {
+    let rec = files.get(full);
+    if (!rec) { rec = { bytes: new Uint8Array(0), size: 0 }; files.set(full, rec); }
     return {
       write(view, opts) {
         const at = (opts && opts.at) || 0;
@@ -69,29 +69,58 @@ function makeFakeOPFS() {
     };
   }
 
-  const dir = {
-    async getFileHandle(key, opts) {
-      if (!files.has(key)) {
-        if (!(opts && opts.create)) throw new Error('NotFoundError: ' + key);
-        files.set(key, { bytes: new Uint8Array(0), size: 0 });
-      }
-      return {
-        name: key,
-        async createSyncAccessHandle() { return syncHandleFor(key); },
-        async getFile() {
-          const rec = files.get(key);
-          const bytes = rec ? rec.bytes.subarray(0, rec.size) : new Uint8Array(0);
-          return new Blob([bytes]);
-        },
-      };
-    },
-    async removeEntry(key) { files.delete(key); },
-    async *keys() { yield* files.keys(); },
-  };
+  /** Immediate child names (files and implied directories) under `prefix`. */
+  function namesUnder(prefix) {
+    const names = new Set();
+    for (const key of files.keys()) {
+      if (!key.startsWith(prefix)) continue;
+      names.add(key.slice(prefix.length).split('/')[0]);
+    }
+    return names;
+  }
+
+  function makeDir(prefix) {           // prefix ends with '/' (or is '' at the root)
+    return {
+      async getFileHandle(name, opts) {
+        const full = prefix + name;
+        if (!files.has(full)) {
+          if (!(opts && opts.create)) throw new Error('NotFoundError: ' + full);
+          files.set(full, { bytes: new Uint8Array(0), size: 0 });
+        }
+        return {
+          name,
+          async createSyncAccessHandle() { return syncHandleFor(full); },
+          async getFile() {
+            const rec = files.get(full);
+            const bytes = rec ? rec.bytes.subarray(0, rec.size) : new Uint8Array(0);
+            return new Blob([bytes]);
+          },
+        };
+      },
+      async getDirectoryHandle(name, opts) {
+        const path = prefix + name + '/';
+        if (!opts || opts.create !== false) return makeDir(path);
+        // a directory exists when something lives under it
+        for (const key of files.keys()) if (key.startsWith(path)) return makeDir(path);
+        throw new Error('NotFoundError: ' + path);
+      },
+      async removeEntry(name, opts) {
+        const full = prefix + name;
+        if (opts && opts.recursive) {
+          for (const key of [...files.keys()]) if (key === full || key.startsWith(full + '/')) files.delete(key);
+        } else {
+          files.delete(full);
+        }
+      },
+      async *keys() { yield* namesUnder(prefix); },
+    };
+  }
+
+  const root = makeDir('');
 
   return {
     files,
-    navigatorStorage: { getDirectory: async () => ({ getDirectoryHandle: async () => dir }) },
+    navigatorStorage: { getDirectory: async () => root },
   };
 }
 
@@ -392,6 +421,78 @@ async function run() {
   }
 
   /* ------------------------------------------------------------ fallback */
+  section('models · the model store writes, reads, lists and clears under models/');
+  {
+    const fakeOPFS = makeFakeOPFS();
+    const RSOPFS = freshOPFS(fakeOPFS);
+
+    ok(RSOPFS.models.dir === 'models', 'the store lives in its own directory, not the scratch one', RSOPFS.models.dir);
+    ok(RSOPFS.models.path('deepfilternet3', 'deepfilternet3_int8.onnx') === 'models/deepfilternet3/deepfilternet3_int8.onnx',
+      'and names files models/<model>/<file>', RSOPFS.models.path('deepfilternet3', 'deepfilternet3_int8.onnx'));
+
+    const empty = await RSOPFS.models.stat('deepfilternet3', 'deepfilternet3_int8.onnx');
+    ok(empty.exists === false && empty.size === 0, 'a model that is not there is an answer, not an error', JSON.stringify(empty));
+
+    const bytes = new Uint8Array(200000);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = (i * 7 + 3) & 0xff;
+    const writer = await RSOPFS.models.createWriter('deepfilternet3', 'deepfilternet3_int8.onnx');
+    for (let off = 0; off < bytes.length; off += 65536) {
+      await writer.write(bytes.subarray(off, Math.min(bytes.length, off + 65536)));
+    }
+    const closed = await writer.close();
+    ok(closed.size === bytes.length, 'a streamed write reports its final size', closed.size + ' bytes');
+
+    const stat = await RSOPFS.models.stat('deepfilternet3', 'deepfilternet3_int8.onnx');
+    ok(stat.exists === true && stat.size === bytes.length, 'the file is really in OPFS under models/',
+      stat.path + ' · ' + stat.size + ' bytes');
+    ok([...fakeOPFS.files.keys()].some((k) => k === 'models/deepfilternet3/deepfilternet3_int8.onnx'),
+      'and it is in the models directory, not in rs-scratch',
+      [...fakeOPFS.files.keys()].join(', '));
+
+    const read = await RSOPFS.models.read('deepfilternet3', 'deepfilternet3_int8.onnx');
+    ok(!!read && read.length === bytes.length && Buffer.from(read).equals(Buffer.from(bytes)),
+      'reading it back returns the same bytes, in order');
+
+    const list = await RSOPFS.models.list('deepfilternet3');
+    ok(list.length === 1 && list[0].name === 'deepfilternet3_int8.onnx' && list[0].size === bytes.length,
+      'the model directory lists what it holds', JSON.stringify(list));
+
+    await RSOPFS.models.write;
+    const bad = await RSOPFS.models.stat('deepfilternet3', 'nothing.onnx');
+    ok(bad.exists === false, 'a different file name is still a miss');
+
+    await RSOPFS.models.remove('deepfilternet3', 'deepfilternet3_int8.onnx');
+    const gone = await RSOPFS.models.stat('deepfilternet3', 'deepfilternet3_int8.onnx');
+    ok(gone.exists === false, 'removing a model really removes it');
+
+    // a second write, then the wholesale clear the settings row can use
+    const w2 = await RSOPFS.models.createWriter('deepfilternet3', 'deepfilternet3_int4.onnx');
+    await w2.write(new Uint8Array([1, 2, 3, 4]));
+    await w2.close();
+    await RSOPFS.models.clear();
+    const afterClear = await RSOPFS.models.list('deepfilternet3');
+    ok(afterClear.length === 0, 'clear() empties the model store', afterClear.length + ' files');
+
+    // and an aborted write leaves nothing behind — the property the download
+    // path depends on when a transfer dies half way
+    const w3 = await RSOPFS.models.createWriter('deepfilternet3', 'partial.onnx');
+    await w3.write(new Uint8Array(1024));
+    await w3.abort();
+    const partial = await RSOPFS.models.stat('deepfilternet3', 'partial.onnx');
+    ok(partial.exists === false, 'an aborted model write leaves no half file behind');
+
+    // scratch storage and the model store must not collide: a boot-time
+    // resetScratch() wipes rs-scratch and must leave downloaded weights alone
+    await RSOPFS.resetScratch();
+    const w4 = await RSOPFS.models.createWriter('deepfilternet3', 'deepfilternet3_int8.onnx');
+    await w4.write(new Uint8Array([9, 9, 9]));
+    await w4.close();
+    await RSOPFS.resetScratch();
+    const survives = await RSOPFS.models.stat('deepfilternet3', 'deepfilternet3_int8.onnx');
+    ok(survives.exists === true && survives.size === 3,
+      'resetScratch() at boot wipes scratch files but never the downloaded model', JSON.stringify(survives));
+  }
+
   section('fallback · no OPFS, no Worker — the in-memory sink behaves the same');
   {
     setGlobalNavigator(undefined);

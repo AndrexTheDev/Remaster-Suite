@@ -6,6 +6,402 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Round 38 — adaptive broadband STFT Wiener repair (5.1A)
+
+* Shared streaming FFT-1024/Hann/75%-overlap Wiener processor, rolling minimum
+  statistics and decision-directed SNR, configurable −18 dB gain floor. A
+  measured HF excess retains the calibrated coloured-hiss repair; otherwise
+  dehiss now repairs the whole spectrum rather than gating only the top end.
+* Worklet dependency loading, dry-ring sizing and declared latency include the
+  new 1024-sample path. Whole-file/chunked exports flush and trim that extra
+  delay. Reset and mode changes discard stale overlap/noise state.
+* Explicit bounded correlation diagnostics report raw/aligned SI-SDR, lag and
+  overlap; acceptance continues using declared latency without best-lag fitting.
+* Unchanged audio-quality acceptance: 9/9, clipping +27.17 dB, white noise
+  +14.64 dB, hum +11.60 dB. Added 22 Wiener/alignment/export checks; complete
+  sixteen-suite npm chain: 1319/1319. Static docs 19/19, code analysis clean.
+* Batch scheduling/worker lifecycle/fallback and full UI beta acceptance from
+  5.1B/5.2 remain separate, unfinished work; no whole-workflow FPS claim.
+
+### Round 37 — short-peak de-clipping with masked AR and constrained Hermite joins
+
+* Short saturated runs now try time-reversible covariance LPC/AR(4–8), trained
+  exclusively on contiguous clean windows in original observations. Two-sided
+  extrapolation blends with observed-slope Hermite boundaries; damaged samples
+  are projected strictly above the rail, with finite/fit/disagreement guards.
+* Retain the original cubic/period repair when the model lacks evidence, and
+  retain the extended-run periodic/CBAR paths. No extra declared latency.
+* Reconstruct before input DC filtering; include Float32 threshold tolerance
+  and stop candidates when they leave the measured clipping threshold.
+* Stereo-linked absolute-peak headroom applies even with autoLevel disabled.
+* Original quality fixture: **+27.17 dB** instead of +2.51 dB. New focused
+  `declip-ar` suite: **43 checks**, fifteen gain fixtures above +8.5 dB.
+  White-noise quality remains unresolved: audio-quality is **8/9**, not green.
+* Full fifteen-suite `npm test`: **1296 passed / 1 failed**, only white noise.
+  The encoding frame test also passes; no physical-device real-time claim.
+* Correct the old detector assertion against a clean sine reference: a genuine
+  sine has 2.43% naturally near-flat crest samples, so demanding <0.84% rewarded
+  an artificially pointed arc. The test retains strict missing-peak/evidence
+  limits and now checks occupancy against the known clean reference.
+
+
+### Round 36 — pooled LAME WASM export and objective quality gates (Prompt 5.1, partial)
+
+* MP3 whole-file and incremental export now share a bounded 1–2-worker LAME
+  WebAssembly pool. No mainthread fallback; owned 16K-frame Float32 transfers,
+  sink backpressure, worker errors/timeouts and failed-lease disposal.
+* WAV streaming uses 16K-frame packing turns, including the app's memory path.
+  Failed chunked renders abort their MP3 lease as well as the OPFS sink.
+* Added zero-mean SI-SDR and Hann-STFT log-spectral distance to `RSDSP`, with
+  finite/aligned-input validation, defined silence behaviour and analytic tests.
+* Added real-worklet known-clean clipping/noise/hum fixtures. **Acceptance is
+  incomplete:** +2.51 / −0.01 / +11.60 dB SI-SDR gain respectively; the first
+  two fail the requested +8 dB gate. The test intentionally exits 1.
+* Added real-Chromium ten-file MP3 plus ten-file WAV encoding/frame benchmark:
+  two workers, decoded audible output, 60.00 FPS, max 16.67 ms frame gap,
+  no long tasks in the isolated run. No physical-device/full-workflow claim.
+* Node/jsdom export integrations run the actual WASM worker via worker_threads.
+  Sources/licences and measurements are recorded in `assets/vendor/NOTICE.md`
+  and `docs/AUDIO-QUALITY.md`.
+
+### Round 35 — the card inspector: one drawer instead of three gestures fighting
+
+**A phone had one thumb and three gestures competing for it: the page pans vertically, the effect
+rack swipes horizontally, and a card's own controls sat in a row wide enough to scroll. This round
+gives every per-file control a drawer of its own and leaves the card with nothing to scroll.**
+
+**1 — the drawer.** Below 768 px a card no longer carries its controls inline. An explicit settings
+button in the card head (a real `<button>`, in the tab order and named by the same i18n key in both
+languages) opens a bottom sheet; tapping the card's own chrome — its name, its diagnosis, its
+waveform — does the same, while every control inside it keeps its own gesture. The sheet is a
+`role="dialog"` with `aria-modal`, labelled by the file name, closed by Escape, the close button, the
+scrim, or a downward drag that starts on the grabber and nowhere else. Profile, power, A/B and save
+stack full width in one column; the body pans on `pan-y` only and `overscroll-behavior: contain`
+stops the scroll from chaining into the page behind it. It also stacks above the toast layer and
+hides any toast that predates it: the first beta screenshot showed one sitting exactly on the save row.
+
+**2 — the page stays where it was.** Opening pins `body` at its current offset (the `overflow: hidden`
+trick alone does not hold on iOS Safari), marks `main`, the top bar, the footer, the compare FAB and
+the toasts `inert`, and moves focus to the sheet's close button. Closing hands the *live* grid node
+back to its original parent at its original index — not re-rendered, not appended — restores the
+scroll offset to the pixel and returns focus to the element that opened it. The sheet closes itself
+when a card is removed, when the list is cleared, and when the viewport widens past the breakpoint,
+so a phone rotated to landscape never leaves a fixed panel floating over a desktop layout.
+
+**3 — the gestures are separated by element, not by timing.** The global rack keeps its carousel and
+gains `overscroll-behavior-x: contain` and `touch-action: pan-x pan-y`: a horizontal swipe scrolls
+the rack and stops there, a vertical drag still pans the page. Inside the card there is no horizontal
+scroller left to steal either — the card's fields wrap, are clamped to `max-width: 100%`, and the
+grid is a single column in the drawer. The grabber is the one element with `touch-action: none`,
+which is why dragging the panel and scrolling its list can never be the same gesture.
+
+**4 — haptics that iOS can hear.** `UI.haptic()` tries `navigator.vibrate` and reports which path it
+took: `'vibrate'` when a real buzz was requested, `'visual'` when the API is missing, returns `false`
+or throws, `'none'` with no anchor. Every existing `vibrate()` call site keeps its pattern and gains
+the control it belongs to, so on iOS Safari — which has never shipped the Vibration API — that
+control knocks and glows for 420 ms instead. `prefers-reduced-motion` removes the animation along
+with every other one in the app.
+
+**Measured, not asserted.** `tests/mobile-ux.test.js` grows from 53 to 103 checks (the markup, the
+focus trap, the exact restore index, the fallback contract), the whole suite goes from 1186 to 1236,
+and the real-browser beta suite grows to **196 checks and 26 screenshots**: it taps a real card with
+a real finger on an iPhone 14 Pro profile, confirms the sheet is `fixed` to the bottom edge at full
+width, that its four fields are one per row, that a vertical swipe inside it leaves `scrollY` at 0
+and the body pinned, that the grabber dismisses it and the page pans again afterwards, that the main
+rack still pages horizontally on the same finger, and that Android Chrome vibrates where iOS Safari
+falls back to the animation. The two rack baselines were re-recorded (`--accept-baseline`) because
+the card behind them genuinely gained a button.
+
+### Round 34 — Stage 0: the denoiser moves in front of the chain
+
+**Until this round the neural models were a promise the render pipeline never kept: `denoise()` and
+`separate()` existed, resolved honest results, and then nothing called them.** The pipeline's only
+neural stage was the optional air-curve coupling at stage 7 — additive shaping of a band the DSP had
+already synthesised. This round puts DeepFilterNet3 *in front of stage 1*, where denoising belongs,
+and gives the A/B/C button a C that is a real third render instead of a relabelled B.
+
+**1 — `assets/js/ring-buffer.js` (`RSRingBuffer`), the exchange.** A lock-free single-producer /
+single-consumer ring on a `SharedArrayBuffer`: a 128-byte control block (magic `0x52534231`, version,
+capacity, channels, write/read cursors, pushed/popped, high-water, overflow, underrun, closed, the
+`Atomics.wait` word) followed by one float32 plane per channel. All counters go through `Atomics`, so
+the numbers `stats()` reports are the ones both sides actually saw. Writes are all-or-nothing: a block
+that does not fit is refused and counted, never truncated — a torn block is audible, a refused one is
+not. Reads never pad: a short read *is* the underrun signal, and the stage treats it as a failed run
+rather than shipping silence. Without cross-origin isolation (no `SharedArrayBuffer`) the same object
+falls back to a plain `ArrayBuffer`; `writeBlocking()` then returns immediately instead of parking a
+thread nobody will wake. `from()` rebuilds a consumer handle from the buffer and refuses a bad magic or
+an unknown version instead of reading rubbish.
+
+**2 — `RSNeural.denoiseChannels()`, the stage.** The file is chunked (1 s blocks) with a quarter second
+of context on both sides of every seam, each block is one inference call (or a stem separation whose
+outputs are summed — `stems: ['other']` drops the vocal, which is a different product decision than
+"denoise"), and the blocks are published through the ring and read back with a linear, gain-preserving
+crossfade — the same law the chunked render already uses at its seams and for the same reason. A
+44.1 kHz source is brought to the models' 48 kHz by a windowed-sinc resampler (normalised per sample,
+so level and file edges survive), and the result reports its rate. Every failure mode returns
+`{applied: false, reason}`: `signal-too-short`, `empty-signal`, `ring-unavailable`, `weights-not-found`,
+`unexpected-output-shape`, `stage-error`, `ring-underflow`, `ring-overflow`. The caller renders the
+source instead; nothing is ever padded, spliced or half-processed.
+
+**3 — the engine takes it as an option, not as a mode.** `Engine.render({stage0})` runs the stage
+before the graph and lets the existing rate conversion hand its 48 kHz output to a context at any rate;
+`renderChunked({stage0})` runs it per span, so a long file never holds a second full-length copy, and a
+stage that fails on the *first* span disables it for the whole file rather than denoising the middle
+and leaving the ends dry. Both results carry `stage0` (`{applied, chunks, spans, underflows, overflows,
+ms, reason}`), and the whole-file path splits its progress bar 35 / 65 so the slow half is visible.
+Measured in `tests/stage0.test.js`: a stand-in model that removes a known noise floor takes the
+comparison from 17.3 dB of SNR to clean, with **zero** ring underruns — while the same option pointed
+at a missing model leaves the render **bit-identical** to the pure-DSP path.
+
+**4 — Magic Fix throws the switch, and the DSP steps back.** With DeepFilterNet3 really installed,
+`applyMagicFix()` arms Stage 0 (`State.aiDenoise`) and scales the de-hisser to 0.35 of its depth —
+the floor the expander was written to find is gone, and left at full depth it would chase the
+programme's own top end instead. Without weights nothing changes: the switch is never claimed when the
+stage cannot run. `P.signature()` includes the neural routing, so a cached render made with Stage 0 on
+is invalidated when the switch moves. The FAB's C position renders through the same `stage0` option
+and appears only when that render actually applied the stage — C is the file you would save, not an
+approximation of it. The beta's Magic Fix and FAB rows still pass unchanged on a host with no weights,
+which is the honest no-model path.
+
+**5 — the suite.** `tests/stage0.test.js` (86 checks) covers the ring under back-pressure (wrap-around,
+refused-not-truncated writes, the overflow/underrun counters, `from()` refusing bad magic and version,
+`reset()`, the non-shared fallback and its immediate `writeBlocking`), the chunk plan's exactness
+(identity and uniform gain through every seam, awkward lengths), 44.1 k → 48 k level preservation, stem
+mixing, the whole fallback contract, and the engine wiring on both render paths. `validate-docs` needs
+the new module in the inventory; `index.html` and the two script-order lists in `web.test.js` /
+`audit.test.js` gain `ring-buffer.js`, so the load-order assertions stay exact. **1099 → 1186 checks.**
+
+### Round 33 — the model downloads itself now: a configurable channel, a progress bar, an OPFS cache
+
+**Until this round the neural stage was real code with no weights: every door led to
+`{applied: false, reason: 'weights-not-found'}`, and the only way to use it was to drop a model file into the
+Origin Private File System by hand.** That is not a feature a person can use. This round builds the missing
+half — the model manager — and makes the first start the product story it should have been: switch it on
+once, watch it download, never think about it again.
+
+**1 — a model channel that a deployment can point anywhere.** `neural-controller.js` learns
+`MODEL_FILES`, `setModelSource(url | [urls])`, `getModelSource()`, `canLoadModels()` and the
+`<meta name="rs-model-cdn" content="…">` override, defaulting to this project's own jsDelivr channel
+(`…@models`) with the page-relative `models/` folder as a fallback. One URL builder, trailing slashes
+trimmed, `<base>/<model>/<file>`; every request in the download path goes through that one list, which is
+also what makes the beta suite able to prove the whole path against a local fixture server with no internet.
+The audit suite's long-standing "no remote URL outside the library loader" rule becomes "outside the two
+modules that own a channel", plus a new row that pins the model channel to exactly one URL on the project's
+own path — the rule got narrower, not weaker, and the comment in `library-loader.js` that claimed to be the
+only home of a CDN URL now says which exception exists and why.
+
+**2 — `ensureModel()`: cache first, then the network, never a rejection.** It stats the preferred variants
+in OPFS (mobile int4 → int8, desktop int8 first, and `variant:` overrides both), then tries each source ×
+each variant, and always resolves a shape — `{ready, key, source: 'opfs' | 'network', variant, path, bytes,
+url}`, or `{ready: false, reason}`. Two calls in the same tick share one promise, so a double click cannot
+race two writers into one file. The download streams into the model store in the response's own chunks;
+`downloadToStore()` refuses a non-2xx, an HTML body (paid for with a real bug in a similar project: a CDN
+404 page served with a 200), an empty body and a short read — and on any of those aborts the write and
+deletes the partial file, because a half-written model that later reads as "cached" is worse than no model
+at all. `modelStatus()` reports what is on disk per variant; `onModelProgress()` feeds the bar.
+
+**3 — the model store is its own directory.** `opfs-manager.js` grows `RSOPFS.models` with
+`dir/path/stat/read/list/remove/clear/createWriter` and a memory fallback, writing `models/<model>/<file>`
+*outside* `rs-scratch/` — so the boot-time `resetScratch()` can keep deleting every leftover render without
+ever deleting a model somebody waited for a 40 MB download for. Both properties are pinned in
+`opfs.test.js`, whose simulator learned nested `getDirectoryHandle` to be able to express them.
+
+**4 — WebGPU first, WASM-SIMD always there.** The worker's provider order becomes an explicit, exported
+function: WebGPU (only once the adapter is really there), then WebNN where the browser offers it, then WASM
+with `ort.env.wasm.simd = true` and `enableCpuMemArena` — the floor never disappears. The quantised names
+are now the brief's own (`deepfilternet3_int8.onnx`, `deepfilternet3_int4.onnx`), and `loadWeights()` looks
+for every variant both nested and flat (`models/<file>`) before it ever fetches.
+
+**5 — a first start a person can see.** `ui.js` grows `modelLoader` (the same `.work-track`/`.work-fill`
+pair the render bars use, so a download looks like every other piece of work), and `app.js` rewires the
+settings row: with no weights and a working store the switch is offered, switching it on downloads, the row
+paints percent by percent, a toast reports the size, and the toggle ends up on a working model — or the
+attempt ends with a red bar and a toast, never a switch that lies. Nothing downloads at boot: the user's
+gesture is what starts the network. The status line's four states (available / installed-but-no-runtime /
+downloadable / unavailable) are now data plus a painter rather than three `if`s writing `textContent`, so a
+language switch re-translates the sentence instead of resetting it to the markup default.
+
+**6 — what the browser found that the unit test had not.** Three defects, each now a row:
+`downloadToStore()` counted `loaded += chunk.length` *after* handing the chunk to the store, and the real
+store transfers the buffer to its worker — the view is detached, `.length` is 0, and every download failed
+with "empty response" while the bytes were on disk. The fake store in `neural.test.js` learned to detach its
+input, so the test now fails for the same reason the browser did. `#modelProgress` carries `display: grid`,
+which beats the user agent's `[hidden]` rule, so the "hidden" row was on screen — one `[hidden] { display:
+none }` and the `hidden` attribute means something again. And `data-i18n` on the live status line made every
+language switch overwrite what the app had just learned with the HTML default.
+
+beta.js 155 → **174 checks** (nineteen rows over the channel, the cache, the network trace, the two starts,
+the bar, the language switch and the 404 cleanup), `opfs.test.js` 39 → **52**, `neural.test.js` 87 →
+**127**, `audit.test.js` 338 → **339**, the suite total 1 045 → **1 099**. Two visual baselines were
+re-recorded, and the reason is a real harness fix: the old desktop-empty baseline had been captured with
+three "Liste geleert." toasts still on screen. `visualRow()` now waits for a transient toast to leave before
+it looks, which is exactly the race the row exists to catch in the app rather than in the harness.
+
+### Round 32 — the beta suite learns to use a thumb, and to look at what it drew
+
+**Round 30 put a carousel, a gold button and a floating A/B/C switch on the phone screen. Eleven node
+suites tested their markup and their maths; the beta suite — the only thing that drives the real
+browser — never touched them, and it only ever looked at the page as a desktop.** This round it does
+both, and the browser suite becomes answerable for the mobile interface the same way the node suites
+are answerable for the code.
+
+**1 — a device matrix instead of one viewport.** The suite now emulates desktop 1440×900 @1, an
+iPhone 14 Pro at 393×852 @3 and a Pixel 7 at 412×915 @2.625 — viewport, device scale factor and touch
+points together, because the app reads all three: `maxTouchPoints`, `(pointer: coarse)` and
+`isTouchDevice()`. The rows assert what the page itself reports, not what the browser was asked for:
+the emulated viewport is the viewport, the pointer is a finger on both phones and a mouse on the
+desktop, and a phone is told apart from the desktop *without a reload* (the drop zone switches from
+"Audiodateien hier ablegen" to "Audiodateien auswählen").
+
+**2 — the rack is swiped with real touch events.** `Input.dispatchTouchEvent` — touchStart at 60 % of
+the rack, then twelve touchMoves of 18 px at 16 ms intervals, then touchEnd — because
+`Input.synthesizeScrollGesture` is a no-op in Chromium 153. The rows then hold the page to the
+contract: six groups in 2 068 px of scroll inside a 393 px screen, `scroll-snap-type: x mandatory`,
+`scroll-snap-align: center`, `scroll-snap-stop: always`, 338 px per group; the swipe really scrolls
+(the compositor reports 40 scroll events and `scrollLeft` 330), lands on the snap point within a
+pixel of centre, and the dot trail's lit dot follows the page the finger left on screen. On a desktop
+the same rack is a wrapped row of controls again — `snap none`, `overflow-x visible`, the dots
+`display: none`, five rows.
+
+**3 — Magic Fix is tapped, the FAB is tapped and held.** A `touchStart`/`touchEnd` pair on
+`#btnMagicFix` has to apply the pre-judged setting rather than the one set by hand (preset `auto`,
+power 0.85), answer with the app's own toast, and — on a phone, where `State.touch` is true — start
+the batch by itself: the row waits for the card to be `done` and for `.is-firing` to clear, so the
+next tap is not refused. The A/B/C switch is driven through `#fabABBtn`: it appears only while
+playback runs, 60×60 px, 86 px above the bottom of the phone screen and 18 px from the right; a tap
+switches to the original (label A, `State.ab`, the engine's bypass and the rack's own switch all
+agreeing), a second tap goes back, a hold longer than 220 ms engages the original for as long as the
+finger is down (`.is-holding`) and does not count as a tap on release, and the C position is simply
+not offered when no neural preview exists.
+
+**4 — screenshots that are compared, not just collected.** `tests/beta/png.js` is a PNG
+decoder/encoder and a pixel differ in about two hundred lines of zlib — no `pixelmatch`, no
+`pngjs`, because the beta suite has no dependencies and is not going to get some for this. Six
+states are recorded as baselines in `docs/beta/baseline/` (empty desktop, empty iPhone, empty Pixel,
+two carousel pages, the desktop rack) and every run diffs the live picture against them pixel by
+pixel: a differing row fails and writes a red-on-dim picture of what moved into `docs/beta/diff/`,
+and a *missing* baseline is a failure too, so deleting the record cannot wave a regression through.
+New baselines are recorded deliberately with `--accept-baseline`. The deterministic raster matters:
+the launcher keeps `--disable-lcd-text`, `--disable-font-subpixel-positioning` and
+`--force-color-profile=srgb`, without which the same page drifts by ~9 000 px between reloads
+(font anti-aliasing), and every capture runs in German with reduced motion.
+
+**5 — two bugs the new rows found, and one in the harness.** The row that samples the progress bar
+while a real MP3 render runs caught a screenshot bug that would have quietly weakened every future
+pixel assertion: a **clipped** `Page.captureScreenshot` on a scrolled page returns the stale
+composited frame — a region painted red came back empty, three times, a quarter-second apart —
+while the whole-viewport shot beside it changed every time. The region is now cut out of the whole
+shot in Node. Cutting it out also turned up the second one: Chromium answers with **three-channel**
+PNG here, so a crop written with a four-byte stride reads past every second pixel and turns any
+region into noise — which is exactly what "1 distinct picture" over twenty-four samples looked like.
+The row is honest now in both directions: it asserts the bar is on screen before its pixels are
+compared, and that the pixels differ as the render advances. The harness bug was a profile left
+behind by a killed browser wedging the next one's OPFS: every run gets its own profile directory
+now (`profile-<pid>-<ts>`, pruned after six hours), and `cleanProfile()` exists for probe work.
+
+**6 — the scale rows stop measuring the sandbox.** Two thresholds were absolute budgets —
+"a 3-minute take renders in real time or faster" asserted `< 60 000 ms` under a name that claims
+real time — and on a busy machine the same take rendered in 57.7 s once and 67.9 s the next run.
+The row now asserts what its name says (`< duration × 1000`), and the diagnostic floors are looser
+and documented as sanity nets rather than benchmarks; the *calibrated* claim, which compares the
+180 s take against a 30 s take measured seconds earlier on the same machine, is untouched.
+
+beta.js 94 → **155 checks** (61 new rows across the device matrix, the rack, Magic Fix, the FAB,
+the phone screens and the visual invariants). The regression test for the streamed-encoder bug
+Rounds 31b found in `codecs.js` landed in `chunked-render.test.js` with it: 50 → **53**, the suite
+total 1 042 → **1 045**.
+
+### Round 31b — the documentation is checked now, so the code gets the same treatment
+
+**Round 31 made the README answerable for what it claims about the tree. Nothing answered for the
+JavaScript itself: a function can be declared, documented, called by nobody, read a name that was never
+declared, or be written twice into the same object literal — and all eleven suites still pass, because
+none of them ever executes that path.**
+
+**1 — `scripts/analyze-code.js`, an acorn pass over the shipped source.** It parses the thirteen
+`assets/js` modules, the AudioWorklet processor and `coi-serviceworker.js` (15 files, 20 553 lines), builds a
+real scope chain and reports what a syntax check cannot see: reads of names that resolve to nothing (the
+runtime `ReferenceError`, which `node --check` accepts happily), assignments that quietly create a
+global, the same key written twice in one object literal (the later one silently wins), and module-level
+declarations that nothing references. `--dead` promotes the last group from a note to a failure, `--json`
+for machines; exit 0 clean, 1 on a defect, 2 when acorn is absent. acorn is the second devDependency
+alongside jsdom, and `npm run analyze:code` / `analyze:code:dead` expose it. The first run reported 635
+findings; 635 of them were bugs in the analyzer (it bound only the first declarator of `const a = 1, b = 2;`
+and did not know `registerProcessor`), which is why the tool now states its own file and defect counts —
+the second run found five real ones, below — two defects a user could hit and three declarations nothing referenced.
+
+**2 — the pass found a shipped bug: `seek()` never worked.** Every seek — a click on the waveform, the
+seek strip, the left/right arrow keys — ended in `this.position = Math.min(Math.max(0, seconds), dur)`,
+and `dur` was declared nowhere in `engine.js`. A seek therefore threw `ReferenceError: dur is not
+defined` before it moved the transport: the click handler ran, the playhead stayed where it was, and the
+one thing a waveform display is for did not happen. It is fixed (`const total = this.buffer ?
+this.buffer.duration : 0;`, so a seek with no buffer is a documented no-op rather than a crash), and
+`tests/mobile-ux.test.js` now carries five checks for it — a seek moves the transport, a seek past the
+end lands on the last sample, a seek before zero lands on zero, a seek with no buffer loaded does not
+throw. The new check reproduced the `ReferenceError` against the old source before the fix landed, so the
+regression is pinned by a test that failed for the right reason. mobile-ux 48 → 53 checks, the total
+1037 → **1042**.
+
+**3 — the rest of the findings.** A duplicate key in the object `RSPresets.analyse()` returns
+(`humNeed` was listed twice with the same value; the normalised-needs group keeps it, the copy is gone —
+behaviourally identical, since a duplicate shorthand key resolves to the same variable). Two dead
+declarations in the worklet (`db2lin()`, a helper nothing called since the gain computers were built, and
+`DEESS_DECIM`, a constant the de-esser replaced with its own frame counter) and one in `dsp-utils.js`
+(`spectrumPeak()`, documented but referenced by nothing — the resonance scanner builds its own local
+window), plus a duplicated `@returns` tag this pass had left on `resonanceScan()`. The JSDoc coverage the
+validator reports therefore reads **306 of 306 declarations** rather than 307: removing a documented
+function that nothing calls is the point of the exercise. `scripts/analyze-code.js` is named in the
+Repository layout, so the layout check in `validate-docs.js` covers it too.
+
+### Round 31 — documentation audit, strict JSDoc and a docs validator
+
+**The tree and its description had drifted apart: the README still promised "seven dependency-free
+suites" and 160/335/28 checks for three of them, five of the eleven suites under `tests/` were not in the
+Repository layout at all, and the JavaScript had grown well past what its comments described.**
+
+**1 — the README now states the truth, and `scripts/validate-docs.js` keeps it there.** The Tests section
+opens with a machine-readable summary (**11 dependency-free suites · 1037 checks**) and a table that names
+every suite, its file, its own reported check count and what it covers — dsp 173, tuning 17, web 137,
+audit 338, e2e 108, opfs 39, coi 19, neural 87, memory-guard 21, chunked-render 50, mobile-ux 48. The
+Repository layout lists the five suites it was missing (`neural.test.js`, `memory-guard.test.js`,
+`chunked-render.test.js`, `mobile-ux.test.js`, and `coi.test.js`'s count) as well as the `scripts/` and
+`tools/` directories it never described. `package.json` gained the `test:tuning` script the chain had been
+calling without one, plus `validate:docs` / `validate:docs:run`.
+
+**2 — `node scripts/validate-docs.js` is the gate (19 static checks, 31 with `--run`).** It is dependency-free (it has to run before
+`npm install`) and checks, in one pass: that `tests/*.test.js` and the README table describe the same set
+of suites; that the per-suite counts in the table add up to the number in the summary line; that the
+layout section repeats every count; that `npm test` chains exactly the suites on disk and that each one has
+a `test:<name>` script; that every helper, probe and script under `tests/`, `scripts/` and `tools/` is
+named in the layout; and that every module, function, class, object and class method in `assets/js` carries
+a JSDoc block (307 of 307 declarations, 13 of 13 modules with a `@fileoverview`/`@module` header and
+`@typedef`s for their data structures). Beyond coverage it checks the *content* of the documentation:
+every `@param` names the parameter its function really takes (307 signatures, compared against the real
+parenthesised lists, multi-line or miscounted tags included — the check was verified against a deliberately
+renamed parameter), every `{@link …}` target exists somewhere in the tree (`{@link Step}` in the analyzer
+became `RSDSP.Step`, the worker's eight `NeuralWorker.*` links its real `RSNeuralWorker` module, and a
+`{@link RSWorklet}` that named nothing at all became prose), and every `@typedef` either documents its
+members with `@property` or is an alias/union/map that does not need to. `--run` goes one step further and
+executes every suite, comparing each one's own `ALL TESTS PASSED (n)` with the count the README promises —
+the number in the README is now something a machine checks rather than something a human remembers to
+update.
+
+**3 — strict JSDoc across `assets/js`.** Every module states what it is and what it guarantees; every
+class, method, exported function and object has typed `@param`/`@returns`; the data structures are
+`@typedef`s rather than prose — most importantly `RSPresets.ParamMap`, which documents all 60 published
+parameters with their ranges and what each does (`power`, `subSrc` 60–260 Hz, `airNeural` as the opt-in
+Stage-7 trust dial, `humHz` 50/60, `boxG1/F1/Q1`, `tpCeil`, `refDb`, `eq0…eq11` …), `RSDSP.Spectrum`,
+`RSDSP.Measurement` and `RSDSP.Step` for the measurement side, and `RSNeural.NeuralResult`,
+`RSNeural.PendingSlot` and the `NeuralReason` union for the neural controller's states — a missing model
+resolving `{applied: false, reason}` instead of throwing is now a documented contract, not a comment.
+The pass also closed the gaps the stricter reading exposed: the forty-odd functions whose comments had
+described their inputs in prose now carry typed `@param`/`@returns` — the FFT and window helpers, every
+spectrum reader, the sliceable steps (hum, crackle, dynamic range, inter-sample peaks), the stereo band
+split, the WAV envelope writers and the two Biquad setters — `renderChunked()`'s duplicated inline option object references the `ChunkedRenderOptions`
+typedef that already existed, one stale `@param` trio and one phantom parameter were removed, and
+`i18n.js`'s file overview no longer repeats its own header verbatim. No DSP and no runtime behaviour
+changed: the suites pass unchanged (**1037 checks** at that point — the five checks Round 31b adds for `seek()` are new tests, not new behaviour), and the documentation audit was run with them.
+
 ### Round 30 — Mobile touch optimisation, the "AI Magic Fix" button, and a live A/B/C compare FAB
 
 **Three requirements, all aimed at the same phone in someone's hand: the effect rack has to work with a

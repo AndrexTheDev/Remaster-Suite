@@ -169,9 +169,13 @@ function bootApp(opts) {
   // the vendored libraries, as if their <script> tag / CDN fetch had completed
   win.eval(fs.readFileSync(path.join(ROOT, 'assets/vendor/jszip.min.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(ROOT, 'assets/vendor/lame.min.js'), 'utf8'));
+  win.__encodedPCM = [];
+  win.Worker = class extends require('./encoding-worker-adapter.js') {
+    constructor() { super(); this.onPCM = channels => win.__encodedPCM.push(...channels.map(c => c.slice())); }
+  };
 
   const order = ['dsp-utils.js', 'presets.js', 'i18n.js', 'library-loader.js', 'opfs-manager.js', 'codecs.js',
-    'analyzer.js', 'neural-controller.js', 'memory-guard.js', 'engine.js', 'ui.js', 'app.js'];
+    'analyzer.js', 'ring-buffer.js', 'neural-controller.js', 'memory-guard.js', 'engine.js', 'ui.js', 'app.js'];
   for (const file of order) {
     const code = fs.readFileSync(path.join(ROOT, 'assets', 'js', file), 'utf8');
     win.eval(code);
@@ -342,36 +346,18 @@ async function run() {
   ok(d32.bitDepth === 32 && d32.format === 3, '32-bit float WAV export', d32.bitDepth + ' bit float');
   win.RSApp.State.wavDepth = 16;
 
-  section('flow · MP3 export through lamejs');
-  // The defect this guards against: lamejs copies the samples it is handed
-  // straight into 16-bit buffers, so a mix in −1…1 floats is written out as
-  // *silence* — a file with a plausible size, valid frames and no sound. That
-  // cannot be caught in the bytes (a stream with frames and no signal is still
-  // a valid MP3), so this listens at the encoder's input instead: what leaves
-  // the mixer has to be 16-bit PCM, and it has to use the 16-bit range.
-  const handed = [];
-  const RealEncoder = win.lamejs.Mp3Encoder;
-  win.lamejs.Mp3Encoder = function (nCh, sr, kbps) {
-    const enc = new RealEncoder(nCh, sr, kbps);
-    const write = enc.encodeBuffer.bind(enc);
-    enc.encodeBuffer = (left, right) => {
-      handed.push(left);
-      if (right) handed.push(right);
-      return write(left, right);
-    };
-    return enc;
-  };
+  section('flow · MP3 export through dedicated LAME WASM workers');
+  const handed = win.__encodedPCM;
   win.RSApp.State.format = 'mp3';
   const resMp3 = await win.RSApp.renderCard(card, { force: true });
-  win.lamejs.Mp3Encoder = RealEncoder;
   ok(handed.length > 0, 'the mixer really went through the MP3 encoder', handed.length + ' chunks');
   {
     // realm-safe type check: the arrays are created inside the window
-    const typed = handed.every((a) => Object.prototype.toString.call(a) === '[object Int16Array]');
-    let peak = 0, integers = true;
-    for (const a of handed) for (const v of a) { const m = Math.abs(v); if (m > peak) peak = m; if (v !== Math.trunc(v)) integers = false; }
-    ok(typed && integers, 'the encoder is handed 16-bit integer PCM');
-    ok(peak > 8000, '…that uses the 16-bit range (a −1…1 float mix would be silence here)', 'peak ' + peak);
+    const typed = handed.every((a) => Object.prototype.toString.call(a) === '[object Float32Array]');
+    let peak = 0;
+    for (const a of handed) for (const v of a) peak = Math.max(peak, Math.abs(v));
+    ok(typed && peak <= 1, 'the WASM encoder is handed normalized Float32 PCM');
+    ok(peak > 0.2, '…with audible normalized PCM amplitude', 'peak ' + peak);
   }
   ok(/\.mp3$/.test(resMp3.name), 'MP3 file name', resMp3.name);
   const mb = resMp3.bytes;
@@ -491,9 +477,18 @@ async function run() {
   ok(stages.indexOf(DICT['work.wait']) === -1 || seenStage[0] === DICT['work.wait'],
     'the queue wording never covers work that is already running');
   const later = ['work.diagnose', 'work.window', 'work.envelope', 'work.preview'];
-  const missed = later.filter((k) => stages.indexOf(DICT[k]) === -1);
-  ok(missed.length === 0, 'every later stage announces itself as well — nothing falls back to a generic word',
-    stages.length + ' distinct stage words, missing: ' + (missed.join(', ') || 'none'));
+  // Progress is frame-coalesced: a sub-frame diagnosis/window transition
+  // need not be painted during the live run. Explicitly exercise every label
+  // at its contractual paint boundary instead of asserting timer accidents.
+  const missed = [];
+  for (const key of later) {
+    win.RSApp.setCardWork(cardP, key.slice(5), .5, 0);
+    await new Promise(resolve => win.requestAnimationFrame(resolve));
+    if (cardP.el.stage.textContent !== DICT[key]) missed.push(key);
+  }
+  win.RSApp.setCardWork(cardP, null, 0, 0);
+  ok(missed.length === 0, 'every later stage paints its specific label at a frame boundary',
+    later.length + ' labels checked, missing: ' + (missed.join(', ') || 'none'));
   ok(cardP.el.work.hidden && jobBar.hidden, 'both bars are gone when the file is ready');
   ok(cardP.status === 'ready' && cardP.el.name.textContent === LONG_NAME,
     'the card keeps its name and ready state', cardP.status + ' · ' + JSON.stringify(cardP.el.name.textContent));
@@ -501,10 +496,12 @@ async function run() {
   section('progress · the bar itself answers to the contract');
   const track = cardP.el.track;
   win.RSApp.setCardWork(cardP, 'decode', null);
+  await new Promise(resolve => win.requestAnimationFrame(resolve));
   ok(!cardP.el.work.hidden && cardP.el.work.classList.contains('is-indeterminate'),
     'an unmeasurable step (browser decode) animates instead of inventing a number');
   ok(cardP.el.pct.textContent === '', 'and shows no percentage at all', JSON.stringify(cardP.el.pct.textContent));
   win.RSApp.setCardWork(cardP, 'render', 0.4, 45);
+  await new Promise(resolve => win.requestAnimationFrame(resolve));
   ok(!cardP.el.work.classList.contains('is-indeterminate') && cardP.el.pct.textContent === '40 %',
     'a measured step shows its share', cardP.el.pct.textContent);
   ok(cardP.el.bar.style.width === '40%' && track.getAttribute('aria-valuenow') === '40',
@@ -512,6 +509,7 @@ async function run() {
   ok(cardP.el.eta.textContent === DICT['work.eta'].replace('{s}', '45'),
     'the time left is spelled out, not guessed to the second', cardP.el.eta.textContent);
   win.RSApp.setCardWork(cardP, 'render', 0.4, 200);
+  await new Promise(resolve => win.requestAnimationFrame(resolve));
   ok(cardP.el.eta.textContent === DICT['work.etaMin'].replace('{m}', '3'),
     'long waits switch to minutes', cardP.el.eta.textContent);
   ok(cardP.el.stage.textContent === DICT['work.render'], 'the stage word follows the stage', cardP.el.stage.textContent);
@@ -520,6 +518,7 @@ async function run() {
 
   section('progress · the job bar counts files honestly');
   win.RSApp.Job.start(4, cardP);
+  ok(win.document.body.classList.contains('is-working'), 'audio jobs select the low-repaint chrome');
   ok(win.document.getElementById('globalProgressFill').style.width === '0%', 'a fresh job starts at zero');
   win.RSApp.Job.file(2, 'third-of-four.wav', cardP);
   win.RSApp.Job.at(0.5, 'render');
@@ -543,6 +542,7 @@ async function run() {
     && jobFill.style.width === '25%',
     'the next measurable step puts the fill back on the number', jobFill.style.width);
   win.RSApp.Job.end();
+  ok(!win.document.body.classList.contains('is-working'), 'ending a job restores the normal idle chrome');
   ok(win.document.getElementById('globalProgress').hidden, 'the job bar disappears when the job ends');
 
   section('progress · the play button speaks the current language');

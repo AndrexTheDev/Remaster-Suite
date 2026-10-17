@@ -1,0 +1,122 @@
+{
+  "browser": "Chromium 153.0.8010.0",
+  "sizes": [
+    720979,
+    720979,
+    720979,
+    720979,
+    720979,
+    720979,
+    720979,
+    720979,
+    720979,
+    720979
+  ],
+  "wavBytes": 52920440,
+  "workersCreated": 2,
+  "hardwareConcurrencyHint": 4,
+  "frames": 328,
+  "meanFps": 60.00243302548548,
+  "p95FrameMs": 16.670000000000073,
+  "maxFrameMs": 16.670000000000073,
+  "over20ms": 0,
+  "longTasks": [],
+  "codecMatrix": [
+    {
+      "rate": 44100,
+      "kbps": 128,
+      "kind": "tone",
+      "channels": 1,
+      "ceiling": -3.1,
+      "decodedDbTP": -3.587581524570535
+    },
+    {
+      "rate": 44100,
+      "kbps": 128,
+      "kind": "music",
+      "channels": 2,
+      "ceiling": -3.1,
+      "decodedDbTP": -3.1032662146426055
+    },
+    {
+      "rate": 44100,
+      "kbps": 128,
+      "kind": "noise",
+      "channels": 2,
+      "ceiling": -3.1,
+      "decodedDbTP": -1.7017931204530832
+    },
+    {
+      "rate": 44100,
+      "kbps": 192,
+      "kind": "tone",
+      "channels": 1,
+      "ceiling": -1.8,
+      "decodedDbTP": -2.118918500041152
+    },
+    {
+      "rate": 44100,
+      "kbps": 192,
+      "kind": "music",
+      "channels": 2,
+      "ceiling": -1.8,
+      "decodedDbTP": -2.1167884877095746
+    },
+    {
+      "rate": 44100,
+      "kbps": 192,
+      "kind": "noise",
+      "channels": 2,
+      "ceiling": -1.8,
+      "decodedDbTP": -0.8930358151165757
+    },
+    {
+      "rate": 48000,
+      "kbps": 128,
+      "kind": "tone",
+      "channels": 1,
+      "ceiling": -3.1,
+      "decodedDbTP": -3.616240588889334
+    },
+    {
+      "rate": 48000,
+      "kbps": 128,
+      "kind": "music",
+      "channels": 2,
+      "ceiling": -3.1,
+      "decodedDbTP": -3.2065281232320824
+    },
+    {
+      "rate": 48000,
+      "kbps": 128,
+      "kind": "noise",
+      "channels": 2,
+      "ceiling": -3.1,
+      "decodedDbTP": -2.5458401002198427
+    },
+    {
+      "rate": 48000,
+      "kbps": 192,
+      "kind": "tone",
+      "channels": 1,
+      "ceiling": -1.8,
+      "decodedDbTP": -2.1408133916233116
+    },
+    {
+      "rate": 48000,
+      "kbps": 192,
+      "kind": "music",
+      "channels": 2,
+      "ceiling": -1.8,
+      "decodedDbTP": -2.1212413358643016
+    },
+    {
+      "rate": 48000,
+      "kbps": 192,
+      "kind": "noise",
+      "channels": 2,
+      "ceiling": -1.8,
+      "decodedDbTP": -1.2146089904993467
+    }
+  ]
+}

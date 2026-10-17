@@ -214,17 +214,9 @@ function encWav(chans, kbps, file, sr) {
 
 /** the production worklet class */
 /* ---------------------------------------------------------------------------
- * The app's *own* MP3 export, in Node.
- *
- * `enc()` above drives ffmpeg's LAME: the same encoder family, not the same
- * code. Measured on a bass-heavy 128 kbit/s export the two differ by 1.7 dB of
- * true peak and the app's own path is the worse one, so a claim about the file
- * the user keeps has to be measured through *this* path: lamejs out of
- * assets/vendor (loaded in a VM), the app's `toInt16` — TPDF dither at ±1 LSB,
- * clamp, round half away from zero — and the app's chunking, CHUNK =
- * max(1152 * 4, floor(rate * 1.5)), all of it mirrored from assets/js/codecs.js
- * (the audit pins the chunk expression in both files against each other, so this
- * copy cannot drift silently).
+ * The app's own MP3 export, in a child process using the production codec
+ * and its actual WASM worker. This keeps the legacy synchronous probe API
+ * without silently duplicating a different encoder/chunking/dither law.
  * ------------------------------------------------------------------------ */
 let LAME = null;
 function lamejs() {
@@ -236,21 +228,8 @@ function lamejs() {
   if (!LAME || !LAME.Mp3Encoder) throw new Error('lamejs did not load from assets/vendor/lame.min.js');
   return LAME;
 }
-/** codecs.toInt16, verbatim */
-function toInt16Chunk(src, from, to) {
-  const out = new Int16Array(Math.max(0, to - from));
-  for (let i = 0; i < out.length; i++) {
-    let v = src[from + i] * 32768 + (Math.random() + Math.random() - 1);
-    if (v !== v || v === Infinity || v === -Infinity) v = 0;
-    else if (v < -32768) v = -32768;
-    else if (v > 32767) v = 32767;
-    out[i] = v < 0 ? -Math.round(-v) : Math.round(v);
-  }
-  return out;
-}
 /**
- * Encode the way the app's export does — the app's encoder, the app's 16-bit
- * conversion and the app's chunk size — and return the file path.
+ * Encode through the production WASM worker and return the file path.
  * @param {Float32Array[]} chans 1 or 2 channels
  * @param {number} kbps
  * @param {string} file where the MP3 goes
@@ -258,19 +237,11 @@ function toInt16Chunk(src, from, to) {
  */
 function appMp3(chans, kbps, file, sr) {
   const rate = sr || SR;
-  const nCh = Math.min(2, chans.length), len = chans[0].length;
-  const enc = new (lamejs().Mp3Encoder)(nCh, rate, kbps || 320);
-  const CHUNK = Math.max(1152 * 4, Math.floor(rate * 1.5));
-  const parts = [];
-  for (let off = 0; off < len; off += CHUNK) {
-    const end = Math.min(len, off + CHUNK);
-    const l = toInt16Chunk(chans[0], off, end);
-    const r = nCh > 1 ? toInt16Chunk(chans[1], off, end) : null;
-    const mb = enc.encodeBuffer(l, r);
-    if (mb.length) parts.push(Buffer.from(mb));
-    if (end === len) { const fl = enc.flush(); if (fl.length) parts.push(Buffer.from(fl)); }
-  }
-  fs.writeFileSync(file, Buffer.concat(parts));
+  const result = require('child_process').spawnSync(process.execPath,
+    [path.join(ROOT, 'tools/encode-mp3.js'), file, String(kbps || 320), String(rate)],
+    { input: Buffer.from(RSDSP.encodeWav(chans, rate, 32)), maxBuffer: 16 * 1024 * 1024 });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error('Production MP3 export failed: ' + result.stderr);
   return file;
 }
 

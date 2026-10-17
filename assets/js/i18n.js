@@ -11,9 +11,47 @@
  *   RSi18n.t('meta.line', {d:'3:12', ...})   → "3:12 · Stereo · 44,1 kHz · 7,2 MB"
  *   RSi18n.setLang('en')                     → re-applies every [data-i18n*]
  * ========================================================================== */
+/**
+ * @fileoverview The dictionaries and the accessors around them (see the header
+ * above for what this module is and how it is called) — exposed as the global
+ * `RSi18n`.
+ *
+ * The tests hold the two tables to the same key set, so a missing translation
+ * is a failing check rather than a German word in the English interface, and
+ * they check that every `data-i18n*` key in the markup and every literal
+ * `t('…')` call in the JavaScript exists in both.
+ *
+ * Keys are namespaced by area (`ctl.*`, `drop.*`, `chip.*`, `find.*`,
+ * `diag.*`, `err.*`, `legal.*`, …) plus the dynamic `find.act.*` family that is
+ * completed at runtime from the diagnosis. Values may contain `{placeholder}`
+ * slots filled by {@link RSi18n.t}; the values that carry markup are flagged
+ * with an `html: true` sibling in {@link RSi18n.DICT}, which
+ * {@link RSi18n.isHtml} reports.
+ *
+ * @module RSi18n
+ */
 (function (global) {
   'use strict';
 
+  /**
+   * One language's table: dictionary key → text. Values are plain strings; a
+   * handful of `legal.*` and `help.*` entries carry markup and are only ever
+   * written into `[data-i18n-html]` nodes.
+   * @typedef {Object<string, string>} LangTable
+   */
+
+  /**
+   * Both tables, keyed by language. Every key exists in both — the suites
+   * compare the key sets and fail on a one-sided entry.
+   * @typedef {Object} Dictionary
+   * @property {LangTable} de - German, the source language of the project.
+   * @property {LangTable} en - English.
+   */
+
+  /**
+   * The dictionaries themselves.
+   * @type {Dictionary}
+   */
   const DICT = {
     /* --------------------------------------------------------------- German */
     de: {
@@ -51,6 +89,11 @@
       'ctl.neural': 'KI-Höhenrekonstruktion',
       'ctl.neuralHint': 'Nutzt ein neuronales Modell, um bei stark komprimierten Dateien (z. B. alte 128-kbit/s-MP3s) die abgeschnittenen Höhen über die DSP-Luftsynthese präziser wiederherzustellen. Läuft nur, wenn ein Modell lokal/OPFS gefunden wird — sonst bleibt die reine DSP-Kette unverändert aktiv.',
       'ctl.neuralUnavailable': 'Kein Modell gefunden — reine DSP-Kette aktiv',
+      'ctl.neuralDownloadable': 'Noch kein Modell installiert — beim Einschalten wird das INT8-Modell einmal geladen und dauerhaft gespeichert.',
+      'ctl.neuralDownloading': 'KI-Modell wird geladen …',
+      'ctl.neuralDownloaded': 'KI-Modell gespeichert',
+      'ctl.neuralInstalledNoRuntime': 'Modell installiert — Laufzeit gerade nicht erreichbar (offline?).',
+      'ctl.modelAria': 'Modell-Download',
       'ctl.neuralWebgpu': 'WebGPU',
       'ctl.neuralWasm': 'WASM',
       'ctl.neuralWebnn': 'WebNN (NPU)',
@@ -87,6 +130,10 @@
       'ui.percent': '{v} %',
 
       'card.remove': 'Datei entfernen',
+      'card.inspect': 'Einstellungen für diese Datei',
+      'sheet.close': 'Schließen',
+      'sheet.done': 'Fertig',
+      'sheet.hint': 'Profil, Kraft, Vergleich und Speichern für diese Datei — von unten eingeblendet, damit nichts seitwärts scrollt.',
       'card.waveAria': 'Wellenform-Vergleich Original und Repariert',
       'card.legendOriginal': 'Original',
       'card.legendRestored': 'Repariert',
@@ -259,8 +306,11 @@
       'toast.libCdn': 'Bibliotheken: CDN aktiviert — dabei wird die CDN-Adresse aufgerufen.',
       'toast.cleared': 'Liste geleert.',
       'toast.tooBig': '„{name}“ ist größer als {mb} MB und wurde übersprungen.',
+      'toast.wavFallback': 'MP3-Worker/WASM blockiert. Export erfolgt stattdessen als WAV.',
       'toast.mp3Slow': 'MP3 wird encodiert — das dauert etwas länger als WAV.',
       'toast.bigBatchMemory': 'Großer Stapel: Dieser Browser unterstützt kein Datei-Streaming (OPFS) — der Arbeitsspeicher könnte knapp werden. MP3 oder kleinere Stapel schonen ihn.',
+      'toast.neuralDownloaded': 'KI-Modell gespeichert ({size} MB) — ab jetzt ohne erneuten Download verfügbar.',
+      'toast.neuralDownloadFailed': 'Modell-Download fehlgeschlagen — die reine DSP-Kette bleibt aktiv.',
       'toast.neuralFallback': 'KI-Verarbeitung wegen begrenzter Geräteressourcen übersprungen — reine DSP-Kette wird verwendet.',
       'coi.reloading': 'Hochleistungsmodus wird aktiviert — Seite wird einmalig neu geladen …',
       'toast.needDecode': 'Die Datei ist noch nicht bereit.',
@@ -275,7 +325,7 @@
       'fab.tip': 'Tippen wechselt · Halten hört Original',
       'fab.mode.original': 'Original',
       'fab.mode.restored': 'Repariert (DSP)',
-      'fab.mode.ai': 'Repariert + KI',
+      'fab.mode.ai': 'KI-Entrauschung + DSP',
 
       'err.decode': 'Die Datei konnte nicht gelesen werden.',
       'err.broken': 'Diese Datei enthält beschädigte Audiodaten (keine gültigen Samples) — sie lässt sich nicht reparieren.',
@@ -435,6 +485,11 @@
       'ctl.neural': 'AI high-frequency reconstruction',
       'ctl.neuralHint': 'Uses a neural model to more precisely rebuild the cut-off highs on heavily lossy files (e.g. old 128 kbit/s MP3s), coupled through the DSP air synthesiser. Only runs when a model is found locally/in OPFS — otherwise the pure DSP chain stays active unchanged.',
       'ctl.neuralUnavailable': 'No model found — pure DSP chain active',
+      'ctl.neuralDownloadable': 'No model installed yet — switching this on downloads the INT8 model once and keeps it on disk.',
+      'ctl.neuralDownloading': 'Downloading the AI model …',
+      'ctl.neuralDownloaded': 'AI model saved',
+      'ctl.neuralInstalledNoRuntime': 'Model installed — runtime unreachable right now (offline?).',
+      'ctl.modelAria': 'Model download',
       'ctl.neuralWebgpu': 'WebGPU',
       'ctl.neuralWasm': 'WASM',
       'ctl.neuralWebnn': 'WebNN (NPU)',
@@ -471,6 +526,10 @@
       'ui.percent': '{v} %',
 
       'card.remove': 'Remove file',
+      'card.inspect': 'Settings for this file',
+      'sheet.close': 'Close',
+      'sheet.done': 'Done',
+      'sheet.hint': 'Profile, power, comparison and save for this file — slid up from the bottom so nothing scrolls sideways.',
       'card.waveAria': 'Waveform comparison of original and restored audio',
       'card.legendOriginal': 'Original',
       'card.legendRestored': 'Restored',
@@ -643,8 +702,11 @@
       'toast.libCdn': 'Libraries: CDN enabled — this contacts the CDN host.',
       'toast.cleared': 'List cleared.',
       'toast.tooBig': '“{name}” is larger than {mb} MB and was skipped.',
+      'toast.wavFallback': 'MP3 worker/WASM blocked. Exporting WAV instead.',
       'toast.mp3Slow': 'Encoding MP3 — this takes a bit longer than WAV.',
       'toast.bigBatchMemory': 'Large batch: this browser has no file streaming (OPFS) — memory may get tight. MP3 or smaller batches are easier on it.',
+      'toast.neuralDownloaded': 'AI model saved ({size} MB) — available from now on without another download.',
+      'toast.neuralDownloadFailed': 'Model download failed — the pure DSP chain stays active.',
       'toast.neuralFallback': 'AI processing skipped due to limited device resources — using the pure DSP chain.',
       'coi.reloading': 'Turning on the high-performance mode — reloading the page once …',
       'toast.needDecode': 'This file is not ready yet.',
@@ -659,7 +721,7 @@
       'fab.tip': 'Tap to switch · hold to hear the original',
       'fab.mode.original': 'Original',
       'fab.mode.restored': 'Restored (DSP)',
-      'fab.mode.ai': 'Restored + AI',
+      'fab.mode.ai': 'AI denoise + DSP',
 
       'err.decode': 'The file could not be read.',
       'err.broken': 'This file contains corrupted audio data (no valid samples) — it cannot be repaired.',
@@ -784,26 +846,54 @@
     },
   };
 
+  /**
+   * The languages the app offers, in menu order. `de` first because it is the
+   * fallback language of every lookup.
+   * @type {string[]}
+   */
   const LANGS = ['de', 'en'];
+  /**
+   * The language currently in effect. Only {@link RSi18n.setLang} may change
+   * it, so a caller never has to reason about a half-applied language.
+   * @type {string}
+   */
   let lang = 'de';
 
   /* ------------------------------------------------------------------ helpers */
 
+  /**
+   * Whether a key's value in the current language carries markup. Callers use
+   * it to decide between `textContent` and a reviewed `[data-i18n-html]`
+   * assignment — never as a licence to inject anything.
+   * @param {string} key - dictionary key.
+   * @returns {boolean} `true` when the current value contains `<`.
+   */
   function isHtml(key) {
     const v = DICT[lang][key];
     return typeof v === 'string' && v.indexOf('<') !== -1;
   }
 
-  /** Interpolate {placeholders}. */
+  /**
+   * Interpolate `{placeholder}` slots in a template. A placeholder with no
+   * matching variable is left *visible* on purpose — an empty gap in a
+   * sentence is worse than seeing `{v}` and reporting it.
+   * @param {string} str - the template, as stored in the dictionary.
+   * @param {Object<string, (string|number)>} [vars] - the values to fill in.
+   * @returns {string} the filled string, or `str` unchanged when `vars` is
+   *   missing (the common case for a static label).
+   */
   function fill(str, vars) {
     if (!vars) return str;
     return str.replace(/\{(\w+)\}/g, (m, k) => (vars[k] === undefined ? m : String(vars[k])));
   }
 
   /**
-   * Translate a key.
-   * @param {string} key
-   * @param {object} [vars] placeholder values
+   * Translate a key in the current language, falling back to German and then to
+   * the key itself — so a missing translation is a visible key, never an empty
+   * label or a crash.
+   * @param {string} key - dictionary key, e.g. `'ctl.power'`.
+   * @param {Object<string, (string|number)>} [vars] - placeholder values.
+   * @returns {string} the translated text.
    */
   function t(key, vars) {
     const table = DICT[lang] || DICT.de;
@@ -813,7 +903,13 @@
     return fill(s, vars);
   }
 
-  /** Pick the best starting language: stored choice → browser → German. */
+  /**
+   * Pick the best starting language from the browser's own preference list:
+   * anything starting with `de` gets German, everything else English (a
+   * Spanish browser reads the English UI, not the German one). Never throws —
+   * a hostile `navigator` getter falls back to German.
+   * @returns {string} `'de'` or `'en'`.
+   */
   function detect() {
     try {
       const nav = (global.navigator && (global.navigator.language || (global.navigator.languages || [])[0])) || 'de';
@@ -821,7 +917,16 @@
     } catch (e) { return 'de'; }
   }
 
-  /** Apply every translation to a DOM subtree (defaults to the whole document). */
+  /**
+   * Apply every translation to a DOM subtree, by attribute: `data-i18n` →
+   * `textContent`, `data-i18n-html` → reviewed markup, `data-i18n-title` →
+   * `title`, `data-i18n-aria` → `aria-label`. Also sets the document's `lang`
+   * attribute, which is what makes a screen reader pronounce the German page
+   * in German. IDs, classes and structure are never touched.
+   * @param {(Document|Element)} [root=document] - subtree to re-render; a card
+   *   built after a language switch can be translated on its own.
+   * @returns {void}
+   */
   function apply(root) {
     const scope = root || global.document;
     if (!scope || !scope.querySelectorAll) return;
@@ -841,7 +946,12 @@
     if (global.document && global.document.documentElement) global.document.documentElement.lang = lang;
   }
 
-  /** Localised date for the legal overlays. */
+  /**
+   * Today's date, written the way each language writes dates (`16. Oktober
+   * 2026` versus `October 16, 2026`) — used where the legal texts have to name
+   * the day they were shown.
+   * @returns {string} the localised date.
+   */
   function today() {
     const d = new Date();
     const months = lang === 'de'
@@ -852,7 +962,18 @@
       : `${months[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
   }
 
-  /** Switch language and re-render every tagged node. */
+  /**
+   * Switch the language and re-render every tagged node. An unknown language
+   * falls back to German rather than leaving the app in a language it has no
+   * strings for.
+   * @param {string} next - `'de'` or `'en'`.
+   * @param {{apply?: boolean}} [opts] - `apply: false` switches the variable and
+   *   the document title without walking the DOM, for callers that re-render
+   *   themselves.
+   * @returns {string} the language actually set.
+   * @fires CustomEvent - `'rs:lang'` on `global`, with `{detail: {lang}}`, so
+   *   the app can repaint what it derives from the language without polling.
+   */
   function setLang(next, opts) {
     if (LANGS.indexOf(next) === -1) next = 'de';
     lang = next;
@@ -866,10 +987,33 @@
     return lang;
   }
 
-  /** All keys of a language — used by the test suite for completeness checks. */
+  /**
+   * Every key of a language, for completeness checks and for callers that
+   * translate a list of keys in one go.
+   * @param {string} [l=current language] - `'de'` or `'en'`.
+   * @returns {string[]} the language's keys, in declaration order.
+   */
   function keys(l) { return Object.keys(DICT[l || lang]); }
 
+  /**
+   * The public surface, assigned to `global.RSi18n` below.
+   * @typedef {Object} RSi18nApi
+   * @property {string[]} LANGS
+   * @property {Dictionary} DICT - both tables, exposed because the tests and
+   *   the audit read keys directly.
+   * @property {function(string, Object=): string} t
+   * @property {function((Document|Element)=): void} apply
+   * @property {function(string, {apply?: boolean}=): string} setLang
+   * @property {function(): string} detect
+   * @property {function(string=): string[]} keys
+   * @property {function(string): boolean} isHtml
+   * @property {string} lang - the current language (getter; no setter, so the
+   *   only way to change it is `setLang`).
+   */
+
+  /** @type {RSi18nApi} */
   const API = { LANGS, DICT, t, apply, setLang, detect, keys, isHtml, get lang() { return lang; } };
+  /** @type {RSi18nApi} */
   global.RSi18n = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

@@ -78,8 +78,6 @@ function smoothstep(e0, e1, x) {
   return t * t * (3 - 2 * t);
 }
 
-function db2lin(db) { return Math.pow(10, db / 20); }
-
 /* -------------------------------------------------------------------------- */
 /* biquad (transposed direct form II, RBJ cookbook)                            */
 /* -------------------------------------------------------------------------- */
@@ -644,7 +642,6 @@ class SubSynth {
 /* De-esser: dynamic sibilance control (see the class below)                    */
 /* -------------------------------------------------------------------------- */
 
-const DEESS_DECIM = 4;
 /**
  * How long a detected sibilant stays corrected, in milliseconds.
  *
@@ -1236,63 +1233,38 @@ class DeHiss {
  *     there is nothing to repair, which is exactly what the false-positive test
  *     checks.
  *
- * Two models repair the plateau, handed off by its length, because a cubic and
- * an autoregressive model answer two different questions well and the same
- * question badly.
+ * Short plateaus now use a masked covariance AR(4..8) model learned from up to
+ * 512 immediately preceding observations and up to 128 clean exit samples.
+ * Every regression row touching a clipped sample is excluded. A raw observation
+ * ring is separate from the mutable reconstruction ring, so LPC never learns
+ * its own guesses. The same time-reversible fit predicts from both boundaries.
+ * Bad fits, insufficient seeds, divergent predictions and large disagreement
+ * retain the old Hermite/period fallback rather than inventing a crest.
  *
- *   · **Short runs** (≤ 5.6 ms, the old ceiling) are reconstructed the way they
- *     always were: the samples on either side of the run, and the slopes
- *     between them, define exactly one Hermite cubic that passes through both
- *     ends with both tangents, and — where the local period is trustworthy — a
- *     sinusoidal model of the same run length, whichever predicts the larger
- *     peak. A single cubic bulge is the right shape for a run this short (one
- *     crest, one repair), it needs no spectral estimate, and it is the shape
- *     every number in this header was measured against.
- *   · **Extended plateaus** — a clipped bass note, a sustained overload, a
- *     transfer whose gain stage was driven into the rail for tens of
- *     milliseconds — are not one crest, they are several, and a single cubic
- *     through the two endpoints cannot draw more than one bulge no matter how
- *     long the run is: handed a 20 ms flat top it would bow once across the
- *     whole thing, which is not what a clipped 60 Hz tone's missing half-cycles
- *     actually look like. Beyond the old ceiling this stage switches to
- *     **CBAR** — *Constrained Blind Amplitude Reconstruction*: a linear
- *     prediction (LPC, Levinson–Durbin) is fit *blind* from the unclipped
- *     audio immediately before the run and, independently, immediately after
- *     it; each model is then run as a zero-input (self-feeding) filter across
- *     the whole gap, so it keeps generating the waveform's own local harmonic
- *     content — its pitch, its formants, whatever gave the "before" and
- *     "after" audio their shape — rather than inventing one bulge. The two
- *     one-sided extrapolations are cross-faded (forward strong at the start of
- *     the gap, backward strong at the end, equal in the middle), which is what
- *     makes the join *phase-true* at both edges: each half is literally built
- *     from, and continuous with, the real samples it touches. The model is
- *     *constrained* at the other end of "blind": every sample inside a
- *     detected run really did sit at or above the measured clip rail, so
- *     whatever the prediction draws is floored there, never allowed to dip
- *     the "repair" under the clipping it is supposed to be removing. An
- *     all-pole filter fit by Levinson–Durbin from a genuine autocorrelation is
- *     guaranteed stable, so the zero-input run decays rather than diverges —
- *     the one place in a long gap neither context can really vouch for (the
- *     middle of a plateau far longer than the model's own memory) settles back
- *     onto the rail it replaces instead of ringing away from it, which is the
- *     graceful-failure case the constraint exists for.
+ * The AR estimates are joined to the two real boundary samples by a cubic
+ * Hermite bridge with the observed one-sided derivatives; its smoothstep
+ * residual weight has zero value and slope at both endpoints. Damaged samples
+ * are projected onto the convex signed interval (rail, 4*rail], with an epsilon
+ * that survives Float32 rounding. This is a sample constraint, not a claim of
+ * globally optimal continuous-time recovery. Unclipped observations are kept.
  *
- * Because a run is only reconstructed once it has ended — and CBAR needs a
- * second helping of real audio *after* the run to fit its backward model —
- * the stage delays its output by the longest span it may need to repair plus
- * that trailing context (`look`) while it is engaged. Order matters as much as
- * detection: this is the *first* repair in the chain, before the de-hisser and
- * the de-clicker, because those two work on the waveform as it is and
- * reconstructing a peak afterwards would have to undo them. Every restoration
- * handbook says the same thing for the same reason.
+ * Extended plateaus retain the earlier periodic or order-16 CBAR fallback.
+ * The fixed look-ahead still covers 25 ms plus trailing context; latency does
+ * not depend on which model succeeds. Detection is performed on raw PCM,
+ * before DC filtering, so the measured rail is not shifted by filter state.
+ * Float32 rounding is accounted for when comparing it with a dB-derived rail.
+ *
+ * Reconstructed absolute peaks are held until reset. The processor derives a
+ * stereo-linked attenuation before its output guard, even with autoLevel off,
+ * so raising the hidden peaks does not merely clip them again at export.
+ * Missing information is not universally recoverable: the quality guarantee
+ * is limited to measured fixtures, not arbitrary clipped speech/music.
  */
 class DeClipper {
   constructor(sr) {
     this.sr = sr;
-    // The Hermite/period model's own ceiling, unchanged from the stage's
-    // original design: 5.6 ms, long enough for the clipped bass note of a
-    // loud master to fit a single cubic through. Below this length the
-    // reconstruction is exactly what it always was.
+    // Short-crest ceiling: AR/Hermite candidates below this length, with the
+    // historical period/cubic reconstruction retained as a safe fallback.
     this.shortMax = Math.max(8, Math.round(sr * 0.0056));
     // CBAR's ceiling: how long an "extended" plateau this stage will still
     // attempt, autoregressively. 25 ms is the half-cycle of a 20 Hz tone —
@@ -1310,6 +1282,7 @@ class DeClipper {
     this.look = this.maxRun + this.ctxLen + 2;
     const L = this.look + 8;
     this.ring = new Float32Array(L);          // incoming samples, waiting
+    this.source = new Float32Array(L);        // immutable observations for local AR fitting
     // Which of the waiting samples this stage has reconstructed. The de-clicker
     // downstream reads it: a *reconstructed* peak is broadband and spiky, and a
     // de-clicker looking for clicks would happily eat it again — measured on a
@@ -1328,6 +1301,7 @@ class DeClipper {
     // know the measured headroom still gets a reconstruction that survives the
     // guard, and a passage with no clipping lets the figure decay again.
     this.head = 1;
+    this.restoredPeak = 0; // absolute, held until reset: global headroom, not a peak flattener
     this.lastSign = 0;
     // run tracking
     this.armed = false;                       // inside a candidate plateau
@@ -1370,17 +1344,30 @@ class DeClipper {
     this._buf = new Float64Array(this.order);
     this._revCtx = new Float64Array(this.ctxLen);
     this._revOut = new Float64Array(this.maxRun);
+    // Low-order covariance LPC for short crests. Masked windows are contiguous
+    // observations; never train across a clipped gap or on a previous repair.
+    this.shortOrder = 8;
+    this.shortContext = new Float64Array(512);
+    this.shortContextN = 0;
+    this.shortMatrix = new Float64Array(72); // 8 x (8 + RHS), Gaussian solve
+    this.shortCoef = new Float64Array(8);
+    this.shortState = new Float64Array(8);
+    this.shortFitThreshold = 1;
+    this.shortAmount = 0;
+    this.cbarShort = false;
   }
   reset() {
-    this.ring.fill(0); this.mark.fill(0);
+    this.ring.fill(0); this.source.fill(0); this.mark.fill(0);
     this.w = 0; this.marked = false; this.armed = false; this.runStart = 0; this.runLen = 0;
     this.runPeak = 0;
-    this.head = 1;
+    this.head = 1; this.restoredPeak = 0;
     this.prev = 0; this.pos = 0; this.crossN = 0; this.crossW = 0;
     this.hist.fill(0); this.histW = 0; this.histN = 0;
     this.preCtx.fill(0); this.preCtxN = 0;
     this.post.fill(0); this.postN = 0;
-    this.cbarPending = false;
+    this.cbarPending = false; this.cbarShort = false;
+    this.shortContext.fill(0); this.shortContextN = 0;
+    this.shortCoef.fill(0); this.shortState.fill(0); this.shortMatrix.fill(0);
   }
   /** Local period from the last crossing intervals, or 0 when they are irregular. */
   period() {
@@ -1459,6 +1446,175 @@ class DeClipper {
       for (let k = p - 1; k > 0; k--) buf[k] = buf[k - 1];
       buf[0] = pred;
     }
+  }
+  /** Fit a time-reversible AR model (up to eight poles) from adjacent *observed* clean windows.
+   * Clipped samples invalidate the entire regression row, not just its target.
+   * A diagonal load and partial pivoting bound the solve; a residual gate refuses
+   * noise/transients with no predictable local waveform. No per-run allocation.
+   * @param {number} rail - observed clipping magnitude.
+   * @param {number} [p=this.shortOrder] - order supported by both clean seed spans.
+   * @returns {boolean} whether a supported model was found.
+   */
+  fitShortAR(rail, p = this.shortOrder) {
+    const stride = p + 1, m = this.shortMatrix;
+    m.fill(0);
+    let rows = 0, energy = 0;
+    const threshold = Math.min(rail * (1 - 1e-5), this.shortFitThreshold);
+    for (let side = 0; side < 2; side++) {
+      const x = side ? this.post : this.shortContext, n = side ? this.postN : this.shortContextN;
+      for (let i = p; i < n; i++) {
+        let valid = true;
+        for (let j = 0; j <= p; j++) if (Math.abs(x[i - j]) >= threshold) valid = false;
+        if (!valid) continue;
+        // Forward and backward rows share one stationary local model. This
+        // avoids fitting an ill-supported second predictor to a tiny exit gap.
+        for (let dir = 0; dir < 2; dir++) {
+          const target = dir ? x[i - p] : x[i];
+          energy += target * target; rows++;
+          for (let j = 0; j < p; j++) {
+            const v = dir ? x[i - p + j + 1] : x[i - j - 1];
+            for (let k = 0; k < p; k++)
+              m[j * stride + k] += v * (dir ? x[i - p + k + 1] : x[i - k - 1]);
+            m[j * stride + p] += v * target;
+          }
+        }
+      }
+    }
+    if (rows < p * 8 || energy < 1e-10) return false;
+    let trace = 0;
+    for (let j = 0; j < p; j++) trace += m[j * stride + j];
+    const load = Math.max(1e-14, trace / p * 1e-14);
+    for (let j = 0; j < p; j++) m[j * stride + j] += load;
+    for (let j = 0; j < p; j++) {
+      let pivot = j;
+      for (let k = j + 1; k < p; k++) if (Math.abs(m[k * stride + j]) > Math.abs(m[pivot * stride + j])) pivot = k;
+      if (Math.abs(m[pivot * stride + j]) < load * 0.01) return false;
+      for (let k = 0; k <= p; k++) {
+        const v = m[j * stride + k]; m[j * stride + k] = m[pivot * stride + k]; m[pivot * stride + k] = v;
+      }
+      const d = m[j * stride + j];
+      for (let k = j; k <= p; k++) m[j * stride + k] /= d;
+      for (let k = 0; k < p; k++) if (k !== j) {
+        const v = m[k * stride + j];
+        for (let l = j; l <= p; l++) m[k * stride + l] -= v * m[j * stride + l];
+      }
+    }
+    for (let j = 0; j < p; j++) {
+      this.shortCoef[j] = m[j * stride + p];
+      if (!Number.isFinite(this.shortCoef[j]) || Math.abs(this.shortCoef[j]) > 128) return false;
+    }
+    let error = 0;
+    for (let side = 0; side < 2; side++) {
+      const x = side ? this.post : this.shortContext, n = side ? this.postN : this.shortContextN;
+      for (let i = p; i < n; i++) {
+        let valid = true;
+        for (let j = 0; j <= p; j++) if (Math.abs(x[i - j]) >= threshold) valid = false;
+        if (!valid) continue;
+        for (let dir = 0; dir < 2; dir++) {
+          let predicted = 0;
+          for (let j = 0; j < p; j++) predicted += this.shortCoef[j] * (dir ? x[i - p + j + 1] : x[i - j - 1]);
+          error += ((dir ? x[i - p] : x[i]) - predicted) ** 2;
+        }
+      }
+    }
+    return error / energy < 0.01;
+  }
+  /** Cubic Hermite bridge through real boundary samples with their measured
+   * one-sided tangents. Slopes are per sample, not normalized-time derivatives.
+   * @param {number} t - normalized position, 0..1.
+   * @param {number} a - left boundary value.
+   * @param {number} b - right boundary value.
+   * @param {number} da - left derivative.
+   * @param {number} db - right derivative.
+   * @param {number} span - boundary distance in samples.
+   * @returns {number} interpolated value.
+   */
+  hermiteBridge(t, a, b, da, db, span) {
+    const t2 = t * t, t3 = t2 * t;
+    return (2 * t3 - 3 * t2 + 1) * a + (t3 - 2 * t2 + t) * span * da
+      + (-2 * t3 + 3 * t2) * b + (t3 - t2) * span * db;
+  }
+  /** Convex AR/Hermite blend. The smoothstep edge weight and its first
+   * derivative vanish at both observed boundaries, preserving their tangents
+   * for any bounded smooth interpolation of the AR predictions.
+   * @param {number} t - normalized position.
+   * @param {number} a - observed left value.
+   * @param {number} b - observed right value.
+   * @param {number} da - observed left slope per sample.
+   * @param {number} db - observed right slope per sample.
+   * @param {number} span - gap length plus one.
+   * @param {number} predicted - bidirectional AR estimate at t.
+   * @returns {number} blended estimate before sample-wise convex projection.
+   */
+  shortBridge(t, a, b, da, db, span, predicted) {
+    const h = this.hermiteBridge(t, a, b, da, db, span);
+    const edge = Math.max(0, Math.min(1, Math.min(t, 1 - t) * span / 2));
+    const gate = edge * edge * (3 - 2 * edge);
+    return h + gate * (predicted - h);
+  }
+  /** Short-plateau AR extrapolation from both clean boundaries, blended into
+   * a Hermite bridge with a C1 edge gate, then projected onto the convex clip
+   * half-space at the damaged samples. All predictions are vetted before writes.
+   * Projection constrains samples, not an unknown continuous original waveform.
+   * @returns {boolean} whether this run was reconstructed from AR evidence.
+   */
+  repairShortAR() {
+    const L = this.source.length, originalStart = this.cbarStart, originalLen = this.cbarLen;
+    const sign = this.cbarSgn, rail = this.cbarPeak;
+    let start = originalStart, len = originalLen;
+    while (len && Math.abs(this.source[start % L]) < rail * (1 - 1e-5)) { start++; len--; }
+    while (len && Math.abs(this.source[(start + len - 1) % L]) < rail * (1 - 1e-5)) len--;
+    if (len < 2) return false;
+    const state = this.shortState, coef = this.shortCoef, end = start + len;
+    // Use the largest supported order, down to four poles. Closely spaced
+    // peaks may leave fewer than eight clean seeds but still support a useful
+    // lower-order model; never initialize a predictor with clipped samples.
+    let preClean = 0, postClean = 0;
+    const availablePost = this.postN + originalStart + originalLen - end;
+    for (let j = 0; j < this.shortOrder && j < start; j++) {
+      if (Math.abs(this.source[(start - 1 - j + L) % L]) >= rail * (1 - 1e-5)) break;
+      preClean++;
+    }
+    for (let j = 0; j < this.shortOrder && j < availablePost; j++) {
+      if (Math.abs(this.source[(end + j) % L]) >= rail * (1 - 1e-5)) break;
+      postClean++;
+    }
+    const p = Math.min(this.shortOrder, preClean, postClean);
+    if (p < 4 || !this.fitShortAR(rail, p)) return false;
+    for (let direction = 0; direction < 2; direction++) {
+      for (let j = 0; j < p; j++) state[j] = this.source[(direction ? end + j : start - 1 - j + L) % L];
+      const out = direction ? this.xb : this.xf;
+      for (let k = 0; k < len; k++) {
+        let v = 0;
+        for (let j = 0; j < p; j++) v += coef[j] * state[j];
+        if (!Number.isFinite(v) || Math.abs(v) > rail * 4) return false;
+        out[direction ? len - 1 - k : k] = v;
+        for (let j = p - 1; j > 0; j--) state[j] = state[j - 1];
+        state[0] = v;
+      }
+    }
+    let disagreement = 0, magnitude = 0, peak = rail;
+    const a = this.source[(start - 1 + L) % L], b = this.source[end % L];
+    const da = a - this.source[(start - 2 + L) % L], db = this.source[(end + 1) % L] - b;
+    for (let k = 0; k < len; k++) {
+      disagreement += (this.xf[k] - this.xb[k]) ** 2;
+      magnitude += this.xf[k] ** 2 + this.xb[k] ** 2;
+      const t = (k + 1) / (len + 1), w = 0.5 * (1 + Math.cos(Math.PI * t));
+      const predicted = w * this.xf[k] + (1 - w) * this.xb[k];
+      const v = sign * this.shortBridge(t, a, b, da, db, len + 1, predicted);
+      // Euclidean projection onto [rail + epsilon, 4 * rail] in signed space.
+      // A finite margin survives Float32 rounding; no == rail "repair".
+      this.arc[k] = Math.max(rail + Math.max(1e-7, rail * 1e-6), Math.min(rail * 4, v));
+      if (this.arc[k] > peak) peak = this.arc[k];
+    }
+    if (disagreement > magnitude * 0.25 || 20 * Math.log10(peak / rail) <= 1.2 - 0.7 * this.shortAmount) return false;
+    // Undo the fallback only after the AR candidate passed every safety gate.
+    for (let k = 0; k < originalLen; k++) this.ring[(originalStart + k) % L] = this.source[(originalStart + k) % L];
+    for (let k = 0; k < len; k++) this.ring[(start + k) % L] = sign * this.arc[k];
+    for (let k = -2; k < len + 2; k++) this.mark[(start + k + L) % L] = 1;
+    this.head = Math.max(this.head, peak / rail);
+    this.restoredPeak = Math.max(this.restoredPeak, peak);
+    return true;
   }
   /** Reconstruct the plateau [start, start+len-1] in the ring (short runs: Hermite/period model). */
   repairHermite(start, len, amount) {
@@ -1566,6 +1722,7 @@ class DeClipper {
     if (!(implied > 1.2 - 0.7 * amount)) return false;
     const applied = implied;
     const target = flat * Math.pow(10, applied / 20);
+    this.restoredPeak = Math.max(this.restoredPeak, target);
     /* What the guard has to let through for this repair to survive it. The
      * reconstruction is *above* the plateau by construction, and the plateau is
      * at the file's peak level — so without this the guard's knee (which starts
@@ -1625,6 +1782,7 @@ class DeClipper {
     const w = (2 * Math.PI / p) * len * 0.5;
     const implied = Math.min(6.0, 20 * Math.log10(1 / Math.cos(w < 1.4 ? w : 1.4)));
     const target = flat * Math.pow(10, implied / 20);
+    this.restoredPeak = Math.max(this.restoredPeak, target);
     const ratio = target / flat;
     if (ratio > this.head) this.head = ratio;    // same guard-lift as repairHermite, same reason
     const rise = target - flat;
@@ -1644,6 +1802,11 @@ class DeClipper {
    * measured clip rail before writing it into the ring.
    */
   finishCBAR() {
+    if (this.cbarShort) {
+      this.cbarPending = false; this.cbarShort = false;
+      this.repairShortAR();
+      return;
+    }
     const len = this.cbarLen, start = this.cbarStart, sgn = this.cbarSgn;
     const L = this.ring.length;
     const preN = this.preCtxN, postN = this.postN;
@@ -1700,6 +1863,7 @@ class DeClipper {
       if (r2 > maxRatio) maxRatio = r2;
     }
     if (maxRatio > this.head) this.head = maxRatio;
+    this.restoredPeak = Math.max(this.restoredPeak, flat * maxRatio);
     for (let k = -2; k < len + 2; k++) this.mark[(start + k + L) % L] = 1;
   }
   tick(x, amount, level) {
@@ -1709,6 +1873,9 @@ class DeClipper {
       this.cbarPending = false;
       return x;
     }
+    // dB → linear thresholds are double precision, decoded PCM is Float32.
+    // A nominal 0.35 rail can read 0.349999994 and must still be detected.
+    level *= 1 - 1e-6;
     // ── 1 · track the local period from the zero crossings ─────────────────
     if ((x > 0 && this.prev <= 0) || (x < 0 && this.prev >= 0)) {
       if (this.crossN) {
@@ -1741,49 +1908,12 @@ class DeClipper {
       }
     }
 
-    /* ── 3 · runs of flat samples at (or just under) the clip level ─────────
-     *
-     * A run *starts* at the detection level and lives on its own floor —
-     * 1.5 % under the *highest* magnitude reached so far this run, not a fixed
-     * percentage of where the run began and not a step-to-step comparison
-     * against the previous sample. Both of the retired checks broke on exactly
-     * the signal this stage exists to repair once plateaus were allowed to run
-     * long: a run-start-relative floor accumulates the input DC blocker's own
-     * slow decay (about 0.03 %/sample at 48 kHz for its 2 Hz corner) until it
-     * crosses 1.5 % at around 58 samples, cutting a real plateau into several
-     * short ones and losing the run-length evidence each cut throws away; and
-     * a step-to-step tolerance fails the other way on a *low-frequency* crest,
-     * clipped or not — a slow sine's entry and exit ramps change by only a few
-     * ten-thousandths per sample near the peak, well inside old tolerance, but
-     * by more than that same tolerance a few samples later, so the ramp itself
-     * kept re-arming as a fresh one-sample "run" instead of ever being allowed
-     * to end the long flat run it was the edge of (measured on a clipped 25 Hz
-     * tone: the true 675-sample plateau was reported as fifty one-sample
-     * repairs, each too short for either model to do anything with). Tracking
-     * the floor from the run's own peak survives both: it never accumulates
-     * (every sample is compared to the same reference, not a chain of them),
-     * and a slow ramp that stays within 1.5 % of the peak for a while is — by
-     * the same arithmetic that makes it hard to tell from clipping — close
-     * enough to the rail that folding it into the reconstructed span is the
-     * right call, not a bug. A real crest leaving the rail does not loiter
-     * there: the first sample after a clipped peak is 10–20 % down, which the
-     * same 1.5 % floor still catches immediately.
-     *
-     * One more case needed the same rethink: a low-frequency run's *own* exit
-     * ramp can cross from "still floored" to "not floored any more" while it
-     * is still above the coarse detection level `level` (the floor is 1.5 %
-     * under the peak; `level` is set further below it still, from the file's
-     * own measurement). The run has to close *there*, on the sample where its
-     * own continuity test fails — not drift on as a sequence of fresh
-     * one-sample arms just because each of them individually clears `level`
-     * too, which is what unconditionally re-arming on `ax ≥ level` used to do
-     * and which is the other half of the fifty-one-sample-repairs measurement
-     * above. So the run's own end is decided first, unconditionally, the
-     * instant continuity fails; only once it has been closed and handed to a
-     * repair does the *same* sample get to start a new one, if it still
-     * clears `level` on its own. */
+    /* ── 3 · contiguous same-sign candidates above the measured rail ──────
+     * The peak-relative floor prevents a coarse threshold from swallowing an
+     * exit ramp. The level test also remains mandatory: confirmed uncorrupted
+     * observations below theta must not be absorbed into a repair. */
     if (this.armed) {
-      if (x * this.lastSign > 0 && ax >= this.runPeak * DECLIP_RUN_FLOOR) {
+      if (x * this.lastSign > 0 && ax >= level && ax >= this.runPeak * DECLIP_RUN_FLOOR) {
         this.runLen++;
         if (ax > this.runPeak) this.runPeak = ax;
         if (this.runLen > this.maxRun) this.armed = false;     // too long to be a peak: bail out, unrepaired, as always
@@ -1798,7 +1928,18 @@ class DeClipper {
          * 3 dB one, dropping the ground-truth error from −29.0 to −15.7 dB. */
         this.after = x;
         if (this.runLen <= this.shortMax) {
-          this.repairHermite(this.runStart, this.runLen, amount);
+          this.repairHermite(this.runStart, this.runLen, amount); // evidence-preserving fallback
+          if (this.cbarPending) this.finishCBAR();
+          this.cbarPending = true; this.cbarShort = true;
+          this.cbarStart = this.runStart; this.cbarLen = this.runLen;
+          this.cbarSgn = this.lastSign; this.cbarPeak = this.runPeak;
+          this.shortFitThreshold = level; this.shortAmount = amount;
+          this.shortContextN = Math.min(512, this.runStart, this.source.length - this.runLen - 2);
+          for (let j = 0; j < this.shortContextN; j++) {
+            const index = this.runStart - this.shortContextN + j;
+            this.shortContext[j] = this.source[(index + this.source.length) % this.source.length];
+          }
+          this.postN = 0; this.post[this.postN++] = x;
         } else if (this.period() > 0) {
           // an extended but *periodic* plateau: the length-solves-for-the-peak
           // formula repairHermite already uses for a tonal crest is exact at
@@ -1818,7 +1959,7 @@ class DeClipper {
           if (this.cbarPending) this.finishCBAR();          // two long runs back to back
           this.preCtxN = this.histN;
           this.linearizeHist(this.preCtx);
-          this.cbarPending = true;
+          this.cbarPending = true; this.cbarShort = false;
           this.cbarStart = this.runStart;
           this.cbarLen = this.runLen;
           this.cbarSgn = this.lastSign;
@@ -1851,6 +1992,7 @@ class DeClipper {
     if (!this.armed) this.pushHist(x);
 
     this.ring[this.w] = x;
+    this.source[this.w] = x;
     const L = this.ring.length;
     const r = (this.w - this.look + L) % L;
     const out = this.ring[r];
@@ -3064,6 +3206,8 @@ class ChannelChain {
     this.neuralAir = new NeuralAirCurve(sr);
     this.sub = new SubSynth(sr);
     this.hiss = new DeHiss(sr, 3200);
+    this.wiener = new globalThis.RSDSP.SpectralWiener(sr);
+    this.spectralMode = true;
     this.deess = new DeEsser(sr);
     this.declip = new DeClipper(sr);
     this.click = new DeClicker(sr);
@@ -3084,7 +3228,7 @@ class ChannelChain {
     // for the first 2.7 s of the file, until the master crossfade reached
     // exactly 1 and the dry reference stopped being mixed in.
     const maxLook = Math.round(sr * 0.0015) + 4;
-    this.dryRing = new Float32Array(this.declip.look + this.click.look + maxLook + 16);
+    this.dryRing = new Float32Array(this.declip.look + this.click.look + this.wiener.look + maxLook + 16);
     this.dryW = 0;
     this.dry = 0;
     this.delay = 0;
@@ -3147,6 +3291,7 @@ class ChannelChain {
     for (const r of this.reso) r.reset();
     for (const e of this.exc) e.reset();
     this.air.reset(); this.neuralAir.reset(); this.sub.reset(); this.hiss.reset();
+    this.wiener.reset();
     this.declip.reset();
     this.click.reset();
     this.dryRing.fill(0); this.dryW = 0; this.dry = 0; this.delay = 0;
@@ -3243,6 +3388,10 @@ class ChannelChain {
     this.airRoom = p.airRoom;
     this.sub.setNoise(p.noiseLin);
     this.hiss.setNoise(p.hfNoiseLin);
+    const spectralMode = !(p.hissMax > 0.05);
+    if (spectralMode !== this.spectralMode) { this.wiener.reset(); this.hiss.reset(); }
+    this.spectralMode = spectralMode;
+    this.wiener.setNoise(p.noiseLin);
     this.hiss.setTilt(p.hissTilt, p.hissMax);
     // the de-hisser splits where *this* file's noise starts
     this.hiss.setXover(p.hissF);
@@ -3272,11 +3421,15 @@ class ChannelChain {
     const dly = dr[di2];
     this.dryW = dw + 1 === N ? 0 : dw + 1;
     this.dry = this.delay ? dly : x;
-    let y = this.dc.process(x);
+    let y = x;
+    // Detect/reconstruct the observed PCM before the linear DC blocker. Moving
+    // a constant rail through that filter first biases the detection threshold
+    // and teaches LPC a slowly decaying "plateau". With repair off, delay and
+    // this linear filter commute, so the neutral path stays unchanged.
     // ── the de-clipper runs first: a flat top is waveform damage, and every
     // later stage (de-hiss, de-click, synthesis) would rather work on a
     // waveform that has its peaks back than have to undo one
-    y = this.declip.tick(y, p.declip, this.declip.th);
+    y = this.dc.process(this.declip.tick(y, p.declip, this.declip.th));
     if (this.infraTouched) y = this.infra4.process(this.infra3.process(this.infra2.process(this.infra.process(y))));
 
     // 0 ── presence follower (drives every synthesis stage)
@@ -3331,7 +3484,10 @@ class ChannelChain {
     // synthesise harmonics out of hiss") — but that argument is about the
     // *synthesisers* further down, and those are still behind both stages.
     y = this.click.tick(y, p.declick, this.declip.marked, this.declip.th);
-    y = this.hiss.tick(y, p.dehiss);
+    // Positive measured HF excess (hissMax) retains the calibrated coloured-hiss repair.
+    // Broadband noise needs a whole-spectrum estimator, not an HF gate. No
+    // measured HF excess (including manual broadband mode) selects the STFT path.
+    y = this.spectralMode ? this.wiener.tick(y, p.dehiss) : this.hiss.tick(y, p.dehiss);
 
 
     // 4 ── harmonic exciter (level-proportional, noise- and presence-gated)
@@ -3853,8 +4009,8 @@ class RemasterProcessor extends AudioWorkletProcessor {
     this._ensureChannels(nCh);
     for (let c = 0; c < nCh; c++) this.chains[c].prepare(pr);
 
-    // Three stages hold their output back — the de-clipper while it is armed,
-    // the de-clicker for its half millisecond and the true-peak limiter for its
+    // Four stages can hold their output back — the de-clipper while armed,
+    // the de-clicker, the 1024-sample broadband STFT and the true-peak limiter for its
     // look-ahead — so the chain delays whatever follows by that much. This is the number any caller comparing output with
     // input has to line the two up by, or it measures the delay instead of the
     // processing; `H.renderEx` in the test harness hands it to the suites.
@@ -3863,6 +4019,7 @@ class RemasterProcessor extends AudioWorkletProcessor {
     const delay = bypassedNow ? 0
       : (pr.declip > 0.0001 && pr.declipLevel > -60 ? this.chains[0].declip.look : 0)
         + (pr.declick > 0.0001 ? this.chains[0].click.look : 0)
+        + (pr.dehiss > 0.0001 && !(pr.hissMax > 0.05) ? this.chains[0].wiener.look : 0)
         + this.tp.delay;
     for (let c = 0; c < nCh; c++) this.chains[c].delay = delay;
     this.latency = delay;
@@ -3906,6 +4063,18 @@ class RemasterProcessor extends AudioWorkletProcessor {
     for (let c = 0; c < nCh; c++) if (this.chains[c].declip.head > head) head = this.chains[c].declip.head;
     const knee = head > 1.0001 ? KNEE * head : KNEE;
     const krng = head > 1.0001 ? RANGE * head : RANGE;
+    // One stereo-linked attenuation, computed from the future reconstructed
+    // peak before it leaves the de-clipper's look-ahead. It is independent of
+    // the loudness-match toggle: manual export must not re-clip restored crests.
+    // Holding the maximum until reset prevents block-by-block normalization
+    // (pumping); the actual peak is used, not a clip-rail-relative gain ratio.
+    let predictedPeak = 0;
+    if (pr.declip > 0.0001) for (let c = 0; c < nCh; c++) {
+      const chain = this.chains[c];
+      predictedPeak = Math.max(predictedPeak, chain.declip.restoredPeak * (autoLevel ? chain.alGain : 1));
+    }
+    const reconstructionGain = predictedPeak > KNEE ? KNEE / predictedPeak : 1;
+
 
     for (let c = 0; c < nCh; c++) {
       const chain = this.chains[c];
@@ -3940,7 +4109,7 @@ class RemasterProcessor extends AudioWorkletProcessor {
           if (ax > dryPk) dryPk = ax;
           const aw0 = wet0 < 0 ? -wet0 : wet0;
           if (aw0 > wetPk) wetPk = aw0;
-          let wet = wet0 * g;
+          let wet = wet0 * g * reconstructionGain;
           // Soft-clip guard, last stage in the chain: a tanh knee above −0.55 dBFS
           // that saturates *below* full scale, so a 16-bit export can never pin a
           // sample at the ceiling. Transparent below the knee.
