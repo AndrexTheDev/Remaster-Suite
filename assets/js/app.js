@@ -203,6 +203,9 @@
    *   it is what the FAB's C position plays.
    * @property {Object} neuralModels - the probe's per-model report, kept so
    *   the UI can name the model a switch would use instead of guessing.
+   * @property {boolean} _aiDenoiseWanted - Magic Fix asked for the pre-DSP
+   *   denoiser before the capability probe had answered, so the answer arms it
+   *   instead of the request being lost.
    * @property {boolean} _neuralFallbackToastShown - one hardware-fallback toast
    *   per session, not one per failed call in a batch.
    * @property {boolean} _magicFixAutoProcess - Magic Fix set this before opening
@@ -244,6 +247,8 @@
     aiDenoise: false,
     // the probe's per-model report (see initNeural())
     neuralModels: null,
+    // Magic Fix pressed before the probe resolved: arm Stage 0 when it does
+    _aiDenoiseWanted: false,
     // set in initNeural(): nothing is installed but the model manager could
     // fetch the quantised weights, so the toggle offers to do exactly that
     // instead of sitting disabled.
@@ -408,6 +413,15 @@
     // air model must not make the denoise switch look usable
     State.neuralDenoise = !!(models.deepfilternet3 && models.deepfilternet3.available);
     if (!State.neuralDenoise) State.aiDenoise = false;
+    // a Magic Fix that landed while this probe was still in flight gets its
+    // answer now — the one-tap journey must not depend on the tap's timing
+    if (State.neuralDenoise && State._aiDenoiseWanted) {
+      State._aiDenoiseWanted = false;
+      if (!State.aiDenoise) {
+        State.aiDenoise = true;
+        if (State.cards.length) markAllStale();   // the export has changed shape
+      }
+    }
     // Nothing installed is no longer a dead end: the model manager can fetch
     // the quantised weights once and keep them in OPFS. `canLoadModels()`
     // answers whether that is even possible here (a source configured, a model
@@ -2490,7 +2504,7 @@
         // behind a switch that says it is not. Switching it on does not arm
         // Stage 0 by itself — the checkbox is the air reconstruction, and
         // Magic Fix is what decides a denoiser should run in front of the chain.
-        if (!State.neuralEnabled) State.aiDenoise = false;
+        if (!State.neuralEnabled) { State.aiDenoise = false; State._aiDenoiseWanted = false; }
         markAllStale();   // the final export differs, so any cached render is now stale
       });
     }
@@ -2571,6 +2585,7 @@
     // FAB plays, and the reason Magic Fix can promise a cleaner result than
     // the DSP stages alone. Without weights it stays off — the arming code
     // never claims a stage it cannot run.
+    State._aiDenoiseWanted = true;
     State.aiDenoise = !!(State.neuralDenoise && Stage0Available());
 
     const presetSel = $('#presetSelect');
