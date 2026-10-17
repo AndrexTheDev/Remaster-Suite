@@ -605,6 +605,290 @@
     return { key: k, cached, variants };
   }
 
+  /* ====================================================================== *
+   * Stage 0 — the pre-DSP neural pass
+   * ====================================================================== */
+
+  /**
+   * The rate the models were exported at, and therefore the rate Stage 0
+   * works in. Anything that arrives at another rate is resampled once on the
+   * way in; the graph resamples the result back on the way out, exactly as it
+   * already does for a source buffer whose rate differs from the export rate.
+   * @type {number}
+   */
+  const STAGE0_RATE = 48000;
+
+  /**
+   * A monotonic-enough clock for the stage's own duration report. `Date.now`
+   * rather than `performance.now` because the Node suites run this module in
+   * a bare context, and a stage that takes 40 ms does not need better.
+   * @returns {number} milliseconds since the epoch.
+   */
+  function nowMs() { return global.Date ? global.Date.now() : 0; }
+
+  /**
+   * Half-width of the windowed-sinc resampler's kernel, in input samples.
+   * Sixteen taps total: enough for a stopband deep enough that the neural
+   * stage never hears the resampler instead of the recording, cheap enough
+   * that a 40 s window does not spend seconds on it.
+   * @type {number}
+   */
+  const RESAMPLE_HALF_TAPS = 8;
+
+  /**
+   * Resample one channel with a windowed-sinc kernel, normalised per output
+   * sample so a constant signal stays constant and the file edges do not fade.
+   *
+   * This is deliberately not `OfflineAudioContext`-based: Stage 0 has to run
+   * before any graph exists (it produces the buffer the graph is given), and
+   * a second context per chunk would dwarf the work it saves.
+   * @param {Float32Array} input - samples at `from` Hz.
+   * @param {number} from - source rate in Hz.
+   * @param {number} to - target rate in Hz.
+   * @returns {Float32Array} samples at `to` Hz (the input itself when the
+   *   rates already agree).
+   */
+  function resampleTo(input, from, to) {
+    if (!input || !input.length) return new Float32Array(0);
+    if (from === to) return input;
+    const ratio = to / from;
+    const outLen = Math.max(1, Math.round(input.length * ratio));
+    const out = new Float32Array(outLen);
+    const cutoff = 0.5 * Math.min(1, ratio) * 0.96;    // cycles per input sample
+    const half = RESAMPLE_HALF_TAPS;
+    for (let i = 0; i < outLen; i++) {
+      const x = i / ratio;
+      const i0 = Math.floor(x);
+      let sum = 0;
+      let wsum = 0;
+      for (let k = -half + 1; k <= half; k++) {
+        const idx = i0 + k;
+        if (idx < 0 || idx >= input.length) continue;
+        const t = x - idx;
+        const u = 2 * cutoff * t;
+        const sinc = u === 0 ? 1 : Math.sin(Math.PI * u) / (Math.PI * u);
+        const w = 0.5 * (1 + Math.cos(Math.PI * t / half));   // Hann across the kernel
+        const weight = sinc * w;
+        sum += input[idx] * weight;
+        wsum += weight;
+      }
+      out[i] = wsum ? sum / wsum : 0;
+    }
+    return out;
+  }
+
+  /**
+   * Mix the stems a separation produced. The default list is every stem the
+   * model published, which reconstructs the input by construction — a caller
+   * that drops one (say `vocals`) is asking for the rest of the mix, and that
+   * is exactly what a pre-DSP stage can offer without a second model.
+   * @param {Object<string, Float32Array>} stems - the model's output.
+   * @param {string[]} [wanted] - stem names to sum, in any order.
+   * @returns {?Float32Array} the mix, or `null` when the request names no stem
+   *   the model produced.
+   */
+  function mixStems(stems, wanted) {
+    if (!stems || typeof stems !== 'object') return null;
+    const names = (wanted && wanted.length ? wanted : Object.keys(stems)).filter((n) => stems[n] && stems[n].length);
+    if (!names.length) return null;
+    const len = stems[names[0]].length;
+    const out = new Float32Array(len);
+    for (const name of names) {
+      const src = stems[name];
+      const n = Math.min(len, src.length);
+      for (let i = 0; i < n; i++) out[i] += src[i];
+    }
+    return out;
+  }
+
+  /**
+   * One pre-DSP neural run: take a channel array, run the model over it in
+   * overlapping chunks, and hand the result to the render pipeline through a
+   * {@link RSRingBuffer} ring.
+   *
+   * Why a ring at all: a whole-signal call would need the model's input and
+   * output resident at once, on top of the render's own buffers. Chunking
+   * bounds that, and the ring is what makes the chunk hand-off exact — the
+   * producer publishes a block, the consumer reads it, and both sides' counts
+   * are visible in `stats` afterwards. The consumer here never pads: if the
+   * ring is dry when it expects a block, the stage fails and the caller falls
+   * back to the pure DSP route, which is complete audio — a real dropout in
+   * the file is worse than an honest "the model did not run".
+   *
+   * Both halves run on the calling thread today, because the model itself
+   * already runs in its own worker and returns through the existing message
+   * channel. The ring is still the right shape: the block format is the
+   * shared-memory one, so a worker that can write its own output into the
+   * buffer later needs no change here, and until then the counters are what
+   * make a lost, duplicated or torn block impossible to miss.
+   *
+   * Every chunk is an independent call with `contextSeconds` of audio on each
+   * side, so the model's own STFT has real context at the seam; consecutive
+   * chunks are joined with a linear (gain-preserving) crossfade, the same law
+   * `renderChunked()` uses for its seams and for the same reason.
+   *
+   * @param {Float32Array[]} channels - the source, one array per channel.
+   * @param {Object} [opts] - the stage's options.
+   * @param {number} [opts.sampleRate=48000] - the source's rate in Hz.
+   * @param {('denoise'|'separate')} [opts.mode='denoise'] - which model.
+   * @param {number} [opts.chunkSeconds=1] - nominal chunk length.
+   * @param {number} [opts.contextSeconds=0.25] - audio on each side of a
+   *   chunk's kept region, so the model sees past the seam.
+   * @param {number} [opts.crossfadeSeconds=0.25] - seam crossfade length.
+   * @param {string[]} [opts.stems] - for `'separate'`: the stems to sum.
+   * @param {function(number): void} [opts.onProgress] - 0…1 per finished chunk.
+   * @param {function(Float32Array): Promise<NeuralResult>} [opts.process] -
+   *   the per-chunk processor; defaults to `denoise()` / `separate()`. A host
+   *   that runs its own model runtime supplies this.
+   * @returns {Promise<{applied: boolean, channels?: Float32Array[],
+   *   rate?: number, reason?: string, stats: Object}>} the processed audio at
+   *   {@link STAGE0_RATE}, or a fallback result — never rejects.
+   */
+  async function denoiseChannels(channels, opts) {
+    const o = opts || {};
+    const t0 = nowMs();
+    const mode = o.mode === 'separate' ? 'separate' : 'denoise';
+    const emptyStats = { chunks: 0, frames: 0, underflows: 0, overflows: 0, ring: false, ms: 0, mode };
+    if (!Array.isArray(channels) || !channels.length || !channels[0] || !channels[0].length) {
+      return { applied: false, reason: 'empty-signal', stats: emptyStats };
+    }
+    const sourceRate = Math.max(8000, Math.min(192000, Math.round(o.sampleRate || STAGE0_RATE)));
+    const nCh = Math.min(2, channels.length);
+    const rate = STAGE0_RATE;
+
+    // 1 · bring every channel to the model's own rate
+    const src = [];
+    for (let c = 0; c < nCh; c++) src.push(resampleTo(channels[c], sourceRate, rate));
+    const len = src[0].length;
+    if (len < 2048) return { applied: false, reason: 'signal-too-short', stats: emptyStats };
+
+    // 2 · the chunk plan: kept region, plus context for the model on both sides
+    const chunkFrames = Math.max(2048, Math.round((o.chunkSeconds || 1) * rate));
+    const contextFrames = Math.max(0, Math.round((o.contextSeconds === undefined ? 0.25 : o.contextSeconds) * rate));
+    const xfadeFrames = Math.max(0, Math.min(chunkFrames, Math.round((o.crossfadeSeconds === undefined ? 0.25 : o.crossfadeSeconds) * rate)));
+    const plan = [];
+    for (let start = 0; start < len; start += chunkFrames) {
+      const more = start + chunkFrames < len;
+      const end = Math.min(len, start + chunkFrames + (more ? xfadeFrames : 0));
+      plan.push({
+        start,
+        end,
+        inStart: Math.max(0, start - contextFrames),
+        inEnd: Math.min(len, end + contextFrames),
+      });
+    }
+
+    // 3 · the ring: two chunks' worth, so a producer may publish the next block
+    //     while the consumer is still assembling the previous one
+    const RB = global.RSRingBuffer;
+    if (!RB || typeof RB.create !== 'function') return { applied: false, reason: 'ring-unavailable', stats: emptyStats };
+    const ring = RB.create({ capacityFrames: 2 * (chunkFrames + xfadeFrames) + 64, channels: nCh });
+
+    // 4 · per-chunk processing. The default processor is the public method, so
+    //     a host (or a test) that replaces RSNeural.denoise is what runs.
+    const run = typeof o.process === 'function'
+      ? o.process
+      : (mode === 'separate' ? (sig) => API.separate(sig) : (sig) => API.denoise(sig));
+    /**
+     * Process one planned chunk into a block of `frames` per channel.
+     * @param {{start:number,end:number,inStart:number,inEnd:number}} p - the plan.
+     * @returns {Promise<{block?: Float32Array[], error?: string}>} the block,
+     *   or the reason the stage must be abandoned.
+     */
+    const produce = async (p) => {
+      const block = [];
+      const frames = p.end - p.start;
+      const offset = p.start - p.inStart;
+      for (let c = 0; c < nCh; c++) {
+        const input = src[c].subarray(p.inStart, p.inEnd);
+        let res;
+        try { res = await run(input); } catch (err) { return { error: 'stage-error: ' + ((err && err.message) || err) }; }
+        if (!res || !res.applied) return { error: (res && res.reason) || 'stage-fallback' };
+        let out = null;
+        if (mode === 'separate') out = mixStems(res.stems, o.stems);
+        else out = res.output && res.output.length ? res.output : null;
+        if (!out || out.length < offset + frames) return { error: 'unexpected-output-shape' };
+        block.push(out.slice(offset, offset + frames));
+      }
+      if (!ring.write(block, frames)) return { error: 'ring-overflow' };
+      return { block, frames };
+    };
+
+    // 5 · the consumer: pull each block back out, crossfade the seam, assemble
+    const outChannels = [];
+    for (let c = 0; c < nCh; c++) outChannels.push(new Float32Array(len));
+    const take = [];
+    const maxBlock = chunkFrames + xfadeFrames;
+    for (let c = 0; c < nCh; c++) take.push(new Float32Array(maxBlock));
+    let tail = null;              // the previous chunk's raw last `xfadeFrames`
+    let framesDone = 0;
+    let chunksDone = 0;
+    for (let k = 0; k < plan.length; k++) {
+      const p = plan[k];
+      const got = await produce(p);
+      if (got.error) {
+        ring.close();
+        return {
+          applied: false,
+          reason: got.error,
+          stats: Object.assign(ring.stats(), { chunks: chunksDone, frames: framesDone, ms: nowMs() - t0, mode }),
+        };
+      }
+      const n = ring.read(take, got.frames);
+      if (n !== got.frames) {
+        ring.close();
+        return {
+          applied: false,
+          reason: 'ring-underflow',
+          stats: Object.assign(ring.stats(), { chunks: chunksDone, frames: framesDone, ms: nowMs() - t0, mode }),
+        };
+      }
+      // the seam is only as long as the two chunks really overlap: the last
+      // chunk can be a handful of samples, and a fixed-length crossfade would
+      // then read stale buffer past the end of the material
+      const xf = tail ? Math.min(n, tail[0].length) : 0;
+      for (let c = 0; c < nCh; c++) {
+        const dst = outChannels[c];
+        const block = take[c];
+        if (xf > 0) {
+          // linear (weights sum to 1): the two sides are two denoised takes of
+          // the same audio, so an equal-power law would add level at the seam
+          for (let i = 0; i < xf; i++) {
+            const t = (i + 0.5) / xf;
+            dst[p.start + i] = block[i] * t + tail[c][i] * (1 - t);
+          }
+          dst.set(block.subarray(xf, n), p.start + xf);
+        } else {
+          dst.set(block.subarray(0, n), p.start);
+        }
+      }
+      // Keep this chunk's raw tail for the next seam — exactly the samples
+      // the next chunk's head will cover, no more.
+      const next = plan[k + 1];
+      const overlap = next ? Math.max(0, Math.min(xfadeFrames, p.end - next.start, n)) : 0;
+      if (overlap > 0) {
+        tail = [];
+        for (let c = 0; c < nCh; c++) tail.push(take[c].slice(n - overlap, n));
+      } else {
+        tail = null;
+      }
+      framesDone += n;
+      chunksDone++;
+      if (typeof o.onProgress === 'function') {
+        try { o.onProgress((k + 1) / plan.length); } catch (e) { /* a progress sink must not fail a render */ }
+      }
+    }
+    ring.close();
+    return {
+      applied: true,
+      channels: outChannels,
+      rate,
+      stats: Object.assign(ring.stats(), {
+        chunks: chunksDone, frames: framesDone, ms: nowMs() - t0, mode, sourceRate,
+      }),
+    };
+  }
+
   /**
    * The public surface, assigned to `global.RSNeural` below. Every method
    * resolves a {@link NeuralResult}; none of them ever rejects.
@@ -615,6 +899,7 @@
    * @property {function(Float32Array): Promise<NeuralResult>} denoise
    * @property {function(Float32Array): Promise<NeuralResult>} separate
    * @property {function(Float32Array, number[]=): Promise<NeuralResult>} superres
+   * @property {function(Float32Array[], Object=): Promise<Object>} denoiseChannels
    * @property {function(string=, Object=): Promise<ModelStatus>} ensureModel
    * @property {function(string=): Promise<Object>} modelStatus
    * @property {function(function(ModelProgress): void): function(): void} onModelProgress
@@ -710,6 +995,32 @@
       const copy = Float32Array.from(signal);
       return call('superres', { signal: copy, bandsHz: bandsHz || [] }, [copy.buffer]);
     },
+
+    /**
+     * The pre-DSP neural pass (Stage 0) — see {@link denoiseChannels}. Chunks
+     * the signal, runs the model over each chunk, carries the result through a
+     * {@link RSRingBuffer} ring and returns it at 48 kHz. Never rejects; a
+     * `{applied:false, reason}` result means the caller should render the
+     * unprocessed source, which is what the engine does.
+     * @param {Float32Array[]} channels - the source channels.
+     * @param {Object} [opts] - `mode`, `sampleRate`, chunking, `onProgress`
+     *   and the optional `process` override.
+     * @returns {Promise<Object>} the stage result, with `stats`.
+     */
+    denoiseChannels,
+
+    /** The rate Stage 0 works in (`48000`), for callers that need to plan. */
+    stage0Rate: STAGE0_RATE,
+
+    /**
+     * The windowed-sinc resampler Stage 0 uses on the way in — exported so a
+     * caller can prepare material at the model's rate itself.
+     * @param {Float32Array} input - samples at `from` Hz.
+     * @param {number} from - source rate in Hz.
+     * @param {number} to - target rate in Hz.
+     * @returns {Float32Array} samples at `to` Hz.
+     */
+    resampleTo,
 
     /**
      * Make sure a model's weights are on disk — see {@link RSNeural.ensureModel}.

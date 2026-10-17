@@ -6,6 +6,65 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Round 34 — Stage 0: the denoiser moves in front of the chain
+
+**Until this round the neural models were a promise the render pipeline never kept: `denoise()` and
+`separate()` existed, resolved honest results, and then nothing called them.** The pipeline's only
+neural stage was the optional air-curve coupling at stage 7 — additive shaping of a band the DSP had
+already synthesised. This round puts DeepFilterNet3 *in front of stage 1*, where denoising belongs,
+and gives the A/B/C button a C that is a real third render instead of a relabelled B.
+
+**1 — `assets/js/ring-buffer.js` (`RSRingBuffer`), the exchange.** A lock-free single-producer /
+single-consumer ring on a `SharedArrayBuffer`: a 128-byte control block (magic `0x52534231`, version,
+capacity, channels, write/read cursors, pushed/popped, high-water, overflow, underrun, closed, the
+`Atomics.wait` word) followed by one float32 plane per channel. All counters go through `Atomics`, so
+the numbers `stats()` reports are the ones both sides actually saw. Writes are all-or-nothing: a block
+that does not fit is refused and counted, never truncated — a torn block is audible, a refused one is
+not. Reads never pad: a short read *is* the underrun signal, and the stage treats it as a failed run
+rather than shipping silence. Without cross-origin isolation (no `SharedArrayBuffer`) the same object
+falls back to a plain `ArrayBuffer`; `writeBlocking()` then returns immediately instead of parking a
+thread nobody will wake. `from()` rebuilds a consumer handle from the buffer and refuses a bad magic or
+an unknown version instead of reading rubbish.
+
+**2 — `RSNeural.denoiseChannels()`, the stage.** The file is chunked (1 s blocks) with a quarter second
+of context on both sides of every seam, each block is one inference call (or a stem separation whose
+outputs are summed — `stems: ['other']` drops the vocal, which is a different product decision than
+"denoise"), and the blocks are published through the ring and read back with a linear, gain-preserving
+crossfade — the same law the chunked render already uses at its seams and for the same reason. A
+44.1 kHz source is brought to the models' 48 kHz by a windowed-sinc resampler (normalised per sample,
+so level and file edges survive), and the result reports its rate. Every failure mode returns
+`{applied: false, reason}`: `signal-too-short`, `empty-signal`, `ring-unavailable`, `weights-not-found`,
+`unexpected-output-shape`, `stage-error`, `ring-underflow`, `ring-overflow`. The caller renders the
+source instead; nothing is ever padded, spliced or half-processed.
+
+**3 — the engine takes it as an option, not as a mode.** `Engine.render({stage0})` runs the stage
+before the graph and lets the existing rate conversion hand its 48 kHz output to a context at any rate;
+`renderChunked({stage0})` runs it per span, so a long file never holds a second full-length copy, and a
+stage that fails on the *first* span disables it for the whole file rather than denoising the middle
+and leaving the ends dry. Both results carry `stage0` (`{applied, chunks, spans, underflows, overflows,
+ms, reason}`), and the whole-file path splits its progress bar 35 / 65 so the slow half is visible.
+Measured in `tests/stage0.test.js`: a stand-in model that removes a known noise floor takes the
+comparison from 17.3 dB of SNR to clean, with **zero** ring underruns — while the same option pointed
+at a missing model leaves the render **bit-identical** to the pure-DSP path.
+
+**4 — Magic Fix throws the switch, and the DSP steps back.** With DeepFilterNet3 really installed,
+`applyMagicFix()` arms Stage 0 (`State.aiDenoise`) and scales the de-hisser to 0.35 of its depth —
+the floor the expander was written to find is gone, and left at full depth it would chase the
+programme's own top end instead. Without weights nothing changes: the switch is never claimed when the
+stage cannot run. `P.signature()` includes the neural routing, so a cached render made with Stage 0 on
+is invalidated when the switch moves. The FAB's C position renders through the same `stage0` option
+and appears only when that render actually applied the stage — C is the file you would save, not an
+approximation of it. The beta's Magic Fix and FAB rows still pass unchanged on a host with no weights,
+which is the honest no-model path.
+
+**5 — the suite.** `tests/stage0.test.js` (86 checks) covers the ring under back-pressure (wrap-around,
+refused-not-truncated writes, the overflow/underrun counters, `from()` refusing bad magic and version,
+`reset()`, the non-shared fallback and its immediate `writeBlocking`), the chunk plan's exactness
+(identity and uniform gain through every seam, awkward lengths), 44.1 k → 48 k level preservation, stem
+mixing, the whole fallback contract, and the engine wiring on both render paths. `validate-docs` needs
+the new module in the inventory; `index.html` and the two script-order lists in `web.test.js` /
+`audit.test.js` gain `ring-buffer.js`, so the load-order assertions stay exact. **1099 → 1186 checks.**
+
 ### Round 33 — the model downloads itself now: a configurable channel, a progress bar, an OPFS cache
 
 **Until this round the neural stage was real code with no weights: every door led to

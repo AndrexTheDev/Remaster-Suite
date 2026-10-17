@@ -81,6 +81,12 @@
    *   *before* the graph starts. `bandsHz` selects the bands (default: the six
    *   from 8 kHz up) and `amount` scales the curve (default 1). Any failure
    *   leaves the curve out and the render identical to the pure-DSP path.
+   * @property {Object} [stage0] - optional **pre-DSP** neural stage: when
+   *   present and `RSNeural.denoiseChannels()` is loaded, the source is run
+   *   through the worker (denoise, or stem separation) *before* a single DSP
+   *   stage sees it — see {@link RSEngine.render}. `mode` picks the model
+   *   (`'denoise'` by default), `stems` narrows a separation. Any failure
+   *   leaves the render identical to the pure-DSP path.
    */
 
   /**
@@ -145,6 +151,55 @@
    * @property {number} chunks - how many chunks the file was rendered in; the
    *   number the scale rows report.
    */
+
+  /**
+   * How much of a render's progress bar the pre-DSP neural stage owns when it
+   * runs. Stage 0 is one inference per chunk per channel and is the slowest
+   * thing in the whole pipeline, so it gets the first third rather than a
+   * rounding error at the start of the bar.
+   * @type {number}
+   */
+  const STAGE0_SHARE = 0.35;
+
+  /**
+   * Run the optional pre-DSP stage over a set of channels.
+   *
+   * This is the seam `render()` and `renderChunked()` share: the stage either
+   * comes back with audio at its own rate (48 kHz — the models' native one),
+   * or with a reason and no audio. In the second case the caller renders the
+   * source untouched; an unavailable model must never make a render fail or
+   * sound like a half-processed splice.
+   * @param {Float32Array[]} channels - source channels.
+   * @param {number} rate - their sample rate in Hz.
+   * @param {?Object} stage0 - the caller's `opts.stage0`.
+   * @param {function(number): void} [onProgress] - share of *this* stage.
+   * @returns {Promise<{applied: boolean, channels: Float32Array[], rate: number,
+   *   info: Object}>} `applied:false` carries the untouched source.
+   */
+  async function runStage0(channels, rate, stage0, onProgress) {
+    const untouched = { applied: false, channels, rate, info: { applied: false, reason: 'not-requested' } };
+    if (!stage0) return untouched;
+    const N = global.RSNeural;
+    if (!N || typeof N.denoiseChannels !== 'function') return Object.assign({}, untouched, { info: { applied: false, reason: 'unavailable' } });
+    let res;
+    try {
+      res = await N.denoiseChannels(channels, Object.assign({}, stage0, {
+        sampleRate: rate,
+        onProgress: typeof onProgress === 'function' ? onProgress : undefined,
+      }));
+    } catch (err) {
+      return Object.assign({}, untouched, { info: { applied: false, reason: 'stage-error: ' + ((err && err.message) || err) } });
+    }
+    if (!res || !res.applied || !res.channels || !res.channels.length) {
+      return Object.assign({}, untouched, { info: { applied: false, reason: (res && res.reason) || 'stage-fallback', stats: res && res.stats } });
+    }
+    return {
+      applied: true,
+      channels: res.channels,
+      rate: res.rate || rate,
+      info: Object.assign({ applied: true, rate: res.rate || rate }, res.stats || {}),
+    };
+  }
 
   /**
    * The engine: one live monitor and, per offline call, its own render graph.
@@ -568,18 +623,31 @@
       const o = opts || {};
       // accept either an AudioBuffer or an array of Float32Array channels
       const isBuffer = !!(source && source.getChannelData && source.sampleRate);
-      const srcChans = isBuffer
+      let srcChans = isBuffer
         ? (() => { const a = []; for (let c = 0; c < source.numberOfChannels; c++) a.push(source.getChannelData(c)); return a; })()
         : source;
-      const inRate = isBuffer ? source.sampleRate : Math.max(8000, Math.min(192000, Math.round(sampleRate || 48000)));
+      let inRate = isBuffer ? source.sampleRate : Math.max(8000, Math.min(192000, Math.round(sampleRate || 48000)));
       const nCh = Math.min(2, Math.max(1, srcChans.length));
-      const srcLen = srcChans[0].length;
       const sr = Math.max(8000, Math.min(192000, Math.round(sampleRate || inRate)));
+      const Ctor = global.OfflineAudioContext || global.webkitOfflineAudioContext;
+      if (!Ctor) throw new Error('OfflineAudioContext unavailable');
+
+      // Stage 0 — the pre-DSP neural pass. It runs *before* the graph exists,
+      // on the dry source, and hands back audio at the model's own rate; the
+      // graph below resamples that to `sr` exactly as it would resample any
+      // source buffer whose rate differs. `onProgress` is split between the
+      // two halves so the card's bar keeps moving during the slow half.
+      const stage0 = await runStage0(srcChans, inRate, o.stage0, o.onProgress
+        ? (p) => { try { o.onProgress(Math.max(0, Math.min(1, p)) * STAGE0_SHARE); } catch (e) { /* report only */ } }
+        : undefined);
+      srcChans = stage0.channels;
+      inRate = stage0.rate;
+      const srcLen = srcChans[0].length;
       // output length follows the target rate: playing a buffer whose rate differs
       // from the context resamples it, which is exactly what we want here
       const len = Math.max(1, Math.round((srcLen * sr) / inRate));
-      const Ctor = global.OfflineAudioContext || global.webkitOfflineAudioContext;
-      if (!Ctor) throw new Error('OfflineAudioContext unavailable');
+      /** Map the graph's own 0…1 onto the bar's remaining share. @param {number} p - graph progress. @returns {number} bar progress. */
+      const graphProgress = (p) => (stage0.applied ? STAGE0_SHARE + p * (1 - STAGE0_SHARE) : p);
 
       // Optional neural Stage-7 coupling (see NeuralAirCurve in the worklet,
       // and neural-worker.js's superresCurve): runs once, up front, on a mono
@@ -666,7 +734,7 @@
         Promise.resolve()
           .then(() => ctx.suspend(when))
           .then(() => {
-            if (o.onProgress) o.onProgress(when / duration);
+            if (o.onProgress) o.onProgress(graphProgress(when / duration));
             schedule();
             ctx.resume();
           })
@@ -678,7 +746,7 @@
       const out = [];
       for (let c = 0; c < rendered.numberOfChannels; c++) out.push(rendered.getChannelData(c));
       if (o.onProgress) o.onProgress(1);
-      return { channels: out, sampleRate: rendered.sampleRate, buffer: rendered };
+      return { channels: out, sampleRate: rendered.sampleRate, buffer: rendered, stage0: stage0.info };
     }
 
     /**
@@ -784,6 +852,13 @@
       let pendingTail = null; // Float32Array[nCh] | null — the previous chunk's rendered lookahead
       let chunkIndex = 0;
       const INPUT_MARGIN = 256; // input-domain samples of slack so rounding never starves the resampler
+      // Stage 0 runs per span (its own chunk plan inside the span), so a long
+      // file never has to hold a second full-length copy of itself. The spans
+      // are independent as far as memory goes but not as far as the file is
+      // concerned: once any span fails, the stage is off for the rest, so the
+      // result is either denoised all the way through or consistently dry.
+      let stage0On = !!o.stage0;
+      const stage0Info = { applied: false, spans: 0, failed: 0, chunks: 0, underflows: 0, overflows: 0, ms: 0 };
 
       while (pos < len) {
         const nominalStart = pos;
@@ -804,7 +879,25 @@
         const spanSrcChans = [];
         for (let c = 0; c < nCh; c++) spanSrcChans.push(srcChans[c].subarray(inStart, inEnd));
 
-        const spanOut = await this._renderSpan(spanSrcChans, inRate, sr, nCh, effectiveParams, spanOutLen, neuralCurve);
+        const span = await this._renderSpan(spanSrcChans, inRate, sr, nCh, effectiveParams, spanOutLen, neuralCurve, stage0On ? o.stage0 : null);
+        const spanOut = span.channels;
+        if (stage0On && span.stage0) {
+          stage0Info.spans++;
+          if (span.stage0.applied) {
+            stage0Info.applied = true;
+            stage0Info.chunks += span.stage0.chunks || 0;
+            stage0Info.underflows += span.stage0.underflows || 0;
+            stage0Info.overflows += span.stage0.overflows || 0;
+            stage0Info.ms += span.stage0.ms || 0;
+          } else {
+            stage0Info.failed++;
+            // One failed span disables the stage for the rest of the file: a
+            // render that is denoised at the start and dry from the middle on
+            // changes character where the failure happened, which is a worse
+            // artefact than a consistently dry file with an honest report.
+            stage0On = false;
+          }
+        }
 
         const keepStart = nominalStart - renderStart;
         const keepEnd = keepStart + (nominalEnd - nominalStart);
@@ -856,7 +949,7 @@
         await new Promise((resolve) => global.setTimeout(resolve, 0));
       }
 
-      const result = { sampleRate: sr, samples: len, chunks: chunkIndex };
+      const result = { sampleRate: sr, samples: len, chunks: chunkIndex, stage0: stage0Info };
       if (accumulate) result.channels = outAccum;
       return result;
     }
@@ -878,10 +971,24 @@
      * @param {{bandsHz: number[], gainsDb: (number[]|Float64Array)}|null} neuralCurve
      *   - the optional pre-computed Stage-7 curve, posted to the worklet before
      *   the graph starts.
-     * @returns {Promise<Float32Array[]>} the rendered span, one array per
-     *   channel.
+     * @param {?Object} [stage0] - the pre-DSP neural stage for this span, or
+     *   `null` for the pure DSP route.
+     * @returns {Promise<{channels: Float32Array[], stage0: ?Object}>} the
+     *   rendered span, one array per channel, and what Stage 0 did to it.
      */
-    async _renderSpan(spanSrcChans, inRate, sr, nCh, params, spanOutLen, neuralCurve) {
+    async _renderSpan(spanSrcChans, inRate, sr, nCh, params, spanOutLen, neuralCurve, stage0) {
+      // Stage 0 before the graph, on this span only — the span already carries
+      // a preroll and a crossfade tail, so the neural stage and the DSP stage
+      // see the same seams and the same context around them.
+      let srcChans = spanSrcChans;
+      let srcRate = inRate;
+      let stageInfo = null;
+      if (stage0) {
+        const pre = await runStage0(srcChans, srcRate, stage0);
+        srcChans = pre.channels;
+        srcRate = pre.rate;
+        stageInfo = pre.info;
+      }
       const Ctor = global.OfflineAudioContext || global.webkitOfflineAudioContext;
       const ctx = new Ctor({ numberOfChannels: nCh, length: spanOutLen, sampleRate: sr });
       await this._loadWorklet(ctx);
@@ -894,9 +1001,9 @@
       });
       if (neuralCurve) node.port.postMessage({ type: 'neuralAirCurve', bandsHz: neuralCurve.bandsHz, gainsDb: neuralCurve.gainsDb });
 
-      const spanLen = Math.max(1, spanSrcChans[0].length);
-      const buf = ctx.createBuffer(nCh, spanLen, inRate);
-      for (let c = 0; c < nCh; c++) buf.copyToChannel(spanSrcChans[c], c, 0);
+      const spanLen = Math.max(1, srcChans[0].length);
+      const buf = ctx.createBuffer(nCh, spanLen, srcRate);
+      for (let c = 0; c < nCh; c++) buf.copyToChannel(srcChans[c], c, 0);
       const src = ctx.createBufferSource();
       src.buffer = buf;
       src.connect(node);
@@ -914,7 +1021,7 @@
       const rendered = await ctx.startRendering();
       const out = [];
       for (let c = 0; c < rendered.numberOfChannels; c++) out.push(rendered.getChannelData(c));
-      return out;
+      return { channels: out, stage0: stageInfo };
     }
   }
 

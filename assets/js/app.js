@@ -125,6 +125,11 @@
    *   short of 100 % so it never feels like a blunt instrument.
    * @property {number} magicNeuralAmount - 0.65: a deliberately light trust
    *   amount for the optional neural coupling, applied only by Magic Fix.
+   * @property {number} aiDenoiseDehissScale - 0.35: how much of the DSP
+   *   de-hisser's depth is left when the neural stage has already removed the
+   *   noise floor. The expander would otherwise work on what is left of a
+   *   floor that is no longer there, and pull the programme's own top end down
+   *   with it — the neural stage is the repair, the DSP stage is the safety net.
    */
 
   /** @type {AppConfig} */
@@ -156,6 +161,7 @@
     // optional neural coupling (see State.neuralAmount below).
     magicPower: 0.85,
     magicNeuralAmount: 0.65,
+    aiDenoiseDehissScale: 0.35,
   };
 
   /* -------------------------------------------------------------------- state */
@@ -190,6 +196,13 @@
    * @property {boolean} neuralAvailable - a model really has weights installed
    *   *and* a session could be built — never true just because the feature
    *   exists in this build.
+   * @property {boolean} neuralDenoise - DeepFilterNet3 specifically is
+   *   available, i.e. the pre-DSP denoiser (Stage 0) can really run.
+   * @property {boolean} aiDenoise - the pre-DSP neural denoiser is switched on
+   *   for renders. Set by Magic Fix (and only when `neuralDenoise` is true);
+   *   it is what the FAB's C position plays.
+   * @property {Object} neuralModels - the probe's per-model report, kept so
+   *   the UI can name the model a switch would use instead of guessing.
    * @property {boolean} _neuralFallbackToastShown - one hardware-fallback toast
    *   per session, not one per failed call in a batch.
    * @property {boolean} _magicFixAutoProcess - Magic Fix set this before opening
@@ -224,6 +237,13 @@
     // has weights installed *and* a WebGPU or WASM session could be built —
     // never true just because the feature exists in this build.
     neuralAvailable: false,
+    // DeepFilterNet3 specifically — the model Stage 0 runs. Separate from
+    // `neuralAvailable`, which is true when *any* model loaded.
+    neuralDenoise: false,
+    // the pre-DSP denoiser, switched on by Magic Fix when a model is there
+    aiDenoise: false,
+    // the probe's per-model report (see initNeural())
+    neuralModels: null,
     // set in initNeural(): nothing is installed but the model manager could
     // fetch the quantised weights, so the toggle offers to do exactly that
     // instead of sitting disabled.
@@ -269,7 +289,13 @@
    * @property {?RSAnalyzer.AnalysisResult} analysis - the measurement; `null`
    *   until the file has been analysed.
    * @property {?Object} after - the re-measurement of the rendered file.
-   * @property {?AudioBuffer} previewBuffer - the live monitor's buffer.
+   * @property {?AudioBuffer} previewBuffer - the live monitor's buffer (B:
+   *   original through the DSP chain).
+   * @property {?AudioBuffer} previewBufferNeural - the C position's buffer:
+   *   the same chain, but fed by the Stage-0 neural pre-process. Only ever
+   *   set when that stage really ran (see computeComparePreview()).
+   * @property {?Object} previewStage0 - what Stage 0 reported for that render
+   *   (chunks, underflows, timing), or `null`.
    * @property {?Object} result - the finished render (channels or an OPFS key,
    *   plus its rate and length).
    * @property {number} progress - 0…1 of the current step, for the bar.
@@ -376,7 +402,12 @@
     try { probe = await Neural.probe(); } catch (e) { toggle.disabled = true; setNeuralStatus('ctl.neuralUnavailable'); return; }
     const models = (probe && probe.models) || {};
     const anyModel = Object.keys(models).some((k) => models[k] && models[k].available);
+    State.neuralModels = models;
     State.neuralAvailable = !!anyModel;
+    // Stage 0 is DeepFilterNet3's job specifically — a loaded BS-RoFormer or
+    // air model must not make the denoise switch look usable
+    State.neuralDenoise = !!(models.deepfilternet3 && models.deepfilternet3.available);
+    if (!State.neuralDenoise) State.aiDenoise = false;
     // Nothing installed is no longer a dead end: the model manager can fetch
     // the quantised weights once and keep them in OPFS. `canLoadModels()`
     // answers whether that is even possible here (a source configured, a model
@@ -600,12 +631,23 @@
        * you hear is still what you save, at every format and bitrate; a ceiling
        * that was switched off (0) stays off. */
       if (params.tpCeil < 0) params.tpCeil -= Presets.codecMargin(State.format, State.mp3Rate);
+      /* When the neural stage runs in front of the chain, the noise floor it
+       * removes is no longer there for the de-hisser to find. Left at full
+       * depth the expander would chase the programme's own top end instead —
+       * the same mistake a second pass of any repair makes. The neural stage
+       * is the repair here; the DSP stage stays as the safety net at a third
+       * of its depth. */
+      if (State.aiDenoise) params.dehiss *= CONFIG.aiDenoiseDehissScale;
       return params;
     },
     signature(card) {
       const fmt = State.format;
+      // the neural routing is part of "the same settings": a cached render made
+      // with Stage 0 on is not the file the user would get with it off, and
+      // Magic Fix turning it on has to invalidate the old result
+      const neural = (State.aiDenoise ? 'ai' : '-') + (State.neuralEnabled ? ':' : '') + (State.neuralEnabled ? 'air' : '');
       return [P.resolvedPreset(card), P.power(card).toFixed(3), fmt,
-        fmt === 'mp3' ? State.mp3Rate : State.wavDepth].join('|');
+        fmt === 'mp3' ? State.mp3Rate : State.wavDepth, neural].join('|');
     },
     exportRate(card) {
       const sr = (card.analysis && card.analysis.sampleRate) || 44100;
@@ -997,6 +1039,8 @@
       analysis: null,
       after: null,
       previewBuffer: null,
+      previewBufferNeural: null,
+      previewStage0: null,
       result: null,
       progress: 0,
       error: null,
@@ -1265,30 +1309,53 @@
 
   /**
    *
-   * The compare FAB's third position — "DSP + AI" — needs an actual second
-   * render to play, not a knob flipped live (the neural coupling is far too
-   * slow for that). This renders it once per analysis/preset/power change,
-   * at full strength, purely so there is something real to switch to; it
-   * never touches the "KI-Höhenrekonstruktion" checkbox or the export. A
-   * missing model, no WebGPU/WASM session, or any render failure just leaves
-   * `previewBufferNeural` null and the FAB quietly offers only Original/DSP —
-   * the same honest degrade the rest of the neural feature already uses.
+   * The compare FAB's third position — **C: the neural pre-process plus the
+   * DSP chain** — needs an actual second render to play, not a knob flipped
+   * live (both neural stages are far too slow for that). This renders it once
+   * per analysis/preset/power change, through the same `stage0` option the
+   * export uses, so C really is the file the user would save with the AI
+   * denoiser armed — not an approximation of it.
+   *
+   * If Stage 0 is not armed (`State.aiDenoise` — Magic Fix throws that switch,
+   * and only when DeepFilterNet3 is actually available) there is nothing for C
+   * to be: it is left null and the FAB honestly offers Original/DSP only. The
+   * same is true when the stage reports a fallback — a missing model is an
+   * ordinary state, not a failure, and the position must not pretend
+   * otherwise.
    *
    * @param {RSApp.Card} card - the card the preview belongs to.
    * @param {Float32Array[]} chans - the preview window's source channels.
    * @param {number} sampleRate - their sample rate in Hz.
    * @param {?RSPresets.ParamMap} params - the parameters to render with.
    * @returns {Promise<void>} resolves when `previewBufferNeural` is
-   * either set or deliberately left `null` — never rejects, because a
-   * missing model is an ordinary state, not a failure.
+   * either set or deliberately left `null` — never rejects.
    */
   async function computeComparePreview(card, chans, sampleRate, params) {
-    if (!(State.neuralAvailable && params && chans)) { card.previewBufferNeural = null; return; }
+    const stage0 = stage0For();
+    if (!(stage0 && Stage0Available() && params && chans)) { card.previewBufferNeural = null; return; }
     try {
-      const res = await Engine.render(chans, sampleRate, params, { neural: {} });
-      card.previewBufferNeural = Codecs.makeBuffer(res.channels, res.sampleRate);
+      const res = await Engine.render(chans, sampleRate, params, {
+        neural: neuralOptFor() || undefined,
+        stage0,
+      });
+      card.previewBufferNeural = res.stage0 && res.stage0.applied
+        ? Codecs.makeBuffer(res.channels, res.sampleRate)
+        : null;
+      card.previewStage0 = res.stage0 || null;
     } catch (e) { card.previewBufferNeural = null; }
     if (FAB && FAB.onPreviewChanged) FAB.onPreviewChanged(card);
+  }
+
+  /**
+   * Whether the pre-DSP stage could run at all right now: a model with
+   * weights, a runtime session, and a worker to talk to. Kept as one named
+   * question so the Magic Fix, the export and the C position cannot answer
+   * it differently.
+   * @returns {boolean} `true` when Stage 0 is usable.
+   */
+  function Stage0Available() {
+    return !!(State.neuralDenoise && State.neuralAvailable && global.RSNeural
+      && typeof global.RSNeural.denoiseChannels === 'function');
   }
 
   /* ------------------------------------------------------------ live playback */
@@ -1792,12 +1859,13 @@
    * @param {RSCodecs.DecodedFile} dec - the decoded source.
    * @param {number} rate - the rate to render at, in Hz.
    * @param {RSPresets.ParamMap} params - the parameters to render with.
-   * @param {?Object} neuralOpt - neural options, or `null` for pure DSP.
+   * @param {?Object} neuralOpt - Stage-7 neural options, or `null`.
+   * @param {?Object} stage0Opt - the pre-DSP neural stage, or `null`.
    * @param {string} name - the output name the render key is built from.
    * @param {string} signature - the settings signature for that key.
    * @returns {Promise<RSApp.RenderResult>} the streamed render's handle.
    */
-  async function renderCardChunked(card, dec, rate, params, neuralOpt, name, signature) {
+  async function renderCardChunked(card, dec, rate, params, neuralOpt, stage0Opt, name, signature) {
     await forgetRender(card);
     const key = renderKeyFor(card);
     const sink = await OPFS.createWriter(key);
@@ -1809,10 +1877,11 @@
       const isMp3 = State.format === 'mp3';
       const mp3Enc = isMp3 ? await Codecs.createMp3StreamEncoder(rate, State.mp3Rate, nCh, sink) : null;
       const wavEnc = isMp3 ? null : Codecs.createWavStreamEncoder(totalSamples, rate, State.wavDepth, sink);
-      await Engine.renderChunked(dec.buffer, rate, params, {
+      const chunked = await Engine.renderChunked(dec.buffer, rate, params, {
         chunkSeconds: CONFIG.chunkSeconds,
         crossfadeMs: CONFIG.chunkCrossfadeMs,
         neural: neuralOpt,
+        stage0: stage0Opt,
         /**
          * Feed the chunked render's progress into the card's bar.
          * @param {number} p - progress 0…1.
@@ -1831,10 +1900,12 @@
           else await wavEnc.appendChannels(channels);
         },
       });
+      const stage0Stats = chunked.stage0;
       const stats = mp3Enc ? await mp3Enc.finish() : await wavEnc.finish();
       const closed = await sink.close();
       const file = await OPFS.getFile(key);
-      return { file, size: closed.size, name, format: State.format, rate: stats.sampleRate || rate, signature, stale: false, opfsKey: key };
+      return { file, size: closed.size, name, format: State.format, rate: stats.sampleRate || rate,
+        signature, stale: false, opfsKey: key, stage0: stage0Stats };
     } catch (err) {
       await sink.abort();
       throw err;
@@ -1855,6 +1926,21 @@
   function neuralOptFor() {
     if (!(State.neuralEnabled && State.neuralAvailable)) return null;
     return isFinite(State.neuralAmount) ? { amount: State.neuralAmount } : {};
+  }
+
+  /**
+   * The pre-DSP neural stage for a render, or `null` for the pure DSP route.
+   *
+   * This is the switch Magic Fix throws: Stage 0 is the denoiser *in front of*
+   * the chain (see `Engine.render`'s `stage0` option), so the DSP stages below
+   * it see a cleaner signal, and the C position of the compare FAB is exactly
+   * "this plus the chain".
+   * @returns {?Object} `{mode:'denoise'}` when the model is there and the
+   *   stage is armed, `null` otherwise.
+   */
+  function stage0For() {
+    if (!(State.aiDenoise && State.neuralDenoise)) return null;
+    return { mode: 'denoise' };
   }
 
   /**
@@ -1900,6 +1986,7 @@
     // the identical pure-DSP render whenever it is omitted, unavailable, or
     // fails for any reason (see the comment there).
     const neuralOpt = neuralOptFor();
+    const stage0Opt = stage0For();
     const name = Codecs.outputName(card.name, State.format === 'mp3' ? 'mp3' : 'wav');
 
     let result;
@@ -1910,7 +1997,7 @@
       // signal (Engine.render()'s own return value) and then the whole
       // encoded file as two more full-length allocations on top of it.
       setNote(card, State.format === 'mp3' ? t('toast.mp3Slow') : t('status.export'));
-      result = await renderCardChunked(card, dec, rate, params, neuralOpt, name, signature);
+      result = await renderCardChunked(card, dec, rate, params, neuralOpt, stage0Opt, name, signature);
     } else {
       const res = await Engine.render(dec.buffer, rate, params, {
         progressSteps: 24,
@@ -1921,6 +2008,7 @@
          */
         onProgress: (p) => setCardWork(card, 'render', p, estimateLeft(card, p)),
         neural: neuralOpt,
+        stage0: stage0Opt,
       });
 
       setNote(card, State.format === 'mp3' ? t('toast.mp3Slow') : t('status.export'));
@@ -1949,7 +2037,8 @@
           }
           const closed = await sink.close();
           const file = await OPFS.getFile(key);
-          result = { file, size: closed.size, name, format: State.format, rate: res.sampleRate, signature, stale: false, opfsKey: key };
+          result = { file, size: closed.size, name, format: State.format, rate: res.sampleRate,
+            signature, stale: false, opfsKey: key, stage0: res.stage0 };
         } catch (err) {
           await sink.abort();
           throw err;
@@ -1965,7 +2054,7 @@
           setCardWork(card, 'encode', null); // a WAV write is fast, but not instant
           bytes = Codecs.encodeWav(res.channels, res.sampleRate, State.wavDepth);
         }
-        result = { bytes, name, format: State.format, rate: res.sampleRate, signature, stale: false };
+        result = { bytes, name, format: State.format, rate: res.sampleRate, signature, stale: false, stage0: res.stage0 };
       }
     }
 
@@ -2395,6 +2484,13 @@
       neural.addEventListener('change', () => {
         if (neural.checked && !State.neuralAvailable) { loadNeuralModel(); return; }
         State.neuralEnabled = neural.checked && State.neuralAvailable;
+        // Switching the neural feature *off* stops the pre-DSP denoiser too:
+        // it is the one control a user has for "no neural work", and leaving
+        // Stage 0 armed would keep the slowest part of the pipeline running
+        // behind a switch that says it is not. Switching it on does not arm
+        // Stage 0 by itself — the checkbox is the air reconstruction, and
+        // Magic Fix is what decides a denoiser should run in front of the chain.
+        if (!State.neuralEnabled) State.aiDenoise = false;
         markAllStale();   // the final export differs, so any cached render is now stale
       });
     }
@@ -2416,14 +2512,14 @@
    * settings and refreshes every preview so the result can be previewed
    * before committing to "Alle verarbeiten".
    *
-   * What this honestly does *not* do: it never calls the separate
-   * DeepFilterNet3 denoise() / BS-RoFormer separate() controllers — those
-   * exist but are not wired into the render pipeline (see engine.js). The
-   * "light deep denoising" and the air-synthesis/de-clipping it promises are
-   * the real, already-measurement-gated DSP stages this power level and
-   * preset genuinely drive, plus the real (if currently unavailable almost
-   * everywhere, since no model weights ship with this build) neural air
-   * coupling at a deliberately light amount.
+   * What it does when a denoiser is actually installed: it arms **Stage 0** —
+   * DeepFilterNet3 in front of the chain, see `Engine.render`'s `stage0`
+   * option — and backs the DSP de-hisser off to `aiDenoiseDehissScale`, so
+   * the neural stage does the denoising and the chain does not chase a noise
+   * floor that is no longer there. Without weights it does exactly what it
+   * always did: the measurement-gated DSP stages at `magicPower`, plus the
+   * optional neural air coupling at `magicNeuralAmount`. Both states are real
+   *; neither is simulated when the model is missing.
    *
    * @returns {void}
    */
@@ -2470,6 +2566,12 @@
       State.neuralEnabled = true;
       State.neuralAmount = CONFIG.magicNeuralAmount;
     }
+    // The one-tap fix uses the denoiser *in front of* the chain when the
+    // model is really there. This is the switch the C position of the compare
+    // FAB plays, and the reason Magic Fix can promise a cleaner result than
+    // the DSP stages alone. Without weights it stays off — the arming code
+    // never claims a stage it cannot run.
+    State.aiDenoise = !!(State.neuralDenoise && Stage0Available());
 
     const presetSel = $('#presetSelect');
     if (presetSel) presetSel.value = 'auto';

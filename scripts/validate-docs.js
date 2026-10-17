@@ -270,7 +270,7 @@ for (const file of jsFiles) {
 
 const declarations = decls.length + undoc.length;
 
-ok(jsFiles.length === 13, 'all thirteen modules are present', jsFiles.length + ' files');
+ok(jsFiles.length === 14, 'all fourteen modules are present', jsFiles.length + ' files');
 ok(undoc.length === 0, 'every module, function, class, object and class method is documented',
   undoc.length ? undoc.slice(0, 12).join(' | ') + (undoc.length > 12 ? ' …(+' + (undoc.length - 12) + ')' : '') : undefined);
 ok(decls.length + undoc.length === declarations,

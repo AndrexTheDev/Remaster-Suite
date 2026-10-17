@@ -171,7 +171,7 @@ function bootApp(opts) {
   win.eval(fs.readFileSync(path.join(ROOT, 'assets/vendor/lame.min.js'), 'utf8'));
 
   const order = ['dsp-utils.js', 'presets.js', 'i18n.js', 'library-loader.js', 'opfs-manager.js', 'codecs.js',
-    'analyzer.js', 'neural-controller.js', 'memory-guard.js', 'engine.js', 'ui.js', 'app.js'];
+    'analyzer.js', 'ring-buffer.js', 'neural-controller.js', 'memory-guard.js', 'engine.js', 'ui.js', 'app.js'];
   for (const file of order) {
     const code = fs.readFileSync(path.join(ROOT, 'assets', 'js', file), 'utf8');
     win.eval(code);

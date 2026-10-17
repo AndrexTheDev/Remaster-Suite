@@ -275,6 +275,12 @@ on the music band (300 Hz – 3.4 kHz, measured within ±0.3 dB), so "restored" 
 being louder — and a rebuilt bottom or top octave cannot fool the comparison either. A/B mode flips
 every four seconds by itself.
 
+While a card is playing, the round **A/B/C** button adds the third honest comparison: **A** is the
+untouched original, **B** is the DSP chain alone, **C** is the neural pre-process (Stage 0) *plus*
+the same chain — a real second render with the same parameters, not a louder B. C appears only when
+the denoiser really ran; without weights the button cycles A↔B exactly as before, and a hold while
+playing still drops to the original for as long as you hold it.
+
 ---
 
 ## The signal chain
@@ -385,6 +391,22 @@ changes when it is off — this is additive-only, not a different mode.
   library itself is fetched from a CDN only once a model is actually used (see [Privacy](#privacy)) — it
   is never bundled (the npm package unpacks to ≈145 MB) and never loaded just because the toggle exists on
   the page.
+* **Stage 0 — the denoiser in front of the chain.** [`assets/js/ring-buffer.js`](assets/js/ring-buffer.js)
+  (`RSRingBuffer`) is a lock-free single-producer/single-consumer ring on a `SharedArrayBuffer`, with
+  `Atomics` for every counter a producer and a consumer both touch (write/read cursors, pushed/popped
+  frames, the high-water mark, overflow and underrun counts). `RSNeural.denoiseChannels()` runs
+  DeepFilterNet3 over the file in one-second blocks with a quarter-second of context on each side of
+  every seam, publishes each block through the ring and joins the seams with the same gain-preserving
+  linear crossfade the chunked render uses; a 44.1 kHz file is brought to the models' 48 kHz with a
+  windowed-sinc resampler first. `Engine.render()` / `renderChunked()` take it as `opts.stage0`, so the
+  whole DSP chain sees the denoised signal rather than the raw one. A model that is missing, refuses,
+  times out or returns a short block leaves the render bit-identical to the pure-DSP path — the stage
+  never pads silence into a file. Magic Fix arms it when the weights are really installed, and backs
+  the DSP de-hisser off to a third of its depth so the two repairs do not fight over the same floor.
+  The stage runs once per preview and once per export — offline, not per audio quantum: an ONNX
+  inference is orders of magnitude slower than the 128-frame callback, so pretending it could sit
+  inside the live graph would only produce dropouts. What the live monitor plays is the finished
+  render, handed to the same worklet as the DSP-only B.
 * **Models — fetched once, kept in OPFS.** The default model is **DeepFilterNet3 INT8**
   ([DeepFilterNet](https://github.com/Rikorose/DeepFilterNet)). No weights ship with this repository:
   the first time the toggle is switched on, `neural-controller.js` checks `/models/` in OPFS, and if the
@@ -501,7 +523,7 @@ tests/
                                  a rich-hum fixture, the effect budgets, the
                                  several-problems-at-once chain, and the chain-level
                                  scale-freedom row, the export's ceiling through the
-                                 codec, and the de-clicker's floor with its control (339
+                                 codec, and the de-clicker's floor with its control (340
                                  checks)
   e2e.test.js                    realistic journeys: five problem recordings, slider sweep,
                                  profile overrides, 10-file batch → ZIP, mono/32 k/96 k,
@@ -524,6 +546,13 @@ tests/
                                  the mid-render shrink, the abort path that a failing onChunk
                                  triggers, and a sink that takes the buffer it is handed —
                                  the way the OPFS writer does (53 checks)
+  stage0.test.js                 the pre-DSP neural stage: the SharedArrayBuffer ring under
+                                 back-pressure (wrap-around, refused-not-truncated blocks, the
+                                 underrun counter, the plain-buffer fallback), the chunk plan's
+                                 context padding and gain-preserving seams, 44.1 k → 48 k
+                                 resampling, stem mixes, the \{applied:false\} contract, and the
+                                 engine wiring that makes C measurably cleaner than B with no
+                                 buffer underruns (86 checks)
   mobile-ux.test.js              the carousel effect rack, the gold "AI Magic Fix" button and
                                  the live A/B/C compare FAB: markup/CSS, navigator.vibrate
                                  safety, switchBuffer() position preservation, seek()
@@ -555,7 +584,7 @@ scripts/
                                  re-runs every suite and compares its own check count with
                                  the README
   analyze-code.js                static analysis of the shipped JavaScript with acorn: parses
-                                 the thirteen assets/js modules, the AudioWorklet processor
+                                 the fourteen assets/js modules, the AudioWorklet processor
                                  and coi-serviceworker.js, then reports references to names
                                  that are not declared (a runtime ReferenceError a syntax
                                  check cannot see), accidental globals, duplicate keys in one
@@ -585,7 +614,7 @@ belong to the test suite.
 
 ## Tests
 
-**11 dependency-free suites · 1099 checks.** Every count below is the suite's own
+**12 dependency-free suites · 1186 checks.** Every count below is the suite's own
 (`ALL TESTS PASSED (n)`); `node scripts/validate-docs.js --run` re-runs them and
 fails if this file, `tests/` and `package.json` ever disagree.
 
@@ -594,18 +623,19 @@ fails if this file, `tests/` and `package.json` ever disagree.
 | DSP & engine | `tests/dsp.test.js` | 173 | transparency, sub, air, exciter, de-hiss, de-click, de-resonator, level match, power scaling, WAV/MP3/ZIP, classification |
 | Tuning law | `tests/tuning.test.js` | 17 | what the automatic mode may do to a file: octave bands, loudness, the level match, the soft-clip guard, level-normalised synthesis, honest extremes |
 | Web & DOM | `tests/web.test.js` | 137 | static integrity, bilingual coverage, boot, drop → analyse → render → save → ZIP, error handling, resampling |
-| Audit | `tests/audit.test.js` | 339 | repository hygiene, markup, stylesheet, contrast, bilingual coverage, parameter ranges, DSP edge cases, the several-problems-at-once chain, codec round-trips, budgets |
+| Audit | `tests/audit.test.js` | 340 | repository hygiene, markup, stylesheet, contrast, bilingual coverage, parameter ranges, DSP edge cases, the several-problems-at-once chain, codec round-trips, budgets |
 | End to end | `tests/e2e.test.js` | 108 | five problem recordings, slider sweep, profile overrides, 10-file batch → ZIP, mono/32 k/96 k, hostile input |
 | OPFS | `tests/opfs.test.js` | 52 | the shipped worker source against a simulated file system: streaming writes, a streamed ZIP cross-checked with JSZip and unzip(1), the oversized-batch guard, the model store under `models/` (write, read, list, clear, abort, surviving a scratch reset), the in-memory fallback |
 | Cross-origin isolation | `tests/coi.test.js` | 19 | coi-serviceworker.js as a Service Worker and as a page script: the COOP/COEP rewrite, the one-reload rule, never a reload loop |
 | Neural | `tests/neural.test.js` | 127 | the controller/worker contract, T-frame alignment, STFT round-trips, the capability probe, WebGPU-first provider order, quantised-variant selection, **the model manager** (cache hit, CDN download, progress, variant fallback, short-read and HTML-refusal aborts, inflight dedup, cache report), the watchdog and the Stage-7 coupling |
 | Memory guard | `tests/memory-guard.test.js` | 21 | the heap watchdog on a host without `performance.memory`: the honest no-signal default, the one-way shrink ramp, a stop function that never leaks a timer |
 | Chunked render | `tests/chunked-render.test.js` | 53 | chunk boundaries and level-preserving crossfades, the streaming WAV/MP3 encoders, the mid-render shrink, the abort a failing onChunk triggers, a sink that takes ownership of the buffer it is handed |
+| Stage 0 (pre-DSP) | `tests/stage0.test.js` | 86 | the SAB ring (exact round-trips, wrap, all-or-nothing writes, the underrun/overflow counters, the non-shared fallback), the chunk plan and its seam crossfades, the 48 kHz resampling, stem mixing, the fallback contract, and the engine wiring: C really is Stage 0 + DSP, and a missing model leaves B bit-identical |
 | Mobile UX | `tests/mobile-ux.test.js` | 53 | the carousel effect rack, the gold "AI Magic Fix" button, the live A/B/C compare FAB, navigator.vibrate safety, switchBuffer() position preservation, seek() clamping and its no-buffer no-op, tap/hold |
 
 ```bash
 npm install          # only for the test suite and the static analysis (jsdom, acorn)
-npm test             # runs all eleven dependency-free suites
+npm test             # runs all twelve dependency-free suites
 node scripts/validate-docs.js        # README ↔ tests/ ↔ package.json consistency
 node scripts/validate-docs.js --run  # the same, and re-counts every suite
 node scripts/analyze-code.js         # static analysis of the shipped JavaScript
@@ -616,6 +646,7 @@ node tests/audit.test.js           # repository, markup, contrast, i18n, paramet
 node tests/e2e.test.js             # realistic journeys, slider sweep, batch → ZIP
 node tests/tuning.test.js          # the automatic mode's tuning contract
 node tests/opfs.test.js            # the shipped OPFS worker against a simulated file system
+node tests/stage0.test.js          # the SAB ring, the pre-DSP stage, and its engine wiring
 node tests/coi.test.js             # the shipped cross-origin-isolation bootstrap
 node tests/neural.test.js          # the neural path with no weights installed
 node tests/memory-guard.test.js    # the mobile heap watchdog, with no heap signal
@@ -647,7 +678,7 @@ differs — a red-on-dim picture of what moved to `docs/beta/diff/`. It needs on
 failure, not a pass, so a visual regression cannot be waved through by deleting the record.
 It needs the optional dev dependency `@sparticuz/chromium` (a packaged headless
 Chromium, used because CI machines rarely ship a browser); `npm test` runs the
-eleven dependency-free suites and stays green everywhere.
+twelve dependency-free suites and stays green everywhere.
 
 Signals are simulated (garage session, cassette, vinyl rip, low-bitrate, clean — plus a vinyl
 transfer that was later pushed through a 128 kbit/s encoder, the file that needs more than one
