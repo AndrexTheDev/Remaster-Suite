@@ -320,7 +320,7 @@
       'fab.tip': 'Tippen wechselt · Halten hört Original',
       'fab.mode.original': 'Original',
       'fab.mode.restored': 'Repariert (DSP)',
-      'fab.mode.ai': 'Repariert + KI',
+      'fab.mode.ai': 'KI-Entrauschung + DSP',
 
       'err.decode': 'Die Datei konnte nicht gelesen werden.',
       'err.broken': 'Diese Datei enthält beschädigte Audiodaten (keine gültigen Samples) — sie lässt sich nicht reparieren.',
@@ -711,7 +711,7 @@
       'fab.tip': 'Tap to switch · hold to hear the original',
       'fab.mode.original': 'Original',
       'fab.mode.restored': 'Restored (DSP)',
-      'fab.mode.ai': 'Restored + AI',
+      'fab.mode.ai': 'AI denoise + DSP',
 
       'err.decode': 'The file could not be read.',
       'err.broken': 'This file contains corrupted audio data (no valid samples) — it cannot be repaired.',
