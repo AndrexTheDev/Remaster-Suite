@@ -1415,8 +1415,8 @@ H.section('engine · true-peak limiter (the export ceiling)');
   for (let i = 0; i < full.out[0].length; i++) if (!isFinite(full.out[0][i])) nonFinite++;
   H.ok(nonFinite === 0, 'with every repair stage engaged the output is finite — every sample of delay is covered',
     nonFinite + ' non-finite samples, latency ' + full.latency);
-  H.ok(full.latency === 1330 + 65 + 88, 'and the three look-aheads add up to one number the caller can trust',
-    String(full.latency) + ' samples (1330 de-clip + 65 de-click + 88 limiter)');
+  H.ok(full.latency === 1330 + 65 + 1024 + 88, 'and all four look-aheads add up to one number the caller can trust',
+    String(full.latency) + ' samples (1330 de-clip + 65 de-click + 1024 STFT + 88 limiter)');
   H.ok(RSDSP.measure([full.out[0]], SR).ispDb <= -2 + 0.15, 'the chain as a whole still lands under the ceiling',
     RSDSP.measure([full.out[0]], SR).ispDb.toFixed(2) + ' dBTP');
 }

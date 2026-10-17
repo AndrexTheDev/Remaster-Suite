@@ -6,6 +6,23 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Round 38 — adaptive broadband STFT Wiener repair (5.1A)
+
+* Shared streaming FFT-1024/Hann/75%-overlap Wiener processor, rolling minimum
+  statistics and decision-directed SNR, configurable −18 dB gain floor. A
+  measured HF excess retains the calibrated coloured-hiss repair; otherwise
+  dehiss now repairs the whole spectrum rather than gating only the top end.
+* Worklet dependency loading, dry-ring sizing and declared latency include the
+  new 1024-sample path. Whole-file/chunked exports flush and trim that extra
+  delay. Reset and mode changes discard stale overlap/noise state.
+* Explicit bounded correlation diagnostics report raw/aligned SI-SDR, lag and
+  overlap; acceptance continues using declared latency without best-lag fitting.
+* Unchanged audio-quality acceptance: 9/9, clipping +27.17 dB, white noise
+  +14.64 dB, hum +11.60 dB. Added 22 Wiener/alignment/export checks; complete
+  sixteen-suite npm chain: 1319/1319. Static docs 19/19, code analysis clean.
+* Batch scheduling/worker lifecycle/fallback and full UI beta acceptance from
+  5.1B/5.2 remain separate, unfinished work; no whole-workflow FPS claim.
+
 ### Round 37 — short-peak de-clipping with masked AR and constrained Hermite joins
 
 * Short saturated runs now try time-reversible covariance LPC/AR(4–8), trained

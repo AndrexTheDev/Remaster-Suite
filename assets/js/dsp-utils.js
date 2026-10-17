@@ -125,6 +125,146 @@
     }
   }
 
+  /** Streaming stationary-noise Wiener filter. 1024-point periodic Hann STFT,
+   * hop 256 (75% overlap), decision-directed a-priori SNR and rolling minimum
+   * statistics. Only noisy observations and an optional measured RMS prior are
+   * used. All FFT/OLA/estimator storage is allocated at construction.
+   * @class
+   */
+  class SpectralWiener {
+    /** @param {number} sr - sample rate in Hz.
+     * @param {Object} [options] - floorDb (-18 default), alpha (.98 default).
+     */
+    constructor(sr, options = {}) {
+      if (!(sr >= 8000 && sr <= 192000)) throw new RangeError('Invalid Wiener sample rate');
+      this.sr = sr; this.size = 1024; this.hop = 256; this.look = this.size;
+      this.floorDb = options.floorDb === undefined ? -18 : options.floorDb;
+      this.alpha = options.alpha === undefined ? .98 : options.alpha;
+      if (!Number.isFinite(this.floorDb) || this.floorDb < -60 || this.floorDb > 0
+          || !Number.isFinite(this.alpha) || this.alpha < 0 || this.alpha >= 1)
+        throw new RangeError('Invalid Wiener floor or decision-directed alpha');
+      this.floor = Math.pow(10, this.floorDb / 20);
+      this.window = hann(this.size);
+      this.input = new Float64Array(this.size);
+      this.ola = new Float64Array(this.size * 2);
+      this.re = new Float64Array(this.size); this.im = new Float64Array(this.size);
+      this.power = new Float64Array(this.size / 2 + 1);
+      this.smooth = new Float64Array(this.power.length);
+      this.noise = new Float64Array(this.power.length);
+      this.previousClean = new Float64Array(this.power.length);
+      this.minimum = new Float64Array(this.power.length * 8);
+      this.median = new Float64Array(9);
+      this.prior = 0; this.active = false;
+      this.reset();
+    }
+    /** Reset observations, overlap tails and noise statistics, retaining options.
+     * @returns {void}
+     */
+    reset() {
+      this.input.fill(0); this.ola.fill(0); this.smooth.fill(0);
+      this.noise.fill(0); this.previousClean.fill(0); this.minimum.fill(Infinity);
+      this.position = 0; this.frames = 0; this.slot = 0; this.active = false;
+    }
+    /** Optional independent measured broadband noise RMS; never a clean signal.
+     * @param {number} rms - RMS amplitude; zero means no supplied prior.
+     * @returns {void}
+     */
+    setNoise(rms) { this.prior = Number.isFinite(rms) && rms > 0 ? rms * rms * (this.size * 3 / 8) : 0; }
+    /** One analysis/synthesis hop. Minimum tracking uses eight 16-hop buckets
+     * (~0.68 s at 48 kHz); narrow stationary tones are excluded by a robust
+     * local spectral median, and only low-SNR bins update the noise estimate.
+     * @param {number} amount - wet spectral repair mix, 0..1.
+     * @returns {void}
+     */
+    processFrame(amount) {
+      const n = this.size, bins = this.power.length, re = this.re, im = this.im;
+      for (let j = 0; j < n; j++) { re[j] = this.input[(this.position + j) % n] * this.window[j]; im[j] = 0; }
+      fft(re, im);
+      for (let k = 0; k < bins; k++) {
+        const p = re[k] * re[k] + im[k] * im[k];
+        this.power[k] = p;
+        this.smooth[k] = this.position > n ? .8 * this.smooth[k] + .2 * p : p;
+        const index = this.slot * bins + k;
+        if (this.position >= n) this.minimum[index] = Math.min(this.minimum[index], this.smooth[k]);
+      }
+      for (let k = 0; k < bins; k++) {
+        // Insertion sort nine neighbouring powers, with no per-frame allocation.
+        for (let j = 0; j < 9; j++) {
+          const v = this.smooth[Math.max(0, Math.min(bins - 1, k + j - 4))];
+          let q = j;
+          while (q > 0 && this.median[q - 1] > v) { this.median[q] = this.median[q - 1]; q--; }
+          this.median[q] = v;
+        }
+        let minimum = Infinity;
+        for (let b = 0; b < 8; b++) minimum = Math.min(minimum, this.minimum[b * bins + k]);
+        let candidate = Math.max(1e-20, Math.min(4 * minimum, 1.2 * this.median[4]));
+        if (this.prior) candidate = Math.min(candidate, 4 * this.prior);
+        if (!this.frames) this.noise[k] = this.prior || candidate;
+        else if (this.position >= n && this.power[k] < 3 * Math.max(this.noise[k], candidate))
+          this.noise[k] = .9 * this.noise[k] + .1 * candidate;
+        else if (this.position >= n && candidate < this.noise[k]) this.noise[k] = .99 * this.noise[k] + .01 * candidate;
+        const noise = Math.max(this.noise[k], 1e-20);
+        const gamma = this.power[k] / noise;
+        const xi = this.alpha * this.previousClean[k] / noise + (1 - this.alpha) * Math.max(gamma - 1, 0);
+        const gain = Math.max(this.floor, xi / (1 + xi));
+        this.previousClean[k] = gain * gain * this.power[k];
+        const wet = 1 + amount * (gain - 1);
+        re[k] *= wet; im[k] *= wet;
+        if (k > 0 && k < n / 2) { re[n - k] *= wet; im[n - k] *= wet; }
+      }
+      // IFFT by conjugation. Hann analysis/synthesis: sum(w^2) = 3/2 at hop N/4.
+      for (let j = 0; j < n; j++) im[j] = -im[j];
+      fft(re, im);
+      for (let j = 0; j < n; j++)
+        this.ola[(this.position + j) % this.ola.length] += re[j] / n * this.window[j] / 1.5;
+      this.frames++;
+      if (this.frames % 16 === 0) {
+        this.slot = (this.slot + 1) % 8;
+        this.minimum.fill(Infinity, this.slot * bins, (this.slot + 1) * bins);
+      }
+    }
+    /** Process one sample. Engaged latency is exactly 1024 samples; disabled
+     * operation is exact pass-through. Reset on transitions discards stale OLA.
+     * @param {number} x - observed finite sample (invalid samples become zero).
+     * @param {number} amount - denoising amount, 0..1.
+     * @returns {number} delayed denoised sample, or undelayed bypass sample.
+     */
+    tick(x, amount) {
+      if (!(amount > .0001)) { if (this.active) this.reset(); return Number.isFinite(x) ? x : 0; }
+      this.active = true;
+      const index = this.position % this.ola.length, out = this.ola[index];
+      this.ola[index] = 0;
+      this.input[this.position % this.size] = Number.isFinite(x) ? x : 0;
+      this.position++;
+      if (this.position % this.hop === 0) this.processFrame(clamp(amount, 0, 1));
+      return out;
+    }
+  }
+
+  /** Whole-file wrapper around the exact streaming processor, including tail
+   * flush and known-delay compensation. No reference signal is accepted.
+   * @param {Float32Array[]} channels - equally sized mono/stereo observations.
+   * @param {number} sr - sample rate.
+   * @param {Object} [options] - floorDb, alpha, amount, noiseRms.
+   * @returns {Float32Array[]} denoised channels, original length and alignment.
+   */
+  function denoiseWiener(channels, sr, options = {}) {
+    if (!channels.length) throw new RangeError('No Wiener channels');
+    const length = channels[0].length;
+    if (channels.some(c => c.length !== length)) throw new RangeError('Unequal Wiener channels');
+    return channels.map(channel => {
+      const filter = new SpectralWiener(sr, options), out = new Float32Array(length);
+      filter.setNoise(options.noiseRms || 0);
+      const amount = options.amount === undefined ? 1 : options.amount;
+      const delay = amount > .0001 ? filter.look : 0;
+      for (let i = 0; i < length + delay; i++) {
+        const x = filter.tick(i < length ? channel[i] : 0, amount);
+        if (i >= delay) out[i - delay] = x;
+      }
+      return out;
+    });
+  }
+
   /**
    * Averaged magnitude spectrum — as a sliceable step (see "sliced passes").
    * @returns {{step:object, value:function():object}}
@@ -3674,6 +3814,78 @@
         throw new RangeError('Quality metrics require finite samples');
   }
 
+  /** Explicit, bounded normalized cross-correlation alignment for diagnostics.
+   * Positive lag means estimate lags reference. A common central window of at
+   * most 32768 samples bounds FFT storage; full input validation is retained.
+   * This compensates a constant delay, NOT frequency-dependent filter phase.
+   * Silent/constant windows yield lag zero and correlation NaN. Returned views
+   * exclude non-overlapping edges; callers must report lag and overlap, not
+   * silently substitute this best-lag score for a declared-latency acceptance.
+   * @param {Float32Array} reference - finite reference observations.
+   * @param {Float32Array} estimate - finite estimated observations.
+   * @param {number} [maxLag=16] - predeclared maximum absolute lag (0..2048).
+   * @returns {Object} reference, estimate, lag, correlation, overlap.
+   */
+  function alignSignals(reference, estimate, maxLag = 16) {
+    qualityInputs(reference, reference); qualityInputs(estimate, estimate);
+    if (!Number.isInteger(maxLag) || maxLag < 0 || maxLag > 2048)
+      throw new RangeError('maxLag must be an integer in [0, 2048]');
+    const length = Math.min(reference.length, estimate.length);
+    const n = Math.min(32768, length), start = Math.floor((length - n) / 2);
+    const bound = Math.min(maxLag, Math.floor(n / 4));
+    let size = 1;
+    while (size < n * 2) size *= 2;
+    const ar = new Float64Array(size), ai = new Float64Array(size);
+    const br = new Float64Array(size), bi = new Float64Array(size);
+    const sumsA = new Float64Array(n + 1), sumsB = new Float64Array(n + 1);
+    const energyA = new Float64Array(n + 1), energyB = new Float64Array(n + 1);
+    // Centre before the FFT as well as normalizing each overlap, avoiding DC
+    // cancellation for small signals riding on a large constant offset.
+    let ma = 0, mb = 0;
+    for (let i = 0; i < n; i++) { ma += reference[start + i] / n; mb += estimate[start + i] / n; }
+    for (let i = 0; i < n; i++) {
+      const a = reference[start + i] - ma, b = estimate[start + i] - mb;
+      ar[i] = a; br[i] = b;
+      sumsA[i + 1] = sumsA[i] + a; sumsB[i + 1] = sumsB[i] + b;
+      energyA[i + 1] = energyA[i] + a * a; energyB[i + 1] = energyB[i] + b * b;
+    }
+    fft(ar, ai); fft(br, bi);
+    for (let i = 0; i < size; i++) {
+      const re = br[i] * ar[i] + bi[i] * ai[i];
+      const im = bi[i] * ar[i] - br[i] * ai[i];
+      br[i] = re; bi[i] = -im;
+    }
+    fft(br, bi);
+    let lag = 0, correlation = NaN, best = -1;
+    for (let l = -bound; l <= bound; l++) {
+      const a = Math.max(0, -l), b = Math.max(0, l), count = n - Math.abs(l);
+      const sa = sumsA[a + count] - sumsA[a], sb = sumsB[b + count] - sumsB[b];
+      const ea = Math.max(0, energyA[a + count] - energyA[a] - sa * sa / count);
+      const eb = Math.max(0, energyB[b + count] - energyB[b] - sb * sb / count);
+      if (!(ea > 0 && eb > 0)) continue;
+      const corr = clamp((br[l >= 0 ? l : size + l] / size - sa * sb / count) / Math.sqrt(ea * eb), -1, 1);
+      const score = Math.abs(corr);
+      if (score > best + 1e-12 || (Math.abs(score - best) <= 1e-12 && Math.abs(l) < Math.abs(lag))) {
+        best = score; lag = l; correlation = corr;
+      }
+    }
+    const a = Math.max(0, -lag), b = Math.max(0, lag);
+    const overlap = Math.min(reference.length - a, estimate.length - b);
+    return { reference: reference.subarray(a, a + overlap), estimate: estimate.subarray(b, b + overlap), lag, correlation, overlap };
+  }
+
+  /** Report both raw and explicitly lag-compensated SI-SDR.
+   * @param {Float32Array} reference - clean reference.
+   * @param {Float32Array} estimate - estimate at the same sample rate.
+   * @param {number} [maxLag=16] - predeclared diagnostic search bound.
+   * @returns {Object} raw, aligned, lag, correlation, overlap.
+   */
+  function siSdrAligned(reference, estimate, maxLag = 16) {
+    const a = alignSignals(reference, estimate, maxLag);
+    return { raw: reference.length === estimate.length ? siSdr(reference, estimate) : NaN,
+      aligned: siSdr(a.reference, a.estimate), lag: a.lag, correlation: a.correlation, overlap: a.overlap };
+  }
+
   /** Zero-mean scale-invariant signal-to-distortion ratio in dB.
    * alpha = dot(estimate, reference) / energy(reference). The residual is
    * estimate - alpha * reference (not a separately supplied noise signal).
@@ -3731,7 +3943,8 @@
 
   /** @type {RSDSPApi} */
   const API = {
-    siSdr, logSpectralDistance,
+    SpectralWiener, denoiseWiener,
+    alignSignals, siSdrAligned, siSdr, logSpectralDistance,
     flatTopStep,
     TWO_PI, clamp, db, lin,
     hann, blackman, fft, spectrum, bandLevel, bandMedian, smoothSpec,

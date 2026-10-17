@@ -3206,6 +3206,8 @@ class ChannelChain {
     this.neuralAir = new NeuralAirCurve(sr);
     this.sub = new SubSynth(sr);
     this.hiss = new DeHiss(sr, 3200);
+    this.wiener = new globalThis.RSDSP.SpectralWiener(sr);
+    this.spectralMode = true;
     this.deess = new DeEsser(sr);
     this.declip = new DeClipper(sr);
     this.click = new DeClicker(sr);
@@ -3226,7 +3228,7 @@ class ChannelChain {
     // for the first 2.7 s of the file, until the master crossfade reached
     // exactly 1 and the dry reference stopped being mixed in.
     const maxLook = Math.round(sr * 0.0015) + 4;
-    this.dryRing = new Float32Array(this.declip.look + this.click.look + maxLook + 16);
+    this.dryRing = new Float32Array(this.declip.look + this.click.look + this.wiener.look + maxLook + 16);
     this.dryW = 0;
     this.dry = 0;
     this.delay = 0;
@@ -3289,6 +3291,7 @@ class ChannelChain {
     for (const r of this.reso) r.reset();
     for (const e of this.exc) e.reset();
     this.air.reset(); this.neuralAir.reset(); this.sub.reset(); this.hiss.reset();
+    this.wiener.reset();
     this.declip.reset();
     this.click.reset();
     this.dryRing.fill(0); this.dryW = 0; this.dry = 0; this.delay = 0;
@@ -3385,6 +3388,10 @@ class ChannelChain {
     this.airRoom = p.airRoom;
     this.sub.setNoise(p.noiseLin);
     this.hiss.setNoise(p.hfNoiseLin);
+    const spectralMode = !(p.hissMax > 0.05);
+    if (spectralMode !== this.spectralMode) { this.wiener.reset(); this.hiss.reset(); }
+    this.spectralMode = spectralMode;
+    this.wiener.setNoise(p.noiseLin);
     this.hiss.setTilt(p.hissTilt, p.hissMax);
     // the de-hisser splits where *this* file's noise starts
     this.hiss.setXover(p.hissF);
@@ -3477,7 +3484,10 @@ class ChannelChain {
     // synthesise harmonics out of hiss") — but that argument is about the
     // *synthesisers* further down, and those are still behind both stages.
     y = this.click.tick(y, p.declick, this.declip.marked, this.declip.th);
-    y = this.hiss.tick(y, p.dehiss);
+    // Positive measured HF excess (hissMax) retains the calibrated coloured-hiss repair.
+    // Broadband noise needs a whole-spectrum estimator, not an HF gate. No
+    // measured HF excess (including manual broadband mode) selects the STFT path.
+    y = this.spectralMode ? this.wiener.tick(y, p.dehiss) : this.hiss.tick(y, p.dehiss);
 
 
     // 4 ── harmonic exciter (level-proportional, noise- and presence-gated)
@@ -3999,8 +4009,8 @@ class RemasterProcessor extends AudioWorkletProcessor {
     this._ensureChannels(nCh);
     for (let c = 0; c < nCh; c++) this.chains[c].prepare(pr);
 
-    // Three stages hold their output back — the de-clipper while it is armed,
-    // the de-clicker for its half millisecond and the true-peak limiter for its
+    // Four stages can hold their output back — the de-clipper while armed,
+    // the de-clicker, the 1024-sample broadband STFT and the true-peak limiter for its
     // look-ahead — so the chain delays whatever follows by that much. This is the number any caller comparing output with
     // input has to line the two up by, or it measures the delay instead of the
     // processing; `H.renderEx` in the test harness hands it to the suites.
@@ -4009,6 +4019,7 @@ class RemasterProcessor extends AudioWorkletProcessor {
     const delay = bypassedNow ? 0
       : (pr.declip > 0.0001 && pr.declipLevel > -60 ? this.chains[0].declip.look : 0)
         + (pr.declick > 0.0001 ? this.chains[0].click.look : 0)
+        + (pr.dehiss > 0.0001 && !(pr.hissMax > 0.05) ? this.chains[0].wiener.look : 0)
         + this.tp.delay;
     for (let c = 0; c < nCh; c++) this.chains[c].delay = delay;
     this.latency = delay;

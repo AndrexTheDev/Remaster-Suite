@@ -7,12 +7,10 @@
  *   offline — an OfflineAudioContext, used for the real, full-length render
  *             that ends up in the WAV/MP3 file.
  *
- * The chain is minimum-phase throughout, so the two are sample-for-sample
- * identical: what you hear is what you save. The one stage that delays is the
- * de-clicker, whose look-ahead shifts the output by 65 samples (its spike window
- * plus the millisecond the ring behind it is fitted over)
- * at 48 kHz while it is engaged — the same in both paths, and the A/B crossfade
- * delays its dry side with it, so nothing about the comparison changes.
+ * The live and offline paths use the same processor. De-clipping, de-clicking,
+ * broadband STFT repair and the true-peak limiter introduce declared latency;
+ * the A/B dry reference follows their sum. Offline exports additionally flush
+ * and remove the fixed STFT delay, retaining the older lookahead convention.
  * ========================================================================== */
 /**
  * @fileoverview The audio engine — exported as the constructor
@@ -21,12 +19,8 @@
  *
  * Runs the one DSP chain in the one worklet, two ways: live (`AudioContext` +
  * `AudioWorkletNode`, for the A/B monitor) and offline (`OfflineAudioContext`,
- * for the file the user saves). The chain is minimum-phase throughout, so both
- * paths are sample-for-sample identical — what is heard is what is saved. The
- * single stage that delays is the de-clicker, whose look-ahead shifts the
- * output by 65 samples at 48 kHz while it is engaged; that is the same in both
- * paths, and the A/B crossfade delays its dry side with it, so nothing about
- * the comparison changes.
+ * for the file the user saves). Both paths run the same algorithms; live A/B
+ * uses delay-matched dry audio. Offline rendering flushes/trims STFT latency.
  *
  * `render()` is the whole-file offline path. `renderChunked()` is its
  * bounded-memory sibling for long files and phones: independent spans, joined
@@ -38,10 +32,18 @@
 (function (global) {
   'use strict';
 
-  /**
-   * Repository-relative path of the AudioWorklet module both paths load.
-   * @type {string}
+  /** Additional fixed STFT delay; existing repair lookaheads retain their
+   * established export convention. Flush this tail and remove only the new
+   * delay, so adding broadband repair does not shift or shorten exports.
+   * @param {Object} params - fixed render parameters.
+   * @returns {number} additional samples to flush/trim.
    */
+  function spectralPadding(params) {
+    const p = params || {};
+    return p.dehiss > .0001 && !(p.hissMax > .05) && !(p.power < .0001) && !(p.bypass > .5) ? 1024 : 0;
+  }
+
+  /** Repository-relative processor module path. @type {string} */
   const WORKLET = 'assets/worklets/remaster-processor.js';
   /**
    * AudioParam glide for live parameter changes, in seconds. Short enough to
@@ -285,6 +287,8 @@
       if (!ctx.audioWorklet) throw new Error('AudioWorklet unavailable');
       try {
         const url = global.location ? new URL(WORKLET, global.location.href).href : WORKLET;
+        const dspUrl = global.location ? new URL('assets/js/dsp-utils.js', global.location.href).href : 'assets/js/dsp-utils.js';
+        await ctx.audioWorklet.addModule(dspUrl);
         await ctx.audioWorklet.addModule(url);
         this._loaded.add(ctx);            // per context, not per engine
       } catch (err) {
@@ -675,7 +679,8 @@
         } catch (e) { /* fall back to the pure DSP path, silently and completely */ }
       }
 
-      const ctx = new Ctor({ numberOfChannels: nCh, length: len, sampleRate: sr });
+      const padding = spectralPadding(params);
+      const ctx = new Ctor({ numberOfChannels: nCh, length: len + padding, sampleRate: sr });
       await this._loadWorklet(ctx);
       const node = new global.AudioWorkletNode(ctx, 'remaster-processor', {
         numberOfInputs: 1,
@@ -742,7 +747,9 @@
       };
       schedule();
 
-      const rendered = await ctx.startRendering();
+      const raw = await ctx.startRendering();
+      const rendered = padding ? ctx.createBuffer(nCh, len, sr) : raw;
+      if (padding) for (let c = 0; c < nCh; c++) rendered.copyToChannel(raw.getChannelData(c).subarray(padding, padding + len), c);
       const out = [];
       for (let c = 0; c < rendered.numberOfChannels; c++) out.push(rendered.getChannelData(c));
       if (o.onProgress) o.onProgress(1);
@@ -990,7 +997,8 @@
         stageInfo = pre.info;
       }
       const Ctor = global.OfflineAudioContext || global.webkitOfflineAudioContext;
-      const ctx = new Ctor({ numberOfChannels: nCh, length: spanOutLen, sampleRate: sr });
+      const padding = spectralPadding(params);
+      const ctx = new Ctor({ numberOfChannels: nCh, length: spanOutLen + padding, sampleRate: sr });
       await this._loadWorklet(ctx);
       const node = new global.AudioWorkletNode(ctx, 'remaster-processor', {
         numberOfInputs: 1,
@@ -1020,7 +1028,7 @@
 
       const rendered = await ctx.startRendering();
       const out = [];
-      for (let c = 0; c < rendered.numberOfChannels; c++) out.push(rendered.getChannelData(c));
+      for (let c = 0; c < rendered.numberOfChannels; c++) out.push(rendered.getChannelData(c).subarray(padding, padding + spanOutLen));
       return { channels: out, stage0: stageInfo };
     }
   }

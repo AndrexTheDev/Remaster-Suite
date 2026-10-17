@@ -4,7 +4,7 @@
   "private": true,
   "description": "Harmonic Restoration \u00b7 Remaster Suite \u2014 100 % client-side audio restoration in vanilla HTML/CSS/JS",
   "scripts": {
-    "test": "node tests/dsp.test.js && node tests/web.test.js && node tests/audit.test.js && node tests/e2e.test.js && node tests/tuning.test.js && node tests/opfs.test.js && node tests/stage0.test.js && node tests/coi.test.js && node tests/neural.test.js && node tests/memory-guard.test.js && node tests/chunked-render.test.js && node tests/mobile-ux.test.js && node tests/encoding-batch.test.js && node tests/declip-ar.test.js && node tests/audio-quality.test.js",
+    "test": "node tests/dsp.test.js && node tests/web.test.js && node tests/audit.test.js && node tests/e2e.test.js && node tests/tuning.test.js && node tests/opfs.test.js && node tests/stage0.test.js && node tests/coi.test.js && node tests/neural.test.js && node tests/memory-guard.test.js && node tests/chunked-render.test.js && node tests/mobile-ux.test.js && node tests/encoding-batch.test.js && node tests/declip-ar.test.js && node tests/audio-quality.test.js && node tests/wiener.test.js",
     "test:dsp": "node tests/dsp.test.js",
     "test:web": "node tests/web.test.js",
     "test:audit": "node tests/audit.test.js",
@@ -25,7 +25,8 @@
     "analyze:code:dead": "node scripts/analyze-code.js --dead",
     "test:audio-quality": "node tests/audio-quality.test.js",
     "test:encoding-batch": "node tests/encoding-batch.test.js",
-    "test:declip-ar": "node tests/declip-ar.test.js"
+    "test:declip-ar": "node tests/declip-ar.test.js",
+    "test:wiener": "node tests/wiener.test.js"
   },
   "devDependencies": {
     "jsdom": "^22.1.0",

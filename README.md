@@ -557,6 +557,7 @@ tests/
   encoding-worker-adapter.js     worker_threads adapter for the unmodified production worker
   declip-ar.test.js              masked LPC, Hermite boundaries, strict rail constraints,
                                  untouched observations and linked headroom (43 checks)
+  wiener.test.js                 STFT WOLA, latency, reset and explicit lag diagnostics (22 checks)
   audio-quality.test.js          known-clean reference metrics and real-worklet gain (9 checks)
   encoding-batch.test.js         real Chromium batch and frame pacing (5 checks)
   mobile-ux.test.js              the carousel effect rack, the gold "AI Magic Fix" button,
@@ -623,10 +624,11 @@ belong to the test suite.
 
 ## Tests
 
-**15 dependency-free suites · 1297 checks.** Counts are declared checks, not a claim
-that all acceptance criteria currently pass. **Prompt 5.1 is blocked:** audio-quality
-currently passes 8/9 checks: broadband noise still misses +8 dB. The new
-AR/Hermite de-clipper passes its >8.5 dB fixture gates; see `docs/DECLIPPING-AR.md`.
+**16 dependency-free suites · 1319 checks.** Counts are declared checks, not a claim
+that all acceptance criteria currently pass. The unchanged audio-quality suite now
+passes **9/9**: broadband STFT Wiener repair gains **+14.64 dB** on seeded white
+noise; AR/Hermite de-clipping retains **+27.17 dB**. Full workflow/browser acceptance
+(5.1B/5.2) remains separate; see `docs/AUDIO-QUALITY.md`.
 The encoding batch additionally requires optional Chromium. `node scripts/validate-docs.js --run` re-runs them and
 fails if this file, `tests/` and `package.json` ever disagree.
 
@@ -645,12 +647,13 @@ fails if this file, `tests/` and `package.json` ever disagree.
 | Stage 0 (pre-DSP) | `tests/stage0.test.js` | 86 | the SAB ring (exact round-trips, wrap, all-or-nothing writes, the underrun/overflow counters, the non-shared fallback), the chunk plan and its seam crossfades, the 48 kHz resampling, stem mixing, the fallback contract, and the engine wiring: C really is Stage 0 + DSP, and a missing model leaves B bit-identical |
 | Mobile UX | `tests/mobile-ux.test.js` | 103 | the carousel effect rack, the gold "AI Magic Fix" button, the live A/B/C compare FAB, **the phone's card inspector** (markup, focus trap, the grid handed back to its exact index, haptic fallback), navigator.vibrate safety, switchBuffer() position preservation, seek() clamping and its no-buffer no-op, tap/hold |
 | De-clipping AR | `tests/declip-ar.test.js` | 43 | 32–96 kHz reference gains >8.5 dB, independent frequencies, raw-only masked LPC, boundary tangents, strict rail projection, retained clean samples, safe manual/auto and linked stereo headroom |
-| Audio quality | `tests/audio-quality.test.js` | 9 | SI-SDR/LSD identities and edge cases; real-worklet clipping/noise/hum gains (clipping ≥8.5 dB; noise still fails +8 dB) |
+| Audio quality | `tests/audio-quality.test.js` | 9 | SI-SDR/LSD identities and edge cases; real-worklet clipping/noise/hum gains (clipping ≥8.5 dB; noise +14.64 dB, hum +11.60 dB) |
+| Wiener & alignment | `tests/wiener.test.js` | 22 | STFT unity reconstruction, streaming parity, latency/tail flush, reset, stereo, explicit bounded lag diagnostics, whole-file/chunked/bypass exports |
 | Encoding batch | `tests/encoding-batch.test.js` | 5 | ten real WASM MP3 encodes with browser decode, ten streamed WAVs, source ownership, rAF gaps and long tasks |
 
 ```bash
 npm install          # only for the test suite and the static analysis (jsdom, acorn)
-npm test             # runs all fifteen suites; audio-quality currently exits 1 (white noise)
+npm test             # runs all sixteen suites, including unchanged audio-quality gates
 node scripts/validate-docs.js        # README ↔ tests/ ↔ package.json consistency
 node scripts/validate-docs.js --run  # the same, and re-counts every suite
 node scripts/analyze-code.js         # static analysis of the shipped JavaScript
