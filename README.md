@@ -291,8 +291,8 @@ and runs per sample, control-rate decimated for speed:
 | # | Stage | What it does |
 | --- | --- | --- |
 | 0 | **Presence follower** | a 13 ms envelope against a one-second average; it gates every synthesis stage, so nothing is generated in a gap — the air and the sub octave arrive with the music, not with the noise floor |
-| 1 | **Input DC guard** | 2 Hz one-pole: removes a damaged file's offset without rotating the phase of the 20–60 Hz region, where the sub-bass repair works |
-| 1a | **De-clip (CBAR)** | a *plateau* in the waveform — one sample to over a thousand sitting flat at the file's own peak level, which is what a limited master (or, on an extended run, a historical transfer's motor overload) did to its peaks — is reconstructed by one of three models, in order of how much evidence the run itself carries. A **short** run (≤ 269 samples, 5.6 ms) is solved exactly as before: the run's implied overshoot comes from the local period of the zero crossings where one is trustworthy, from a Hermite cubic through the two real neighbouring samples and their slopes where it is not, and whichever model predicts more is the one taken. A **longer but still periodic** run — a slow, heavily overloaded bass note whose flat top outlasts the old 269-sample ceiling — uses the *same* length-solves-for-the-peak formula (a sine of amplitude A clipped at T stays at or above T for T/A ≤ cos(ω·len/2), which does not get weaker as the run gets longer: it is exact up to half the signal's own period, which is also the hard ceiling on how long a same-sign run can ever be) but draws it as a symmetric raised-cosine arc over the *whole* run instead of a single bounded cubic, because a long span has more independent length-evidence to lean on than two sampled boundary slopes do. A run with **no reliable period** (broadband overload, clipped noise) falls back to CBAR proper — Constrained Blind Amplitude Reconstruction: an order-16 autoregressive model (Levinson–Durbin) is fit separately to the 128 samples of real audio immediately before the run and the 128 immediately after, each run forward as a zero-input filter across the gap, the two extrapolations cross-faded with a raised-cosine weight, and the result constrained to never cross back below the measured clip rail — so a run nothing can be inferred about settles honestly at the flat top it started at, rather than at a guess. The detector keys on the measured plateau level of *this* file, not on a constant, which is what separates clipping from a merely loud waveform: a loud but unclipped recording measures 0.0007 % flat samples and 0.07 dB of implied overshoot, a clipped one 0.39 % and 1.7 dB. Measured on a 25 Hz tone at twice the clip level (70 % of each half-cycle flat, 679 samples long — far beyond anything the old 269-sample ceiling could touch at all) the shape error against the known original goes from −13.9 dB unrepaired to −33.7 dB repaired by the periodic model; a milder 30 Hz/456-sample case goes from −18.0 to −43.7 dB; a clipped noise burst (no period to find) still produces zero non-finite samples and never reads worse than the flat top it replaced. It runs first among the repairs, before anything else looks at the waveform — and the output guard's knee moves up with whatever the stage reconstructed (a per-file maximum), because that guard sits *below* the plateau of a clipped master and would otherwise flatten the restored arc straight back into the flat top it came from: on a 997 Hz tone clipped at 0.99, −16.2 dB of error left in the plateau with a fixed knee against −29.1 dB with the knee lifted |
+| 1 | **De-clip (AR/Hermite + CBAR)** | Raw PCM is segmented at its measured saturation rail before DC filtering. Short runs (≤5.6 ms) use masked, time-reversible covariance LPC/AR(4–8), learned from up to 512 preceding observations and up to 128 clean exit samples. Regression windows crossing clipping are excluded; predictions never train on previously reconstructed samples. Forward/backward predictions blend into a cubic Hermite bridge with the two observed boundary slopes, then damaged samples are projected strictly above the signed rail, with bounded peak excursion. Insufficient context, unpredictable material or divergent models retain the historical cubic/period fallback. Longer runs retain the periodic or order-16 CBAR model. Stereo-linked attenuation accounts for the reconstructed absolute peak even with loudness matching disabled, so the raised crest survives export rather than being clipped flat again. The unchanged 48 kHz reference improves by **+27.17 dB SI-SDR**; the dedicated fixture matrix passes >8.5 dB, not a universal recovery promise. See `docs/DECLIPPING-AR.md`. |
+| 1a | **Input DC guard** | 2 Hz one-pole after raw-rail reconstruction: removes a damaged file's offset without first shifting the observed clipping rail. With de-clipping disabled, this linear filter and the stage's delay commute. |
 | 1b | **Sub-sonic guard** | a 4-section (48 dB/octave) high-pass at the corner the measurement asks for: 18–24 Hz where a turntable's rumble sits *below* the music, escalating to 42 Hz — the top of the band the statistic calls rumble — only when the quiet passages are **saturated** with it (8 dB or more of the app's own excess). A turntable's rumble lives down there and no instrument does, which is why the corner stays low unless the floor itself is the defect |
 | 2 | **Static EQ bank** | 6 biquads: 60 Hz shelf, 200 Hz mud, 450 Hz box, 1.3 kHz honk, 3.2 kHz presence, 7 kHz air — the profile's anchors, dosed from the measurement |
 | 2b | **Per-song corrective EQ** | 12 bands, 50 Hz … 8 kHz at Q 1.4, correcting the file's own departures from its own spectral trend — net of what the six profile bands do. ±1.5 dB dead zone, ±6 dB cap, no boost near the noise floor, no correction in a band the file does not fill |
@@ -323,7 +323,7 @@ repairs that cannot be done without seeing a little of the future:
   an extended, non-periodic run falls back to CBAR's forward/backward AR model — the 128 samples of
   real audio collected *after* the run for the backward half of that fit (1330 samples at 48 kHz,
   27.7 ms: 1200 the longest run it will ever track open-ended, plus 128 of trailing context, plus a
-  few samples of margin). A short or periodic run resolves in a fraction of that and never needs the
+  few samples of margin). A short AR run also collects clean exit context; neither short nor periodic runs need the
   worst case, but the stage's reported latency is one fixed number regardless, so the chain stays
   sample-aligned whichever model a given run actually took;
 * the **true-peak limiter** computes the gain 1.5 ms ahead of the sample it applies to, plus the
@@ -555,6 +555,8 @@ tests/
                                  engine wiring that makes C measurably cleaner than B with no
                                  buffer underruns (86 checks)
   encoding-worker-adapter.js     worker_threads adapter for the unmodified production worker
+  declip-ar.test.js              masked LPC, Hermite boundaries, strict rail constraints,
+                                 untouched observations and linked headroom (43 checks)
   audio-quality.test.js          known-clean reference metrics and real-worklet gain (9 checks)
   encoding-batch.test.js         real Chromium batch and frame pacing (5 checks)
   mobile-ux.test.js              the carousel effect rack, the gold "AI Magic Fix" button,
@@ -621,9 +623,10 @@ belong to the test suite.
 
 ## Tests
 
-**14 dependency-free suites · 1254 checks.** Counts are declared checks, not a claim
+**15 dependency-free suites · 1297 checks.** Counts are declared checks, not a claim
 that all acceptance criteria currently pass. **Prompt 5.1 is blocked:** audio-quality
-currently passes 7/9 checks; clipping and broadband noise miss the +8 dB target.
+currently passes 8/9 checks: broadband noise still misses +8 dB. The new
+AR/Hermite de-clipper passes its >8.5 dB fixture gates; see `docs/DECLIPPING-AR.md`.
 The encoding batch additionally requires optional Chromium. `node scripts/validate-docs.js --run` re-runs them and
 fails if this file, `tests/` and `package.json` ever disagree.
 
@@ -641,12 +644,13 @@ fails if this file, `tests/` and `package.json` ever disagree.
 | Chunked render | `tests/chunked-render.test.js` | 57 | chunk boundaries and level-preserving crossfades, the streaming WAV/MP3 encoders, the mid-render shrink, the abort a failing onChunk triggers, a sink that takes ownership of the buffer it is handed; poisoned lease recovery, idempotent abort, unavailable-worker rejection |
 | Stage 0 (pre-DSP) | `tests/stage0.test.js` | 86 | the SAB ring (exact round-trips, wrap, all-or-nothing writes, the underrun/overflow counters, the non-shared fallback), the chunk plan and its seam crossfades, the 48 kHz resampling, stem mixing, the fallback contract, and the engine wiring: C really is Stage 0 + DSP, and a missing model leaves B bit-identical |
 | Mobile UX | `tests/mobile-ux.test.js` | 103 | the carousel effect rack, the gold "AI Magic Fix" button, the live A/B/C compare FAB, **the phone's card inspector** (markup, focus trap, the grid handed back to its exact index, haptic fallback), navigator.vibrate safety, switchBuffer() position preservation, seek() clamping and its no-buffer no-op, tap/hold |
-| Audio quality | `tests/audio-quality.test.js` | 9 | SI-SDR/LSD identities and edge cases; real-worklet clipping/noise/hum gain ≥8 dB (currently 2 failures) |
+| De-clipping AR | `tests/declip-ar.test.js` | 43 | 32–96 kHz reference gains >8.5 dB, independent frequencies, raw-only masked LPC, boundary tangents, strict rail projection, retained clean samples, safe manual/auto and linked stereo headroom |
+| Audio quality | `tests/audio-quality.test.js` | 9 | SI-SDR/LSD identities and edge cases; real-worklet clipping/noise/hum gains (clipping ≥8.5 dB; noise still fails +8 dB) |
 | Encoding batch | `tests/encoding-batch.test.js` | 5 | ten real WASM MP3 encodes with browser decode, ten streamed WAVs, source ownership, rAF gaps and long tasks |
 
 ```bash
 npm install          # only for the test suite and the static analysis (jsdom, acorn)
-npm test             # runs all fourteen suites; audio-quality currently exits 1
+npm test             # runs all fifteen suites; audio-quality currently exits 1 (white noise)
 node scripts/validate-docs.js        # README ↔ tests/ ↔ package.json consistency
 node scripts/validate-docs.js --run  # the same, and re-counts every suite
 node scripts/analyze-code.js         # static analysis of the shipped JavaScript

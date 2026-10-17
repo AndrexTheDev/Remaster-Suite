@@ -43,7 +43,7 @@ const clean = Float32Array.from({ length: SR * 4 }, (_, i) =>
 let seed = 0x51a;
 function random() { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 4294967296 * 2 - 1; }
 const cases = [
-  { name: 'Clipping', input: Float32Array.from(clean, x => Math.max(-0.35, Math.min(0.35, x))), params: { declip: 1, declipLevel: 20 * Math.log10(0.35) } },
+  { name: 'Clipping', minGain: 8.5, input: Float32Array.from(clean, x => Math.max(-0.35, Math.min(0.35, x))), params: { declip: 1, declipLevel: 20 * Math.log10(0.35) } },
   { name: 'White Noise', input: Float32Array.from(clean, x => x + 0.12 * random()), params: { dehiss: 1, noiseFloor: -23, hissF: 3200 } },
   { name: 'Hum', input: Float32Array.from(clean, (x, i) => x + 0.15 * Math.sin(2 * Math.PI * 50 * i / SR)), params: { hum: 1, humHz: 50 } },
 ];
@@ -56,7 +56,8 @@ for (const c of cases) {
   const before = DSP.siSdr(reference, input), after = DSP.siSdr(reference, output);
   const lsdBefore = DSP.logSpectralDistance(reference, input), lsdAfter = DSP.logSpectralDistance(reference, output);
   console.log(`${c.name}: SI-SDR ${before.toFixed(2)} → ${after.toFixed(2)} dB; gain ${(after - before).toFixed(2)} dB; LSD ${lsdBefore.toFixed(2)} → ${lsdAfter.toFixed(2)} dB`);
-  check(c.name + ' SI-SDR gain ≥ +8 dB', () => assert(after - before >= 8, `measured ${(after - before).toFixed(2)} dB`));
+  const target = c.minGain || 8;
+  check(c.name + ' SI-SDR gain ≥ +' + target + ' dB', () => assert(after - before >= target, `measured ${(after - before).toFixed(2)} dB`));
 }
 console.log(`${failures ? 'FAILED' : 'ALL TESTS PASSED'} (${checks} passed, ${failures} failed)`);
 process.exitCode = failures ? 1 : 0;

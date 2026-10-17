@@ -1,12 +1,12 @@
 # Prompt 5.1 — measured results and open acceptance criteria
 
-Status: **encoding implemented; objective quality acceptance is NOT met.**
+Status: **de-clipping follow-up passes its reference gates; white-noise acceptance is still NOT met.**
 
 ## Reproduction
 
 ```sh
 npm install
-node tests/audio-quality.test.js       # currently exit 1: two genuine failures
+node tests/audio-quality.test.js       # currently exit 1: white noise still fails
 node tests/encoding-batch.test.js      # real Chromium; optional @sparticuz/chromium required
 ```
 
@@ -24,17 +24,20 @@ are the existing DSP route, not an assertion about neural restoration.
 
 | Corruption | Input SI-SDR | Output SI-SDR | Gain | LSD input → output | ≥ +8 dB |
 |---|---:|---:|---:|---:|---|
-| Clipping | 12.45 dB | 14.95 dB | +2.51 dB | 65.58 → 63.84 dB | **FAIL** |
+| Clipping (AR/Hermite upgrade) | 12.45 dB | 39.61 dB | +27.17 dB | 65.58 → 47.08 dB | PASS (also ≥8.5 dB) |
 | White noise | 14.18 dB | 14.17 dB | −0.01 dB | 88.13 → 88.13 dB | **FAIL** |
 | Hum | 10.50 dB | 22.10 dB | +11.60 dB | 4.01 → 0.99 dB | PASS |
 
-Six metric checks pass, and one of three restoration checks passes: **7/9**.
-The suite intentionally exits nonzero; neither the threshold nor the fixtures
-have been weakened to manufacture a green result. No claim of general +8 dB
-restoration is justified by the current implementation. In particular, a
-high-frequency de-hisser does not remove broadband in-band white noise. Closing
-this acceptance gap needs better restoration and a broader speech/music corpus,
-not a different SI-SDR definition or handpicked signal.
+Six metric checks and two restoration checks pass: **8/9**. The suite still
+exits nonzero because white noise misses +8 dB. Clipping is now repaired by the
+AR/Hermite follow-up; its acceptance threshold was **raised** to +8.5 dB and the
+original source/corruption/reference were not changed. The previous implementation
+measured only +2.51 dB. See `DECLIPPING-AR.md` and `tests/declip-ar.test.js` for
+43 focused checks and fifteen gain fixtures at 32–96 kHz (all above +8.5 dB).
+
+This is not proof of general restoration quality. The high-frequency de-hisser
+still does not remove broadband in-band white noise; that needs better denoising
+and a broader speech/music corpus, not a weaker metric or threshold.
 
 `siSdr(reference, estimate)` subtracts each signal's mean, computes
 `alpha = dot(estimate, reference) / dot(reference, reference)`, then returns
@@ -61,7 +64,7 @@ long tasks throughout encoding, decode checks and WAV packing. PCM fixture
 construction happens before measurement.
 
 Latest isolated run: Chromium 153.0.8010.0, **two actual encoding workers**,
-352 frame intervals, mean **60.00 FPS**, p95/max **16.67 ms**, **zero intervals
+342 frame intervals, mean **60.00 FPS**, p95/max **16.67 ms**, **zero intervals
 above 20 ms**, **zero long tasks**. Each MP3 is 720,979 bytes; total WAV output
 52,920,440 bytes. The browser's hardwareConcurrency *hint* is explicitly overridden
 to four via CDP to exercise the two-worker branch; this does not allocate or claim
@@ -91,7 +94,7 @@ legitimately make it fail on another run. Physical-device validation remains ope
 
 See `assets/vendor/NOTICE.md` for wrapper/LAME licensing and source/build links.
 
-## Regression validation
+## Regression validation from the initial encoding change
 
 The twelve pre-existing suites were executed individually after adapting the
 export integrations to real WASM workers: **1240 checks pass** (chunked-render
@@ -104,7 +107,11 @@ completion, since cold WASM initialization is genuinely asynchronous.
 The original `npm test` aggregate run exposed stale lamejs-specific audit and
 mobile timing assumptions, which were then fixed and re-run. No successful
 aggregate `npm test` is claimed: its new final quality gate remains red by design
-until the two +8 dB restoration failures are addressed. The older full beta/UI
+until the remaining white-noise restoration failure is addressed. The older full beta/UI
 screenshot suite was not re-run for this change. Historical true-peak-margin
 measurements were made with lamejs; the tooling now uses the production WASM
 codec, but that full corpus should be requalified before release.
+
+The subsequent de-clipping change completed the full fifteen-suite `npm test`
+chain: **1296 passed / 1 failed**, solely the remaining white-noise gate. See
+`DECLIPPING-AR.md` for the changed AudioWorklet and focused 43-check acceptance.

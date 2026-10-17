@@ -6,6 +6,28 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Round 37 — short-peak de-clipping with masked AR and constrained Hermite joins
+
+* Short saturated runs now try time-reversible covariance LPC/AR(4–8), trained
+  exclusively on contiguous clean windows in original observations. Two-sided
+  extrapolation blends with observed-slope Hermite boundaries; damaged samples
+  are projected strictly above the rail, with finite/fit/disagreement guards.
+* Retain the original cubic/period repair when the model lacks evidence, and
+  retain the extended-run periodic/CBAR paths. No extra declared latency.
+* Reconstruct before input DC filtering; include Float32 threshold tolerance
+  and stop candidates when they leave the measured clipping threshold.
+* Stereo-linked absolute-peak headroom applies even with autoLevel disabled.
+* Original quality fixture: **+27.17 dB** instead of +2.51 dB. New focused
+  `declip-ar` suite: **43 checks**, fifteen gain fixtures above +8.5 dB.
+  White-noise quality remains unresolved: audio-quality is **8/9**, not green.
+* Full fifteen-suite `npm test`: **1296 passed / 1 failed**, only white noise.
+  The encoding frame test also passes; no physical-device real-time claim.
+* Correct the old detector assertion against a clean sine reference: a genuine
+  sine has 2.43% naturally near-flat crest samples, so demanding <0.84% rewarded
+  an artificially pointed arc. The test retains strict missing-peak/evidence
+  limits and now checks occupancy against the known clean reference.
+
+
 ### Round 36 — pooled LAME WASM export and objective quality gates (Prompt 5.1, partial)
 
 * MP3 whole-file and incremental export now share a bounded 1–2-worker LAME
