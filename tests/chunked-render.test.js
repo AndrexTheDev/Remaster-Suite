@@ -103,6 +103,32 @@ function memSink() {
   };
 }
 
+/** A sink that behaves like the real OPFS writer (`RSOPFS.createWriter()`): it
+ *  hands the buffer it is given to another thread instead of copying it, which
+ *  detaches the caller's view of it in the same turn. */
+function takingSink() {
+  const parts = [];
+  let size = 0;
+  return {
+    async write(chunk) {
+      const u8 = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+      const n = u8.length;
+      const buf = u8.buffer.byteLength === u8.byteLength ? u8.buffer : u8.slice().buffer;
+      parts.push(new Uint8Array(structuredClone(buf, { transfer: [buf] })));
+      size += n;
+    },
+    async close() { return { size }; },
+    get size() { return size; },
+    concat() {
+      const total = parts.reduce((a, p) => a + p.length, 0);
+      const out = new Uint8Array(total);
+      let off = 0;
+      for (const p of parts) { out.set(p, off); off += p.length; }
+      return out;
+    },
+  };
+}
+
 /** lamejs loaded straight into a vm sandbox and attached to `global.lamejs` — the
  *  same trick tests/audit.test.js uses — so `Libs.lame()`'s fast path kicks in
  *  without needing a `document` to append a `<script>` to. */
@@ -325,6 +351,25 @@ async function run() {
     const sizeDiff = Math.abs(streamedOnce.length - batch.length);
     ok(sizeDiff <= 512, 'and it is essentially the same size as the existing batch encoder given the same single call shape',
       streamedOnce.length + ' vs ' + batch.length + ' bytes (diff ' + sizeDiff + ')');
+  }
+
+  section('Codecs.encodeMp3() · a sink that takes the buffer cannot break the final gate');
+  {
+    ensureLamejs();
+    // The bug this pins: the gate that refuses a silent MP3 inspected the first
+    // chunk *after* handing it to the sink, and a real sink (OPFS) transfers
+    // that buffer away — so the header it checked was a detached, zero-length
+    // view, and every streamed MP3 export failed with 'mp3-invalid'.
+    const sink = takingSink();
+    let res = null, err = null;
+    try { res = await Codecs.encodeMp3(source, SR, 192, null, sink); } catch (e) { err = String(e.message); }
+    ok(err === null, 'encoding into a sink that detaches every chunk it is given settles at all', err || 'resolved');
+    const stream = sink.concat();
+    ok(!!res && res.bytesWritten > 4000 && res.bytesWritten === stream.length,
+      'and the whole stream is in the sink when it does',
+      res ? res.bytesWritten + ' bytes written, ' + stream.length + ' received' : 'nothing was written');
+    ok(Codecs.looksLikeMp3(stream), 'and what landed there still starts like MPEG audio',
+      '[' + [...stream.slice(0, 4)].map((b) => '0x' + b.toString(16)).join(' ') + ']');
   }
 
   section('Codecs.createMp3StreamEncoder() · several small chunks still produce one valid, decodable stream');

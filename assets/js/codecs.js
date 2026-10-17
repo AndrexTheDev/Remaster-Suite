@@ -675,7 +675,11 @@
       const data = await once();
       if (data && data.byteLength) {
         const bytes = new Uint8Array(data);
-        if (!firstChunk) firstChunk = bytes;
+        // A copy of the header, taken *before* the write: a real sink may take
+        // ownership of the buffer it is handed (the OPFS writer transfers it to
+        // its own worker), which detaches this view — and the gate at the end
+        // still has to read those first bytes.
+        if (!firstChunk) firstChunk = bytes.slice(0, 4);
         bytesWritten += bytes.length;
         await out.write(bytes);
       }
@@ -717,7 +721,7 @@
       const mb = enc.encodeBuffer(l, r);
       if (mb.length) {
         const bytes = new Uint8Array(mb);
-        if (!firstChunk) firstChunk = bytes;
+        if (!firstChunk) firstChunk = bytes.slice(0, 4);   // before the sink can take it
         bytesWritten += bytes.length;
         await out.write(bytes);
       }
@@ -725,7 +729,7 @@
         const f = enc.flush();
         if (f.length) {
           const bytes = new Uint8Array(f);
-          if (!firstChunk) firstChunk = bytes;
+          if (!firstChunk) firstChunk = bytes.slice(0, 4);
           bytesWritten += bytes.length;
           await out.write(bytes);
         }
@@ -763,8 +767,9 @@
    * be validated.
    * @param {Object} out - the internal collecting sink (read only when no
    *   external sink was supplied).
-   * @param {Uint8Array|null} firstChunk - the first chunk the encoder produced;
-   *   `null` means nothing was produced at all.
+   * @param {Uint8Array|null} firstChunk - the first bytes the encoder produced
+   *   (a four-byte copy, so that a sink which takes ownership of the chunk it
+   *   is given cannot detach them); `null` means nothing was produced at all.
    * @param {number} bytesWritten - total bytes written to the sink.
    * @param {number} rate - the rate encoded at.
    * @param {number} samples - source frames encoded.

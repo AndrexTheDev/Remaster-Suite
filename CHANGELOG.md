@@ -6,6 +6,80 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Round 32 — the beta suite learns to use a thumb, and to look at what it drew
+
+**Round 30 put a carousel, a gold button and a floating A/B/C switch on the phone screen. Eleven node
+suites tested their markup and their maths; the beta suite — the only thing that drives the real
+browser — never touched them, and it only ever looked at the page as a desktop.** This round it does
+both, and the browser suite becomes answerable for the mobile interface the same way the node suites
+are answerable for the code.
+
+**1 — a device matrix instead of one viewport.** The suite now emulates desktop 1440×900 @1, an
+iPhone 14 Pro at 393×852 @3 and a Pixel 7 at 412×915 @2.625 — viewport, device scale factor and touch
+points together, because the app reads all three: `maxTouchPoints`, `(pointer: coarse)` and
+`isTouchDevice()`. The rows assert what the page itself reports, not what the browser was asked for:
+the emulated viewport is the viewport, the pointer is a finger on both phones and a mouse on the
+desktop, and a phone is told apart from the desktop *without a reload* (the drop zone switches from
+"Audiodateien hier ablegen" to "Audiodateien auswählen").
+
+**2 — the rack is swiped with real touch events.** `Input.dispatchTouchEvent` — touchStart at 60 % of
+the rack, then twelve touchMoves of 18 px at 16 ms intervals, then touchEnd — because
+`Input.synthesizeScrollGesture` is a no-op in Chromium 153. The rows then hold the page to the
+contract: six groups in 2 068 px of scroll inside a 393 px screen, `scroll-snap-type: x mandatory`,
+`scroll-snap-align: center`, `scroll-snap-stop: always`, 338 px per group; the swipe really scrolls
+(the compositor reports 40 scroll events and `scrollLeft` 330), lands on the snap point within a
+pixel of centre, and the dot trail's lit dot follows the page the finger left on screen. On a desktop
+the same rack is a wrapped row of controls again — `snap none`, `overflow-x visible`, the dots
+`display: none`, five rows.
+
+**3 — Magic Fix is tapped, the FAB is tapped and held.** A `touchStart`/`touchEnd` pair on
+`#btnMagicFix` has to apply the pre-judged setting rather than the one set by hand (preset `auto`,
+power 0.85), answer with the app's own toast, and — on a phone, where `State.touch` is true — start
+the batch by itself: the row waits for the card to be `done` and for `.is-firing` to clear, so the
+next tap is not refused. The A/B/C switch is driven through `#fabABBtn`: it appears only while
+playback runs, 60×60 px, 86 px above the bottom of the phone screen and 18 px from the right; a tap
+switches to the original (label A, `State.ab`, the engine's bypass and the rack's own switch all
+agreeing), a second tap goes back, a hold longer than 220 ms engages the original for as long as the
+finger is down (`.is-holding`) and does not count as a tap on release, and the C position is simply
+not offered when no neural preview exists.
+
+**4 — screenshots that are compared, not just collected.** `tests/beta/png.js` is a PNG
+decoder/encoder and a pixel differ in about two hundred lines of zlib — no `pixelmatch`, no
+`pngjs`, because the beta suite has no dependencies and is not going to get some for this. Six
+states are recorded as baselines in `docs/beta/baseline/` (empty desktop, empty iPhone, empty Pixel,
+two carousel pages, the desktop rack) and every run diffs the live picture against them pixel by
+pixel: a differing row fails and writes a red-on-dim picture of what moved into `docs/beta/diff/`,
+and a *missing* baseline is a failure too, so deleting the record cannot wave a regression through.
+New baselines are recorded deliberately with `--accept-baseline`. The deterministic raster matters:
+the launcher keeps `--disable-lcd-text`, `--disable-font-subpixel-positioning` and
+`--force-color-profile=srgb`, without which the same page drifts by ~9 000 px between reloads
+(font anti-aliasing), and every capture runs in German with reduced motion.
+
+**5 — two bugs the new rows found, and one in the harness.** The row that samples the progress bar
+while a real MP3 render runs caught a screenshot bug that would have quietly weakened every future
+pixel assertion: a **clipped** `Page.captureScreenshot` on a scrolled page returns the stale
+composited frame — a region painted red came back empty, three times, a quarter-second apart —
+while the whole-viewport shot beside it changed every time. The region is now cut out of the whole
+shot in Node. Cutting it out also turned up the second one: Chromium answers with **three-channel**
+PNG here, so a crop written with a four-byte stride reads past every second pixel and turns any
+region into noise — which is exactly what "1 distinct picture" over twenty-four samples looked like.
+The row is honest now in both directions: it asserts the bar is on screen before its pixels are
+compared, and that the pixels differ as the render advances. The harness bug was a profile left
+behind by a killed browser wedging the next one's OPFS: every run gets its own profile directory
+now (`profile-<pid>-<ts>`, pruned after six hours), and `cleanProfile()` exists for probe work.
+
+**6 — the scale rows stop measuring the sandbox.** Two thresholds were absolute budgets —
+"a 3-minute take renders in real time or faster" asserted `< 60 000 ms` under a name that claims
+real time — and on a busy machine the same take rendered in 57.7 s once and 67.9 s the next run.
+The row now asserts what its name says (`< duration × 1000`), and the diagnostic floors are looser
+and documented as sanity nets rather than benchmarks; the *calibrated* claim, which compares the
+180 s take against a 30 s take measured seconds earlier on the same machine, is untouched.
+
+beta.js 94 → **155 checks** (61 new rows across the device matrix, the rack, Magic Fix, the FAB,
+the phone screens and the visual invariants). The regression test for the streamed-encoder bug
+Rounds 31b found in `codecs.js` landed in `chunked-render.test.js` with it: 50 → **53**, the suite
+total 1 042 → **1 045**.
+
 ### Round 31b — the documentation is checked now, so the code gets the same treatment
 
 **Round 31 made the README answerable for what it claims about the tree. Nothing answered for the

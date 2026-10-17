@@ -83,6 +83,13 @@ The suite is built to be used in a phone browser:
   that budget stops being a hard ceiling at all — see below.
 * Verified in a real browser at 320, 360, 390, 414 and 768 px wide — no horizontal scrolling
   anywhere, in `tests/beta/beta.js` and the screenshot matrix in [`docs/beta/`](docs/beta).
+* And verified where it matters most: on emulated **iPhone 14 Pro** (393×852 @3) and **Pixel 7**
+  (412×915 @2.625) profiles with *real* touch input — the effect rack swiped with a finger (the
+  compositor does the scrolling and the CSS does the snapping; the dot trail follows), `Magic Fix`
+  tapped with a thumb (which on a phone renders the batch by itself), the A/B/C button tapped,
+  held and released. Six of those states are compared **pixel for pixel** against the accepted
+  baselines in [`docs/beta/baseline/`](docs/beta/baseline) on every run; a differing row fails and
+  leaves a picture of what moved. See [the tests](#tests).
 
 ### The one slider
 
@@ -505,8 +512,9 @@ tests/
                                  stop function that never leaks a timer (21 checks)
   chunked-render.test.js         the chunked/streamed offline render: chunk boundaries and
                                  level-preserving crossfades, the streaming WAV/MP3 encoders,
-                                 the mid-render shrink, and the abort path that a failing
-                                 onChunk triggers (50 checks)
+                                 the mid-render shrink, the abort path that a failing onChunk
+                                 triggers, and a sink that takes the buffer it is handed —
+                                 the way the OPFS writer does (53 checks)
   mobile-ux.test.js              the carousel effect rack, the gold "AI Magic Fix" button and
                                  the live A/B/C compare FAB: markup/CSS, navigator.vibrate
                                  safety, switchBuffer() position preservation, seek()
@@ -520,9 +528,14 @@ tests/
   beta/
     beta.js                      the real-browser suite: every control on the page,
                                  the whole journey from file to export, the scale
-                                 rows, the progress bars, the phone layouts (94 checks)
+                                 rows, the progress bars, the phone layouts — and the
+                                 three mobile-UX surfaces driven with real touch: the
+                                 swipeable effect rack, the Magic Fix button, the live
+                                 A/B/C compare FAB (155 checks)
     cdp.js                       minimal Chrome DevTools Protocol client over the
                                  platform WebSocket — no dependency beyond Node ≥ 22
+    png.js                       PNG decoder/encoder and pixel differ in ~200 lines of
+                                 zlib — the screenshot regression rows, no dependency
     chromium.js                  launcher for the packaged headless Chromium
 scripts/
   validate-docs.js               documentation validator: tests/ ↔ README.md ↔ package.json
@@ -563,7 +576,7 @@ belong to the test suite.
 
 ## Tests
 
-**11 dependency-free suites · 1042 checks.** Every count below is the suite's own
+**11 dependency-free suites · 1045 checks.** Every count below is the suite's own
 (`ALL TESTS PASSED (n)`); `node scripts/validate-docs.js --run` re-runs them and
 fails if this file, `tests/` and `package.json` ever disagree.
 
@@ -578,7 +591,7 @@ fails if this file, `tests/` and `package.json` ever disagree.
 | Cross-origin isolation | `tests/coi.test.js` | 19 | coi-serviceworker.js as a Service Worker and as a page script: the COOP/COEP rewrite, the one-reload rule, never a reload loop |
 | Neural | `tests/neural.test.js` | 87 | the model path with no weights installed: the controller/worker contract, T-frame alignment, STFT round-trips, the capability probe, provider order, quantised-variant selection, the watchdog and the Stage-7 coupling |
 | Memory guard | `tests/memory-guard.test.js` | 21 | the heap watchdog on a host without `performance.memory`: the honest no-signal default, the one-way shrink ramp, a stop function that never leaks a timer |
-| Chunked render | `tests/chunked-render.test.js` | 50 | chunk boundaries and level-preserving crossfades, the streaming WAV/MP3 encoders, the mid-render shrink, the abort a failing onChunk triggers |
+| Chunked render | `tests/chunked-render.test.js` | 53 | chunk boundaries and level-preserving crossfades, the streaming WAV/MP3 encoders, the mid-render shrink, the abort a failing onChunk triggers, a sink that takes ownership of the buffer it is handed |
 | Mobile UX | `tests/mobile-ux.test.js` | 53 | the carousel effect rack, the gold "AI Magic Fix" button, the live A/B/C compare FAB, navigator.vibrate safety, switchBuffer() position preservation, seek() clamping and its no-buffer no-op, tap/hold |
 
 ```bash
@@ -602,17 +615,27 @@ node tests/mobile-ux.test.js       # carousel rack, Magic Fix button, A/B/C comp
 
 node tests/beta/beta.js    # big beta: drives a real headless Chromium over the DevTools
                            # protocol — real clicks, real drops, real AudioWorklet, real
-                           # dialogs and downloads, phone emulation at 390 and 320 px with
-                           # live progress sampling — and photographs the screenshot matrix.
+                           # dialogs and downloads, phone emulation at 320…768 px with live
+                           # progress sampling — and photographs the screenshot matrix.
+                           # It emulates desktop 1440×900, iPhone 14 Pro 393×852 @3 and
+                           # Pixel 7 412×915 @2.625 (viewport, scale factor, touch) and
+                           # drives the phone-only surfaces with real touch events: the
+                           # carousel is swiped, Magic Fix is tapped, the A/B/C FAB is
+                           # tapped and held. Six states are diffed pixel for pixel against
+                           # docs/beta/baseline/, and a differing or missing baseline fails
+                           # the run — record new ones deliberately with --accept-baseline.
                            # The recordings are the same synthesised fixtures the node suites
                            # use, served to the page, and the upload path is timed phase by
                            # phase. The two scale rows calibrate themselves: a 30-second take
                            # goes through the identical instrumented path seconds earlier on
                            # the same machine, and what the row holds the app to is the
-                           # machine's own rate, not an absolute budget. 94 checks
+                           # machine's own rate, not an absolute budget. 155 checks
 ```
 
-The beta writes `docs/BETA-REPORT.md` and the screenshot matrix to `docs/beta/`.
+The beta writes `docs/BETA-REPORT.md`, the screenshot matrix to `docs/beta/` and — when a row
+differs — a red-on-dim picture of what moved to `docs/beta/diff/`. It needs one run of
+`node tests/beta/beta.js --accept-baseline` to write a missing baseline; a *missing* baseline is a
+failure, not a pass, so a visual regression cannot be waved through by deleting the record.
 It needs the optional dev dependency `@sparticuz/chromium` (a packaged headless
 Chromium, used because CI machines rarely ship a browser); `npm test` runs the
 eleven dependency-free suites and stays green everywhere.
