@@ -19,6 +19,7 @@ let procFactory = null;
 
 /** Load the AudioWorkletProcessor class (optionally at a given sample rate). */
 function loadProcessor(sr) {
+  globalThis.RSDSP = loadDsp();
   const rate = sr || 48000;
   if (procCache.has(rate)) return procCache.get(rate);
   if (!procFactory) {
@@ -46,6 +47,7 @@ function loadProcessor(sr) {
  * "the change did nothing", which is the one wrong answer a sweep must not give.
  */
 function loadProcessorEdited(patches, sr) {
+  globalThis.RSDSP = loadDsp();
   const file = path.join(ROOT, 'assets', 'worklets', 'remaster-processor.js');
   let code = fs.readFileSync(file, 'utf8');
   for (const [find, replace] of patches) {

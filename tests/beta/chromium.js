@@ -39,6 +39,21 @@ function ensureChromium() {
   const work = path.join(os.tmpdir(), 'rs-beta-chromium');
   fs.mkdirSync(work, { recursive: true });
 
+  // One profile per run, and never a profile two browsers could share: a
+  // second Chromium on the same `--user-data-dir` wedges the first one's OPFS
+  // layer (its worker's storage calls never return), and that surfaces much
+  // later as a render that sits at 100 % forever. Stale profiles from killed
+  // runs are pruned by age, so a browser that is still running keeps its own.
+  const PROFILE_TTL_MS = 6 * 60 * 60 * 1000;
+  for (const entry of fs.readdirSync(work)) {
+    if (!entry.startsWith('profile-')) continue;
+    const dir = path.join(work, entry);
+    try {
+      if (Date.now() - fs.statSync(dir).mtimeMs > PROFILE_TTL_MS) fs.rmSync(dir, { recursive: true, force: true });
+    } catch (e) { /* in use by another run — leave it alone */ }
+  }
+  const profile = path.join(work, 'profile-' + process.pid + '-' + Date.now().toString(36));
+
   // the package extracts the binary itself; the shared libs and fonts we unpack
   // ourselves, exactly like the package does on AWS Lambda.
   if (!fs.existsSync(path.join(work, 'chromium'))) {
@@ -83,12 +98,30 @@ function ensureChromium() {
     '--autoplay-policy=no-user-gesture-required',
     '--force-device-scale-factor=1',
     '--force-color-profile=srgb',
-    '--user-data-dir=' + path.join(work, 'profile'),
+    // deterministic text rasterisation: two loads of the same page must
+    // produce the same pixels, or a visual-regression baseline is noise
+    '--disable-lcd-text',
+    '--disable-font-subpixel-positioning',
+    '--user-data-dir=' + profile,
   ];
 
   // smoke test
   const version = execFileSync(exe, ['--version'], { env, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
   return { exe, env, args, version };
+}
+
+/**
+ * Delete the profile directory this run created, once its browser is gone: a
+ * killed Chromium leaves a locked OPFS store behind, and the next run must not
+ * inherit it.
+ * @returns {void}
+ */
+function cleanProfile() {
+  const work = path.join(os.tmpdir(), 'rs-beta-chromium');
+  for (const entry of fs.readdirSync(work)) {
+    if (!entry.startsWith('profile-' + process.pid + '-')) continue;
+    try { fs.rmSync(path.join(work, entry), { recursive: true, force: true }); } catch (e) { /* best effort */ }
+  }
 }
 
 /** launch and return the spawned process; caller kills it afterwards */
@@ -103,4 +136,4 @@ function launch(port) {
   return { child, version };
 }
 
-module.exports = { ensureChromium, launch };
+module.exports = { ensureChromium, launch, cleanProfile };

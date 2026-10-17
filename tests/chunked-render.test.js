@@ -29,6 +29,7 @@ const { JSDOM, VirtualConsole } = require('jsdom');
 const H = require('./harness.js');
 const stub = require('./webaudio-stub.js');
 
+global.Worker = require('./encoding-worker-adapter.js');
 const ROOT = H.ROOT;
 const DSP = H.loadDsp();
 const Presets = require(path.join(ROOT, 'assets', 'js', 'presets.js'));
@@ -93,6 +94,32 @@ function memSink() {
     parts,
     async write(chunk) { parts.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)); },
     async close() { return { size: parts.reduce((a, p) => a + p.length, 0) }; },
+    concat() {
+      const total = parts.reduce((a, p) => a + p.length, 0);
+      const out = new Uint8Array(total);
+      let off = 0;
+      for (const p of parts) { out.set(p, off); off += p.length; }
+      return out;
+    },
+  };
+}
+
+/** A sink that behaves like the real OPFS writer (`RSOPFS.createWriter()`): it
+ *  hands the buffer it is given to another thread instead of copying it, which
+ *  detaches the caller's view of it in the same turn. */
+function takingSink() {
+  const parts = [];
+  let size = 0;
+  return {
+    async write(chunk) {
+      const u8 = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+      const n = u8.length;
+      const buf = u8.buffer.byteLength === u8.byteLength ? u8.buffer : u8.slice().buffer;
+      parts.push(new Uint8Array(structuredClone(buf, { transfer: [buf] })));
+      size += n;
+    },
+    async close() { return { size }; },
+    get size() { return size; },
     concat() {
       const total = parts.reduce((a, p) => a + p.length, 0);
       const out = new Uint8Array(total);
@@ -309,22 +336,36 @@ async function run() {
     const streamedOnce = sinkA.concat();
 
     const sinkB = memSink();
-    // bare Node has no Worker, so this — same as createMp3StreamEncoder above —
-    // automatically takes the main-thread lamejs fallback inside encodeMp3()
+    // Node adapter runs the shipped worker in worker_threads with real WASM.
     await Codecs.encodeMp3(source, SR, kbps, null, sinkB);
     const batch = sinkB.concat();
 
     ok(Codecs.looksLikeMp3(streamedOnce), 'the incremental encoder, given everything in one call, produces a valid MP3 stream');
     ok(Codecs.looksLikeMp3(batch), 'the batch encoder output is a valid MP3 stream too');
-    // Not byte-identical: encodeMp3's TPDF dither (assets/js/codecs.js, ~line 299)
-    // mixes in Math.random() per sample, so two independent encodes of the same
-    // audio differ in their low bits even with identical encoder settings.
-    // What must hold is that both runs made the same number of encoding passes
-    // over the same amount of audio, so their output sizes land within a
-    // frame or two of each other.
+    // Deterministic float input, identical LAME configuration; allow frame-size
+    // buffering variation when checking output length.
     const sizeDiff = Math.abs(streamedOnce.length - batch.length);
     ok(sizeDiff <= 512, 'and it is essentially the same size as the existing batch encoder given the same single call shape',
       streamedOnce.length + ' vs ' + batch.length + ' bytes (diff ' + sizeDiff + ')');
+  }
+
+  section('Codecs.encodeMp3() · a sink that takes the buffer cannot break the final gate');
+  {
+    ensureLamejs();
+    // The bug this pins: the gate that refuses a silent MP3 inspected the first
+    // chunk *after* handing it to the sink, and a real sink (OPFS) transfers
+    // that buffer away — so the header it checked was a detached, zero-length
+    // view, and every streamed MP3 export failed with 'mp3-invalid'.
+    const sink = takingSink();
+    let res = null, err = null;
+    try { res = await Codecs.encodeMp3(source, SR, 192, null, sink); } catch (e) { err = String(e.message); }
+    ok(err === null, 'encoding into a sink that detaches every chunk it is given settles at all', err || 'resolved');
+    const stream = sink.concat();
+    ok(!!res && res.bytesWritten > 4000 && res.bytesWritten === stream.length,
+      'and the whole stream is in the sink when it does',
+      res ? res.bytesWritten + ' bytes written, ' + stream.length + ' received' : 'nothing was written');
+    ok(Codecs.looksLikeMp3(stream), 'and what landed there still starts like MPEG audio',
+      '[' + [...stream.slice(0, 4)].map((b) => '0x' + b.toString(16)).join(' ') + ']');
   }
 
   section('Codecs.createMp3StreamEncoder() · several small chunks still produce one valid, decodable stream');
@@ -342,6 +383,28 @@ async function run() {
     const bytes = sink.concat();
     ok(Codecs.looksLikeMp3(bytes), 'a multi-chunk incremental encode is still a valid MP3 stream', bytes.length + ' bytes');
     ok(bytes.length > 2000, 'a sane, non-trivial amount of audio was actually encoded', bytes.length + ' bytes');
+  }
+
+  section('Codecs · failed/aborted leases and missing workers');
+  {
+    const pcm = [source[0].subarray(0, SR)];
+    let sinkError = '';
+    try { await Codecs.encodeMp3(pcm, SR, 192, null, { async write() { throw new Error('sink failed'); } }); }
+    catch (err) { sinkError = err.message; }
+    ok(sinkError === 'sink failed', 'a failed MP3 sink rejects rather than hanging');
+    const recovered = await Codecs.encodeMp3(pcm, SR, 192);
+    ok(Codecs.looksLikeMp3(recovered.bytes), 'a poisoned worker lease is replaced for the next file');
+    const aborted = await Codecs.createMp3StreamEncoder(SR, 192, 1, memSink());
+    aborted.abort(); aborted.abort();
+    const next = await Codecs.encodeMp3(pcm, SR, 192);
+    ok(Codecs.looksLikeMp3(next.bytes), 'idempotent abort returns pool capacity');
+    const Worker = global.Worker;
+    let missing = '';
+    try {
+      global.Worker = undefined;
+      await Codecs.encodeMp3(pcm, SR, 192);
+    } catch (err) { missing = err.message; } finally { global.Worker = Worker; }
+    ok(/requires Web Workers/.test(missing), 'no mainthread fallback when workers are unavailable');
   }
 
   /* ══════════════════════════════════════════════════ app-level wiring ══ */
@@ -433,6 +496,7 @@ function bootApp() {
   win.URL.revokeObjectURL = () => {};
   Object.defineProperty(win.navigator, 'clipboard', { value: { writeText: async () => {} }, configurable: true });
   win.eval(fs.readFileSync(path.join(ROOT, 'assets/vendor/lame.min.js'), 'utf8'));
+  win.Worker = require('./encoding-worker-adapter.js');
   for (const f of ['dsp-utils.js', 'presets.js', 'i18n.js', 'library-loader.js', 'opfs-manager.js', 'codecs.js',
     'analyzer.js', 'memory-guard.js', 'engine.js', 'ui.js', 'app.js']) {
     win.eval(fs.readFileSync(path.join(ROOT, 'assets/js', f), 'utf8'));

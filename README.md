@@ -83,6 +83,13 @@ The suite is built to be used in a phone browser:
   that budget stops being a hard ceiling at all — see below.
 * Verified in a real browser at 320, 360, 390, 414 and 768 px wide — no horizontal scrolling
   anywhere, in `tests/beta/beta.js` and the screenshot matrix in [`docs/beta/`](docs/beta).
+* And verified where it matters most: on emulated **iPhone 14 Pro** (393×852 @3) and **Pixel 7**
+  (412×915 @2.625) profiles with *real* touch input — the effect rack swiped with a finger (the
+  compositor does the scrolling and the CSS does the snapping; the dot trail follows), `Magic Fix`
+  tapped with a thumb (which on a phone renders the batch by itself), the A/B/C button tapped,
+  held and released. Six of those states are compared **pixel for pixel** against the accepted
+  baselines in [`docs/beta/baseline/`](docs/beta/baseline) on every run; a differing row fails and
+  leaves a picture of what moved. See [the tests](#tests).
 
 ### The one slider
 
@@ -268,6 +275,12 @@ on the music band (300 Hz – 3.4 kHz, measured within ±0.3 dB), so "restored" 
 being louder — and a rebuilt bottom or top octave cannot fool the comparison either. A/B mode flips
 every four seconds by itself.
 
+While a card is playing, the round **A/B/C** button adds the third honest comparison: **A** is the
+untouched original, **B** is the DSP chain alone, **C** is the neural pre-process (Stage 0) *plus*
+the same chain — a real second render with the same parameters, not a louder B. C appears only when
+the denoiser really ran; without weights the button cycles A↔B exactly as before, and a hold while
+playing still drops to the original for as long as you hold it.
+
 ---
 
 ## The signal chain
@@ -278,8 +291,8 @@ and runs per sample, control-rate decimated for speed:
 | # | Stage | What it does |
 | --- | --- | --- |
 | 0 | **Presence follower** | a 13 ms envelope against a one-second average; it gates every synthesis stage, so nothing is generated in a gap — the air and the sub octave arrive with the music, not with the noise floor |
-| 1 | **Input DC guard** | 2 Hz one-pole: removes a damaged file's offset without rotating the phase of the 20–60 Hz region, where the sub-bass repair works |
-| 1a | **De-clip (CBAR)** | a *plateau* in the waveform — one sample to over a thousand sitting flat at the file's own peak level, which is what a limited master (or, on an extended run, a historical transfer's motor overload) did to its peaks — is reconstructed by one of three models, in order of how much evidence the run itself carries. A **short** run (≤ 269 samples, 5.6 ms) is solved exactly as before: the run's implied overshoot comes from the local period of the zero crossings where one is trustworthy, from a Hermite cubic through the two real neighbouring samples and their slopes where it is not, and whichever model predicts more is the one taken. A **longer but still periodic** run — a slow, heavily overloaded bass note whose flat top outlasts the old 269-sample ceiling — uses the *same* length-solves-for-the-peak formula (a sine of amplitude A clipped at T stays at or above T for T/A ≤ cos(ω·len/2), which does not get weaker as the run gets longer: it is exact up to half the signal's own period, which is also the hard ceiling on how long a same-sign run can ever be) but draws it as a symmetric raised-cosine arc over the *whole* run instead of a single bounded cubic, because a long span has more independent length-evidence to lean on than two sampled boundary slopes do. A run with **no reliable period** (broadband overload, clipped noise) falls back to CBAR proper — Constrained Blind Amplitude Reconstruction: an order-16 autoregressive model (Levinson–Durbin) is fit separately to the 128 samples of real audio immediately before the run and the 128 immediately after, each run forward as a zero-input filter across the gap, the two extrapolations cross-faded with a raised-cosine weight, and the result constrained to never cross back below the measured clip rail — so a run nothing can be inferred about settles honestly at the flat top it started at, rather than at a guess. The detector keys on the measured plateau level of *this* file, not on a constant, which is what separates clipping from a merely loud waveform: a loud but unclipped recording measures 0.0007 % flat samples and 0.07 dB of implied overshoot, a clipped one 0.39 % and 1.7 dB. Measured on a 25 Hz tone at twice the clip level (70 % of each half-cycle flat, 679 samples long — far beyond anything the old 269-sample ceiling could touch at all) the shape error against the known original goes from −13.9 dB unrepaired to −33.7 dB repaired by the periodic model; a milder 30 Hz/456-sample case goes from −18.0 to −43.7 dB; a clipped noise burst (no period to find) still produces zero non-finite samples and never reads worse than the flat top it replaced. It runs first among the repairs, before anything else looks at the waveform — and the output guard's knee moves up with whatever the stage reconstructed (a per-file maximum), because that guard sits *below* the plateau of a clipped master and would otherwise flatten the restored arc straight back into the flat top it came from: on a 997 Hz tone clipped at 0.99, −16.2 dB of error left in the plateau with a fixed knee against −29.1 dB with the knee lifted |
+| 1 | **De-clip (AR/Hermite + CBAR)** | Raw PCM is segmented at its measured saturation rail before DC filtering. Short runs (≤5.6 ms) use masked, time-reversible covariance LPC/AR(4–8), learned from up to 512 preceding observations and up to 128 clean exit samples. Regression windows crossing clipping are excluded; predictions never train on previously reconstructed samples. Forward/backward predictions blend into a cubic Hermite bridge with the two observed boundary slopes, then damaged samples are projected strictly above the signed rail, with bounded peak excursion. Insufficient context, unpredictable material or divergent models retain the historical cubic/period fallback. Longer runs retain the periodic or order-16 CBAR model. Stereo-linked attenuation accounts for the reconstructed absolute peak even with loudness matching disabled, so the raised crest survives export rather than being clipped flat again. The unchanged 48 kHz reference improves by **+27.17 dB SI-SDR**; the dedicated fixture matrix passes >8.5 dB, not a universal recovery promise. See `docs/DECLIPPING-AR.md`. |
+| 1a | **Input DC guard** | 2 Hz one-pole after raw-rail reconstruction: removes a damaged file's offset without first shifting the observed clipping rail. With de-clipping disabled, this linear filter and the stage's delay commute. |
 | 1b | **Sub-sonic guard** | a 4-section (48 dB/octave) high-pass at the corner the measurement asks for: 18–24 Hz where a turntable's rumble sits *below* the music, escalating to 42 Hz — the top of the band the statistic calls rumble — only when the quiet passages are **saturated** with it (8 dB or more of the app's own excess). A turntable's rumble lives down there and no instrument does, which is why the corner stays low unless the floor itself is the defect |
 | 2 | **Static EQ bank** | 6 biquads: 60 Hz shelf, 200 Hz mud, 450 Hz box, 1.3 kHz honk, 3.2 kHz presence, 7 kHz air — the profile's anchors, dosed from the measurement |
 | 2b | **Per-song corrective EQ** | 12 bands, 50 Hz … 8 kHz at Q 1.4, correcting the file's own departures from its own spectral trend — net of what the six profile bands do. ±1.5 dB dead zone, ±6 dB cap, no boost near the noise floor, no correction in a band the file does not fill |
@@ -310,7 +323,7 @@ repairs that cannot be done without seeing a little of the future:
   an extended, non-periodic run falls back to CBAR's forward/backward AR model — the 128 samples of
   real audio collected *after* the run for the backward half of that fit (1330 samples at 48 kHz,
   27.7 ms: 1200 the longest run it will ever track open-ended, plus 128 of trailing context, plus a
-  few samples of margin). A short or periodic run resolves in a fraction of that and never needs the
+  few samples of margin). A short AR run also collects clean exit context; neither short nor periodic runs need the
   worst case, but the stage's reported latency is one fixed number regardless, so the chain stays
   sample-aligned whichever model a given run actually took;
 * the **true-peak limiter** computes the gain 1.5 ms ahead of the sample it applies to, plus the
@@ -363,31 +376,53 @@ before you pack.
 
 ## Optional neural enhancement
 
-**Off by default, and invisible unless both a model is installed and the toggle is turned on.** Next to
-the export format row is "AI high-frequency reconstruction" (`#neuralToggle`); it stays disabled, with a
-status line explaining why, until `neural-controller.js`'s probe finds at least one model and a working
-execution provider. Nothing about the pure-DSP chain changes when it is off — this is additive-only, not
-a different mode.
+**Off by default, and additive-only.** Next to the export format row is "AI high-frequency
+reconstruction" (`#neuralToggle`). With no weights on disk the row says so and offers the download;
+switching the toggle on is what fetches the quantised model — once — and keeps it. With no working
+runtime and no model store the switch stays disabled with its reason. Nothing about the pure-DSP chain
+changes when it is off — this is additive-only, not a different mode.
 
-* **Execution.** [`assets/js/neural-worker.js`](assets/js/neural-worker.js) runs `onnxruntime-web` in a
-  dedicated Worker. On a phone or tablet (`/Mobi|Android|iPhone/i` against `navigator.userAgent`) with
-  WebNN available, it tries WebNN first — the only web API that can reach an on-device NPU, probed
-  NPU → GPU → CPU device type — then WebGPU (with fp16 weights once the adapter confirms `shader-f16`),
-  then WASM-SIMD; everywhere else WebGPU still goes first. Every provider is its own try/catch, so an
+* **Execution — WebGPU first, WASM-SIMD always there.** [`assets/js/neural-worker.js`](assets/js/neural-worker.js)
+  runs `onnxruntime-web` in a dedicated Worker and tries **WebGPU first** everywhere, with the adapter's
+  own limits consulted before a session is asked for; WebNN follows where the browser offers it (the only
+  web API that can reach an on-device NPU), then **WASM with SIMD** as the guaranteed floor
+  (`ort.env.wasm.simd = true`, `enableCpuMemArena`). Every provider is its own try/catch, so an
   unsupported op or a refused context falls straight through to the next one, never to a failed call. The
   library itself is fetched from a CDN only once a model is actually used (see [Privacy](#privacy)) — it
   is never bundled (the npm package unpacks to ≈145 MB) and never loaded just because the toggle exists on
   the page.
-* **Models.** Two restoration models — [DeepFilterNet3](https://github.com/Rikorose/DeepFilterNet)
-  (noise suppression) and [BS-RoFormer](https://github.com/ZFTurbo/Music-Source-Separation-Training)
-  (stem separation: vocals / drums / bass / other) — and the Stage-7 air coupling below are all wired to
-  real, published ONNX export contracts, but **no weights ship with this repository.** Drop a model's
-  `.onnx` file (and its auxiliary weights, where the export needs one) into OPFS or a same-origin
-  `models/<name>/` folder to activate it; with nothing there, every call cleanly reports
+* **Stage 0 — the denoiser in front of the chain.** [`assets/js/ring-buffer.js`](assets/js/ring-buffer.js)
+  (`RSRingBuffer`) is a lock-free single-producer/single-consumer ring on a `SharedArrayBuffer`, with
+  `Atomics` for every counter a producer and a consumer both touch (write/read cursors, pushed/popped
+  frames, the high-water mark, overflow and underrun counts). `RSNeural.denoiseChannels()` runs
+  DeepFilterNet3 over the file in one-second blocks with a quarter-second of context on each side of
+  every seam, publishes each block through the ring and joins the seams with the same gain-preserving
+  linear crossfade the chunked render uses; a 44.1 kHz file is brought to the models' 48 kHz with a
+  windowed-sinc resampler first. `Engine.render()` / `renderChunked()` take it as `opts.stage0`, so the
+  whole DSP chain sees the denoised signal rather than the raw one. A model that is missing, refuses,
+  times out or returns a short block leaves the render bit-identical to the pure-DSP path — the stage
+  never pads silence into a file. Magic Fix arms it when the weights are really installed, and backs
+  the DSP de-hisser off to a third of its depth so the two repairs do not fight over the same floor.
+  The stage runs once per preview and once per export — offline, not per audio quantum: an ONNX
+  inference is orders of magnitude slower than the 128-frame callback, so pretending it could sit
+  inside the live graph would only produce dropouts. What the live monitor plays is the finished
+  render, handed to the same worklet as the DSP-only B.
+* **Models — fetched once, kept in OPFS.** The default model is **DeepFilterNet3 INT8**
+  ([DeepFilterNet](https://github.com/Rikorose/DeepFilterNet)). No weights ship with this repository:
+  the first time the toggle is switched on, `neural-controller.js` checks `/models/` in OPFS, and if the
+  file is not there it downloads it from a **configurable model channel** —
+  `RSNeural.setModelSource(url | [urls])`, or `<meta name="rs-model-cdn" content="…">` in the page —
+  whose default is this project's own jsDelivr channel, with the page-relative `models/` folder as a
+  fallback. The download streams into OPFS (`models/<model>/<file>`, outside the scratch directory, so a
+  boot-time scratch reset never deletes it) and paints the same progress row a render uses, in percent,
+  from the first byte to the last. Every later start resolves from OPFS with zero network requests. A
+  transfer that fails — a 404, a short read, an HTML error page served with a 200 — aborts and deletes the
+  partial file, so a broken download can never be mistaken for a cached model. [BS-RoFormer](https://github.com/ZFTurbo/Music-Source-Separation-Training)
+  (stem separation) and AudioSR are wired to their published ONNX contracts the same way, but are not
+  fetched by the toggle. With nothing installed and no store available, every call still reports
   `{applied: false, reason: 'weights-not-found'}` and the DSP chain runs exactly as it always has. On
-  mobile, the smallest quantised variant a model publishes (int4, then int8) is preferred over fp16/fp32,
-  to keep resident weights under ≈80 MB of VRAM — the same clean "nothing installed" fallback applies
-  either way.
+  mobile the smallest variant a model publishes is preferred (int4, then int8), on the desktop int8
+  first: quantised weights keep a phone's resident model under ≈80 MB of VRAM.
 * **Stage 7 coupling, not AudioSR.** A real AudioSR is a 258 M-parameter latent-diffusion model (UNet +
   VAE + HiFi-GAN, 50 sampling steps, over a gigabyte of weights) — nothing a browser tab can run at a
   usable speed. What ships instead keeps this project's existing, phase-correct `AirSynth` harmonic
@@ -419,9 +454,11 @@ a different mode.
   convert the file to WAV locally. It is never loaded unless a file needs it.
 * **Optional neural enhancement, same rule:** turning the "AI high-frequency reconstruction" toggle
   on (see [below](#optional-neural-enhancement)) is the only thing that fetches `onnxruntime-web`
-  from the jsDelivr/unpkg CDN (≈145 MB unpacked — far too large to vendor); the *audio* never leaves
-  the machine either way, inference runs entirely in a local Worker against weights that live in
-  OPFS or a local folder, never uploaded or referenced from the network.
+  (≈145 MB unpacked — far too large to vendor) *and*, on a first start, the quantised model file
+  itself (≈40 MB for DeepFilterNet3 INT8) from this project's own jsDelivr channel. Both are cached
+  locally — the runtime by the browser, the weights in OPFS — so a second start asks nobody. The
+  *audio* never leaves the machine either way: inference runs entirely in a local Worker, and the
+  only thing that crosses the wire is a weight file being downloaded, never a sample being sent.
 
 Full text: *Privacy* in the footer of the app.
 
@@ -445,6 +482,7 @@ assets/
     opfs-manager.js            Origin Private File System scratch storage: streaming
                                  WAV/MP3 writers and a streamed ZIP packer, both backed by
                                  FileSystemSyncAccessHandle in a Worker (RSOPFS)
+    encoding-worker.js           dedicated pooled LAME WASM encoder worker
     codecs.js                    decode, WAV/MP3 encode (in memory or streamed), ZIP, download (RSCodecs)
     analyzer.js                  file → measurements, diagnosis, waveform envelopes (RSAnalyzer)
     neural-controller.js         main-thread handle onto neural-worker.js — one Promise-returning
@@ -478,7 +516,7 @@ tests/
                                  through a 128 kbit/s encoder)
   dsp.test.js                    DSP/engine suite: transparency, sub, air, exciter, de-hiss,
                                  de-click, measured hum/hiss repair, and the contract that a
-                                 broken file never becomes NaN parameters (160 checks)
+                                 broken file never becomes NaN parameters (173 checks)
   tuning.test.js                 the tuning contract: what the automatic mode may do to a file (17 checks)
   web.test.js                    static, DOM and app suite (137 checks)
   audit.test.js                  repository hygiene, markup, contrast, i18n, parameter,
@@ -486,7 +524,7 @@ tests/
                                  a rich-hum fixture, the effect budgets, the
                                  several-problems-at-once chain, and the chain-level
                                  scale-freedom row, the export's ceiling through the
-                                 codec, and the de-clicker's floor with its control (335
+                                 codec, and the de-clicker's floor with its control (340
                                  checks)
   e2e.test.js                    realistic journeys: five problem recordings, slider sweep,
                                  profile overrides, 10-file batch → ZIP, mono/32 k/96 k,
@@ -494,19 +532,89 @@ tests/
   opfs.test.js                   runs the actual shipped OPFS worker source in a Node vm
                                  against a simulated Origin Private File System: streaming
                                  writes, a multi-megabyte streamed ZIP cross-checked with
-                                 JSZip and unzip(1), and the in-memory fallback (28 checks)
+                                 JSZip and unzip(1), the oversized-batch guard, the model
+                                 store under models/, and the in-memory fallback (52 checks)
+  neural.test.js                 the shipped controller/worker contract (never throws,
+                                 always resolves `{applied: false, reason}`), WebGPU-first
+                                 provider order, tensor alignment, the timeout watchdog, and
+                                 the model manager: OPFS cache, CDN download, progress,
+                                 variant fallback, failed-download cleanup (127 checks)
+  memory-guard.test.js           the shipped heap watchdog without a `performance.memory`:
+                                 the honest no-signal default, the one-way shrink ramp and a
+                                 stop function that never leaks a timer (21 checks)
+  chunked-render.test.js         the chunked/streamed offline render: chunk boundaries and
+                                 level-preserving crossfades, the streaming WAV/MP3 encoders,
+                                 the mid-render shrink, the abort path that a failing onChunk
+                                 triggers, and a sink that takes the buffer it is handed —
+                                 the way the OPFS writer does; failed/aborted pool leases (57 checks)
+  stage0.test.js                 the pre-DSP neural stage: the SharedArrayBuffer ring under
+                                 back-pressure (wrap-around, refused-not-truncated blocks, the
+                                 underrun counter, the plain-buffer fallback), the chunk plan's
+                                 context padding and gain-preserving seams, 44.1 k → 48 k
+                                 resampling, stem mixes, the \{applied:false\} contract, and the
+                                 engine wiring that makes C measurably cleaner than B with no
+                                 buffer underruns (86 checks)
+  encoding-worker-adapter.js     worker_threads adapter for the unmodified production worker
+  declip-ar.test.js              masked LPC, Hermite boundaries, strict rail constraints,
+                                 untouched observations and linked headroom (43 checks)
+  wiener.test.js                 STFT WOLA, latency, reset and explicit lag diagnostics (22 checks)
+  audio-quality.test.js          known-clean reference metrics and real-worklet gain (9 checks)
+  encoding-batch.test.js         real Chromium batch and frame pacing (5 checks)
+  mobile-ux.test.js              the carousel effect rack, the gold "AI Magic Fix" button,
+                                 the live A/B/C compare FAB and the phone's card inspector:
+                                 markup/CSS, the focus trap, the exact restore index, the
+                                 haptic fallback, navigator.vibrate safety, switchBuffer()
+                                 position preservation, seek() clamping and its no-buffer
+                                 no-op, the desktop-arms vs phone-auto-processes split,
+                                 tap/hold (103 checks)
   coi.test.js                    runs the shipped coi-serviceworker.js in a Node vm as both
                                  a Service Worker (COOP/COEP header rewrite) and a page
-                                 script (registration, the one-reload rule, no reload loop;
-                                 19 checks)
+                                 script (registration, the one-reload rule, and the guarantee
+                                 that a reload never loops) (19 checks)
   webaudio-stub.js               miniature Web Audio implementation for Node
   beta/
     beta.js                      the real-browser suite: every control on the page,
                                  the whole journey from file to export, the scale
-                                 rows, the progress bars, the phone layouts (94 checks)
+                                 rows, the progress bars, the phone layouts — and the
+                                 three mobile-UX surfaces driven with real touch: the
+                                 swipeable effect rack, the Magic Fix button, the live
+                                 A/B/C compare FAB, the card inspector and its gesture
+                                 separation, the model download (196 checks)
     cdp.js                       minimal Chrome DevTools Protocol client over the
                                  platform WebSocket — no dependency beyond Node ≥ 22
+    png.js                       PNG decoder/encoder and pixel differ in ~200 lines of
+                                 zlib — the screenshot regression rows, no dependency
     chromium.js                  launcher for the packaged headless Chromium
+scripts/
+  validate-docs.js               documentation validator: tests/ ↔ README.md ↔ package.json
+                                 (suite count, per-suite check counts, the npm chain, every
+                                 helper named in this layout) plus the static audit of
+                                 assets/js — JSDoc coverage, @param names against the real
+                                 signatures, `{@link}` targets, @typedef structure; `--run`
+                                 re-runs every suite and compares its own check count with
+                                 the README
+  analyze-code.js                static analysis of the shipped JavaScript with acorn: parses
+                                 the fourteen assets/js modules, the AudioWorklet processor
+                                 and coi-serviceworker.js, then reports references to names
+                                 that are not declared (a runtime ReferenceError a syntax
+                                 check cannot see), accidental globals, duplicate keys in one
+                                 object literal, and module-level declarations nothing calls
+                                 (`--dead` fails on the last group too, `--json` for machines)
+tools/                           measurement probes, not part of the app — the evidence the
+                                 restoration claims rest on (see util.js)
+  util.js                        measurement toolkit: fixtures, renderers, spectrum meters
+  acceptance.js                  the acceptance matrix: one fixture per defect class through
+                                 the whole automatic chain, each row measured by the app's own
+                                 analyser and an independent time-domain meter side by side
+  workflow-check.js              the user's own loop end to end: bad file in → process →
+                                 export MP3 320 → re-upload the export → read the diagnosis
+  codec-sib.js                   the same loop measured link by link, for the sibilance case
+  top-end-check.js               which instrument fills which hole: the 7 kHz shelf against
+                                 the synthesiser, per material
+  fixture-check.js               the two fixtures whose statistic has to be right before a row
+                                 can mean anything (where the hiss sits, that the "s" bursts
+                                 are noise and not a tone)
+  setup.sh                       installs ffmpeg into the sandbox for the codec rows
 ```
 
 No bundler, no transpiler, no dependencies at runtime. The only `node_modules` in the project
@@ -516,46 +624,79 @@ belong to the test suite.
 
 ## Tests
 
+**16 dependency-free suites · 1319 checks.** Counts are declared checks, not a claim
+that all acceptance criteria currently pass. The unchanged audio-quality suite now
+passes **9/9**: broadband STFT Wiener repair gains **+14.64 dB** on seeded white
+noise; AR/Hermite de-clipping retains **+27.17 dB**. Full workflow/browser acceptance
+(5.1B/5.2) remains separate; see `docs/AUDIO-QUALITY.md`.
+The encoding batch additionally requires optional Chromium. `node scripts/validate-docs.js --run` re-runs them and
+fails if this file, `tests/` and `package.json` ever disagree.
+
+| Suite | File | Checks | Covers |
+| :-- | :-- | --: | :-- |
+| DSP & engine | `tests/dsp.test.js` | 173 | transparency, sub, air, exciter, de-hiss, de-click, de-resonator, level match, power scaling, WAV/MP3/ZIP, classification |
+| Tuning law | `tests/tuning.test.js` | 17 | what the automatic mode may do to a file: octave bands, loudness, the level match, the soft-clip guard, level-normalised synthesis, honest extremes |
+| Web & DOM | `tests/web.test.js` | 137 | static integrity, bilingual coverage, boot, drop → analyse → render → save → ZIP, error handling, resampling |
+| Audit | `tests/audit.test.js` | 340 | repository hygiene, markup, stylesheet, contrast, bilingual coverage, parameter ranges, DSP edge cases, the several-problems-at-once chain, codec round-trips, budgets |
+| End to end | `tests/e2e.test.js` | 108 | five problem recordings, slider sweep, profile overrides, 10-file batch → ZIP, mono/32 k/96 k, hostile input |
+| OPFS | `tests/opfs.test.js` | 52 | the shipped worker source against a simulated file system: streaming writes, a streamed ZIP cross-checked with JSZip and unzip(1), the oversized-batch guard, the model store under `models/` (write, read, list, clear, abort, surviving a scratch reset), the in-memory fallback |
+| Cross-origin isolation | `tests/coi.test.js` | 19 | coi-serviceworker.js as a Service Worker and as a page script: the COOP/COEP rewrite, the one-reload rule, never a reload loop |
+| Neural | `tests/neural.test.js` | 127 | the controller/worker contract, T-frame alignment, STFT round-trips, the capability probe, WebGPU-first provider order, quantised-variant selection, **the model manager** (cache hit, CDN download, progress, variant fallback, short-read and HTML-refusal aborts, inflight dedup, cache report), the watchdog and the Stage-7 coupling |
+| Memory guard | `tests/memory-guard.test.js` | 21 | the heap watchdog on a host without `performance.memory`: the honest no-signal default, the one-way shrink ramp, a stop function that never leaks a timer |
+| Chunked render | `tests/chunked-render.test.js` | 57 | chunk boundaries and level-preserving crossfades, the streaming WAV/MP3 encoders, the mid-render shrink, the abort a failing onChunk triggers, a sink that takes ownership of the buffer it is handed; poisoned lease recovery, idempotent abort, unavailable-worker rejection |
+| Stage 0 (pre-DSP) | `tests/stage0.test.js` | 86 | the SAB ring (exact round-trips, wrap, all-or-nothing writes, the underrun/overflow counters, the non-shared fallback), the chunk plan and its seam crossfades, the 48 kHz resampling, stem mixing, the fallback contract, and the engine wiring: C really is Stage 0 + DSP, and a missing model leaves B bit-identical |
+| Mobile UX | `tests/mobile-ux.test.js` | 103 | the carousel effect rack, the gold "AI Magic Fix" button, the live A/B/C compare FAB, **the phone's card inspector** (markup, focus trap, the grid handed back to its exact index, haptic fallback), navigator.vibrate safety, switchBuffer() position preservation, seek() clamping and its no-buffer no-op, tap/hold |
+| De-clipping AR | `tests/declip-ar.test.js` | 43 | 32–96 kHz reference gains >8.5 dB, independent frequencies, raw-only masked LPC, boundary tangents, strict rail projection, retained clean samples, safe manual/auto and linked stereo headroom |
+| Audio quality | `tests/audio-quality.test.js` | 9 | SI-SDR/LSD identities and edge cases; real-worklet clipping/noise/hum gains (clipping ≥8.5 dB; noise +14.64 dB, hum +11.60 dB) |
+| Wiener & alignment | `tests/wiener.test.js` | 22 | STFT unity reconstruction, streaming parity, latency/tail flush, reset, stereo, explicit bounded lag diagnostics, whole-file/chunked/bypass exports |
+| Encoding batch | `tests/encoding-batch.test.js` | 5 | ten real WASM MP3 encodes with browser decode, ten streamed WAVs, source ownership, rAF gaps and long tasks |
+
 ```bash
-npm install          # only for the test suite (jsdom)
-npm test             # runs all seven dependency-free suites
-node tests/dsp.test.js     # engine: transparency, sub, air, exciter, de-hiss, de-click,
-                           # de-resonator, level match, power scaling, WAV/MP3/ZIP, classification
-node tests/web.test.js     # static integrity, bilingual coverage, boot, drop → analyse → render
-                           # → save → ZIP, error handling, resampling
-node tests/audit.test.js   # repository hygiene, markup, stylesheet, contrast, bilingual
-                           # coverage, parameter ranges, the several-problems-at-once
-                           # chain, DSP edge cases, codec round-trips, budgets
-node tests/e2e.test.js     # realistic journeys: five problem recordings, slider sweep, profile
-                           # overrides, 10-file batch → ZIP, mono/32 k/96 k, hostile input
-node tests/tuning.test.js  # the tuning contract: octave bands, loudness, the level match, the
-                           # soft-clip guard, level-normalised synthesis, honest extremes
-node tests/opfs.test.js    # the shipped OPFS worker source against a simulated file system:
-                           # streaming writes, a streamed ZIP cross-checked with JSZip and
-                           # unzip(1), the oversized-batch guard, the in-memory fallback
-node tests/coi.test.js     # the shipped coi-serviceworker.js as both a Service Worker
-                           # (COOP/COEP header rewrite) and a page script (the one-reload
-                           # rule, never a reload loop)
-node tests/mobile-ux.test.js  # the carousel effect rack, the gold "AI Magic Fix" button,
-                           # and the live A/B/C compare FAB: markup/CSS, navigator.vibrate
-                           # safety, engine.js's switchBuffer() position preservation,
-                           # the desktop-arms vs phone-auto-processes split, tap/hold
+npm install          # only for the test suite and the static analysis (jsdom, acorn)
+npm test             # runs all sixteen suites, including unchanged audio-quality gates
+node scripts/validate-docs.js        # README ↔ tests/ ↔ package.json consistency
+node scripts/validate-docs.js --run  # the same, and re-counts every suite
+node scripts/analyze-code.js         # static analysis of the shipped JavaScript
+
+node tests/dsp.test.js             # engine: transparency … classification
+node tests/web.test.js             # static integrity, boot, the whole journey, resampling
+node tests/audit.test.js           # repository, markup, contrast, i18n, parameters, codecs
+node tests/e2e.test.js             # realistic journeys, slider sweep, batch → ZIP
+node tests/tuning.test.js          # the automatic mode's tuning contract
+node tests/opfs.test.js            # the shipped OPFS worker against a simulated file system
+node tests/stage0.test.js          # the SAB ring, the pre-DSP stage, and its engine wiring
+node tests/coi.test.js             # the shipped cross-origin-isolation bootstrap
+node tests/neural.test.js          # the neural path with no weights installed
+node tests/memory-guard.test.js    # the mobile heap watchdog, with no heap signal
+node tests/chunked-render.test.js  # the chunked/streamed offline render and its encoders
+node tests/mobile-ux.test.js       # carousel rack, Magic Fix button, A/B/C compare FAB, seek()
+
 node tests/beta/beta.js    # big beta: drives a real headless Chromium over the DevTools
                            # protocol — real clicks, real drops, real AudioWorklet, real
-                           # dialogs and downloads, phone emulation at 390 and 320 px with
-                           # live progress sampling — and photographs the screenshot matrix.
+                           # dialogs and downloads, phone emulation at 320…768 px with live
+                           # progress sampling — and photographs the screenshot matrix.
+                           # It emulates desktop 1440×900, iPhone 14 Pro 393×852 @3 and
+                           # Pixel 7 412×915 @2.625 (viewport, scale factor, touch) and
+                           # drives the phone-only surfaces with real touch events: the
+                           # carousel is swiped, Magic Fix is tapped, the A/B/C FAB is
+                           # tapped and held. Six states are diffed pixel for pixel against
+                           # docs/beta/baseline/, and a differing or missing baseline fails
+                           # the run — record new ones deliberately with --accept-baseline.
                            # The recordings are the same synthesised fixtures the node suites
                            # use, served to the page, and the upload path is timed phase by
                            # phase. The two scale rows calibrate themselves: a 30-second take
                            # goes through the identical instrumented path seconds earlier on
                            # the same machine, and what the row holds the app to is the
-                           # machine's own rate, not an absolute budget. 94 checks
+                           # machine's own rate, not an absolute budget. 174 checks
 ```
 
-The beta writes `docs/BETA-REPORT.md` and the screenshot matrix to `docs/beta/`.
+The beta writes `docs/BETA-REPORT.md`, the screenshot matrix to `docs/beta/` and — when a row
+differs — a red-on-dim picture of what moved to `docs/beta/diff/`. It needs one run of
+`node tests/beta/beta.js --accept-baseline` to write a missing baseline; a *missing* baseline is a
+failure, not a pass, so a visual regression cannot be waved through by deleting the record.
 It needs the optional dev dependency `@sparticuz/chromium` (a packaged headless
 Chromium, used because CI machines rarely ship a browser); `npm test` runs the
-five dependency-free suites and stays green everywhere.
+twelve dependency-free suites and stays green everywhere.
 
 Signals are simulated (garage session, cassette, vinyl rip, low-bitrate, clean — plus a vinyl
 transfer that was later pushed through a 128 kbit/s encoder, the file that needs more than one
@@ -636,3 +777,27 @@ Tips are voluntary and not a purchase — the suite stays free, with no commitme
 | A file will not open | The browser cannot decode that container. Try WAV/FLAC/OGG, or enable the FFmpeg rescue path. |
 | The result sounds too strong | Lower the restoration power — the chain is deliberately a little bold at 100 %. |
 | Very large batches | Use MP3 for the ZIP; several hundred megabytes of WAV will exhaust browser memory. |
+
+### Objective quality and encoding (Prompt 5.1)
+
+`RSDSP.siSdr(clean, estimate)` is zero-mean SI-SDR in dB. It projects the
+estimate onto the clean reference, then measures the orthogonal residual.
+`RSDSP.logSpectralDistance(reference, estimate, fftSize=1024)` uses Hann STFT
+with 50% overlap, a one-sided power spectrum and a normalized 1e-12 power floor.
+Both require finite, nonempty, equal-length **time-aligned** mono signals.
+A processed-vs-original LSD measures change, not proof of improvement; quality
+gain requires a separate known-clean reference. Silence has undefined SI-SDR.
+
+MP3 encoding uses local `wasm-media-encoders@0.7.0` (LAME), exclusively in a
+bounded pool of 1–2 dedicated workers. Files hold exclusive leases, PCM is
+copied/transferred in 16K-frame slices, and the sink provides backpressure.
+There is no UI-thread encoding fallback: unavailable workers/WASM fail explicitly.
+Streaming callers must call `finish()` or `abort()` to return a lease.
+WAV streaming also packs only 16K frames per UI event-loop turn; the app's
+in-memory path now uses that same yielding writer.
+
+Run `node tests/audio-quality.test.js` and `node tests/encoding-batch.test.js`.
+See [measured results and remaining acceptance gaps](docs/AUDIO-QUALITY.md).
+
+Tooling bridge: `tools/encode-mp3.js` feeds the production async worker codec from
+the synchronous `tools/util.js` probe API; it does not duplicate the encoder.

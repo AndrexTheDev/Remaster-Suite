@@ -9,23 +9,73 @@
  * with <script src>, via importScripts() in a worker, or through vm.runInContext
  * in Node tests.
  * ========================================================================== */
+
+/**
+ * @fileoverview Shared DSP utilities — exposed as the global `RSDSP`. Measurement
+ * (FFT, spectra, loudness, noise floor, crackle, hum, inter-sample peaks, stereo
+ * correlation), content classification helpers, sample-rate sniffing and WAV
+ * reading/writing.
+ *
+ * Every heavy pass is written as a *step*: a range-addressable loop whose
+ * accumulators survive between calls plus a `value()` that turns them into the
+ * answer, so the same code can run in one go (`measure()`) or in slices that
+ * yield to the event loop (`measureAsync()`). The synchronous entry points are
+ * what the tuning law and the Node suites depend on; the sliced ones are what
+ * keeps a phone responsive while a ten-minute file is measured.
+ *
+ * Classic script (no ES-module syntax), so the same file loads through a
+ * `<script src>`, through `importScripts()` in a worker and through `require()`
+ * in the Node suites alike.
+ *
+ * @module RSDSP
+ */
+
 (function (global) {
   'use strict';
 
   const TWO_PI = Math.PI * 2;
 
+  /**
+   * Clamp `x` into the closed range `[lo, hi]`.
+   * @param {number} x - the value to clamp.
+   * @param {number} lo - lower bound, returned when `x` is below it.
+   * @param {number} hi - upper bound, returned when `x` is above it.
+   * @returns {number} `x`, or the nearer of the two bounds.
+   */
   const clamp = (x, lo, hi) => (x < lo ? lo : x > hi ? hi : x);
+  /**
+   * Linear amplitude → dBFS, floored at −240 dB so silence stays finite.
+   * @param {number} lin - linear amplitude (1.0 = full scale).
+   * @returns {number} the level in dB, never `-Infinity`.
+   */
   const db = (lin) => 20 * Math.log10(Math.max(lin, 1e-12));
+  /**
+   * dBFS → linear amplitude (the inverse of {@link db}).
+   * @param {number} d - the level in dB.
+   * @returns {number} the linear amplitude.
+   */
   const lin = (d) => Math.pow(10, d / 20);
 
   /* ---------------------------------------------------------------- windows */
 
+  /**
+   * Periodic Hann window of `n` points, with the denominator the FFT passes
+   * here expect (`n`, not `n-1`).
+   * @param {number} n - window length in samples.
+   * @returns {Float32Array} the window, `n` long.
+   */
   function hann(n) {
     const w = new Float32Array(n);
     for (let i = 0; i < n; i++) w[i] = 0.5 - 0.5 * Math.cos(TWO_PI * i / n);
     return w;
   }
 
+  /**
+   * Blackman window of `n` points — the low-sidelobe window the flat-top
+   * and sibilance passes use.
+   * @param {number} n - window length in samples.
+   * @returns {Float32Array} the window, `n` long.
+   */
   function blackman(n) {
     const w = new Float32Array(n);
     const a = TWO_PI / (n - 1);
@@ -37,7 +87,14 @@
 
   /* -------------------------------------------------------------------- FFT */
 
-  /** In-place iterative radix-2 complex FFT (re/im are Float32Array/Array). */
+  /**
+   * In-place iterative radix-2 complex FFT.
+   * @param {(Float32Array|number[])} re - real part; **overwritten** with the
+   *   transform's real part.
+   * @param {(Float32Array|number[])} im - imaginary part, same length (a power
+   *   of two); overwritten the same way.
+   * @returns {void}
+   */
   function fft(re, im) {
     const n = re.length;
     // bit reversal
@@ -68,9 +125,158 @@
     }
   }
 
+  /** Streaming stationary-noise Wiener filter. 1024-point periodic Hann STFT,
+   * hop 256 (75% overlap), decision-directed a-priori SNR and rolling minimum
+   * statistics. Only noisy observations and an optional measured RMS prior are
+   * used. All FFT/OLA/estimator storage is allocated at construction.
+   * @class
+   */
+  class SpectralWiener {
+    /** @param {number} sr - sample rate in Hz.
+     * @param {Object} [options] - floorDb (-18 default), alpha (.98 default).
+     */
+    constructor(sr, options = {}) {
+      if (!(sr >= 8000 && sr <= 192000)) throw new RangeError('Invalid Wiener sample rate');
+      this.sr = sr; this.size = 1024; this.hop = 256; this.look = this.size;
+      this.floorDb = options.floorDb === undefined ? -18 : options.floorDb;
+      this.alpha = options.alpha === undefined ? .98 : options.alpha;
+      if (!Number.isFinite(this.floorDb) || this.floorDb < -60 || this.floorDb > 0
+          || !Number.isFinite(this.alpha) || this.alpha < 0 || this.alpha >= 1)
+        throw new RangeError('Invalid Wiener floor or decision-directed alpha');
+      this.floor = Math.pow(10, this.floorDb / 20);
+      this.window = hann(this.size);
+      this.input = new Float64Array(this.size);
+      this.ola = new Float64Array(this.size * 2);
+      this.re = new Float64Array(this.size); this.im = new Float64Array(this.size);
+      this.power = new Float64Array(this.size / 2 + 1);
+      this.smooth = new Float64Array(this.power.length);
+      this.noise = new Float64Array(this.power.length);
+      this.previousClean = new Float64Array(this.power.length);
+      this.minimum = new Float64Array(this.power.length * 8);
+      this.median = new Float64Array(9);
+      this.prior = 0; this.active = false;
+      this.reset();
+    }
+    /** Reset observations, overlap tails and noise statistics, retaining options.
+     * @returns {void}
+     */
+    reset() {
+      this.input.fill(0); this.ola.fill(0); this.smooth.fill(0);
+      this.noise.fill(0); this.previousClean.fill(0); this.minimum.fill(Infinity);
+      this.position = 0; this.frames = 0; this.slot = 0; this.active = false;
+    }
+    /** Optional independent measured broadband noise RMS; never a clean signal.
+     * @param {number} rms - RMS amplitude; zero means no supplied prior.
+     * @returns {void}
+     */
+    setNoise(rms) { this.prior = Number.isFinite(rms) && rms > 0 ? rms * rms * (this.size * 3 / 8) : 0; }
+    /** One analysis/synthesis hop. Minimum tracking uses eight 16-hop buckets
+     * (~0.68 s at 48 kHz); narrow stationary tones are excluded by a robust
+     * local spectral median, and only low-SNR bins update the noise estimate.
+     * @param {number} amount - wet spectral repair mix, 0..1.
+     * @returns {void}
+     */
+    processFrame(amount) {
+      const n = this.size, bins = this.power.length, re = this.re, im = this.im;
+      for (let j = 0; j < n; j++) { re[j] = this.input[(this.position + j) % n] * this.window[j]; im[j] = 0; }
+      fft(re, im);
+      for (let k = 0; k < bins; k++) {
+        const p = re[k] * re[k] + im[k] * im[k];
+        this.power[k] = p;
+        this.smooth[k] = this.position > n ? .8 * this.smooth[k] + .2 * p : p;
+        const index = this.slot * bins + k;
+        if (this.position >= n) this.minimum[index] = Math.min(this.minimum[index], this.smooth[k]);
+      }
+      for (let k = 0; k < bins; k++) {
+        // Insertion sort nine neighbouring powers, with no per-frame allocation.
+        for (let j = 0; j < 9; j++) {
+          const v = this.smooth[Math.max(0, Math.min(bins - 1, k + j - 4))];
+          let q = j;
+          while (q > 0 && this.median[q - 1] > v) { this.median[q] = this.median[q - 1]; q--; }
+          this.median[q] = v;
+        }
+        let minimum = Infinity;
+        for (let b = 0; b < 8; b++) minimum = Math.min(minimum, this.minimum[b * bins + k]);
+        let candidate = Math.max(1e-20, Math.min(4 * minimum, 1.2 * this.median[4]));
+        if (this.prior) candidate = Math.min(candidate, 4 * this.prior);
+        if (!this.frames) this.noise[k] = this.prior || candidate;
+        else if (this.position >= n && this.power[k] < 3 * Math.max(this.noise[k], candidate))
+          this.noise[k] = .9 * this.noise[k] + .1 * candidate;
+        else if (this.position >= n && candidate < this.noise[k]) this.noise[k] = .99 * this.noise[k] + .01 * candidate;
+        const noise = Math.max(this.noise[k], 1e-20);
+        const gamma = this.power[k] / noise;
+        const xi = this.alpha * this.previousClean[k] / noise + (1 - this.alpha) * Math.max(gamma - 1, 0);
+        const gain = Math.max(this.floor, xi / (1 + xi));
+        this.previousClean[k] = gain * gain * this.power[k];
+        const wet = 1 + amount * (gain - 1);
+        re[k] *= wet; im[k] *= wet;
+        if (k > 0 && k < n / 2) { re[n - k] *= wet; im[n - k] *= wet; }
+      }
+      // IFFT by conjugation. Hann analysis/synthesis: sum(w^2) = 3/2 at hop N/4.
+      for (let j = 0; j < n; j++) im[j] = -im[j];
+      fft(re, im);
+      for (let j = 0; j < n; j++)
+        this.ola[(this.position + j) % this.ola.length] += re[j] / n * this.window[j] / 1.5;
+      this.frames++;
+      if (this.frames % 16 === 0) {
+        this.slot = (this.slot + 1) % 8;
+        this.minimum.fill(Infinity, this.slot * bins, (this.slot + 1) * bins);
+      }
+    }
+    /** Process one sample. Engaged latency is exactly 1024 samples; disabled
+     * operation is exact pass-through. Reset on transitions discards stale OLA.
+     * @param {number} x - observed finite sample (invalid samples become zero).
+     * @param {number} amount - denoising amount, 0..1.
+     * @returns {number} delayed denoised sample, or undelayed bypass sample.
+     */
+    tick(x, amount) {
+      if (!(amount > .0001)) { if (this.active) this.reset(); return Number.isFinite(x) ? x : 0; }
+      this.active = true;
+      const index = this.position % this.ola.length, out = this.ola[index];
+      this.ola[index] = 0;
+      this.input[this.position % this.size] = Number.isFinite(x) ? x : 0;
+      this.position++;
+      if (this.position % this.hop === 0) this.processFrame(clamp(amount, 0, 1));
+      return out;
+    }
+  }
+
+  /** Whole-file wrapper around the exact streaming processor, including tail
+   * flush and known-delay compensation. No reference signal is accepted.
+   * @param {Float32Array[]} channels - equally sized mono/stereo observations.
+   * @param {number} sr - sample rate.
+   * @param {Object} [options] - floorDb, alpha, amount, noiseRms.
+   * @returns {Float32Array[]} denoised channels, original length and alignment.
+   */
+  function denoiseWiener(channels, sr, options = {}) {
+    if (!channels.length) throw new RangeError('No Wiener channels');
+    const length = channels[0].length;
+    if (channels.some(c => c.length !== length)) throw new RangeError('Unequal Wiener channels');
+    return channels.map(channel => {
+      const filter = new SpectralWiener(sr, options), out = new Float32Array(length);
+      filter.setNoise(options.noiseRms || 0);
+      const amount = options.amount === undefined ? 1 : options.amount;
+      const delay = amount > .0001 ? filter.look : 0;
+      for (let i = 0; i < length + delay; i++) {
+        const x = filter.tick(i < length ? channel[i] : 0, amount);
+        if (i >= delay) out[i - delay] = x;
+      }
+      return out;
+    });
+  }
+
   /**
    * Averaged magnitude spectrum — as a sliceable step (see "sliced passes").
    * @returns {{step:object, value:function():object}}
+   *
+   * @param {Float32Array[]} channels - the channels to average over.
+   * @param {number} sr - sample rate in Hz.
+   * @param {{fftSize?:number, hop?:number, maxFrames?:number, dbFloor?:number}} [opts]
+   *   - `fftSize` (default 4096, power of two), `hop` (2048), `maxFrames` (220,
+   *   and therefore the stride: a long file is sampled evenly rather than
+   *   scanned frame by frame) and `dbFloor` (−120 dB, the display floor).
+   * @returns {{step:RSDSP.Step, value:function():RSDSP.Spectrum}} the step and
+   *   the `value()` that returns the averaged spectrum.
    */
   function spectrumStep(channels, sr, opts) {
     const o = Object.assign({ fftSize: 4096, hop: 2048, maxFrames: 220, dbFloor: -120 }, opts || {});
@@ -156,7 +362,12 @@
   /**
    * Averaged magnitude spectrum of one or more channels.
    * @returns {{freq:Float32Array, db:Float32Array, n:number, sr:number, binHz:number,
-   *            frameCount:number, frameRms:Float32Array}}
+   * frameCount:number, frameRms:Float32Array}}
+   * @param {Float32Array[]} channels - the channels to average over.
+   * @param {number} sr - sample rate in Hz.
+   * @param {object} [opts] - as {@link spectrumStep} (`fftSize`, `hop`,
+   *   `maxFrames`, `dbFloor`).
+   * @returns {RSDSP.Spectrum} the averaged spectrum.
    */
   function spectrum(channels, sr, opts) {
     const sp = spectrumStep(channels, sr, opts);
@@ -164,7 +375,14 @@
     return sp.value();
   }
 
-  /** Average level (dB) of a spectrum between f1 and f2 Hz. */
+  /**
+   * Average level of a spectrum between `f1` and `f2` Hz — the coarse
+   * companion to {@link bandMedian}.
+   * @param {RSDSP.Spectrum} spec - the spectrum to read.
+   * @param {number} f1 - lower edge in Hz (inclusive).
+   * @param {number} f2 - upper edge in Hz (inclusive).
+   * @returns {number} the mean level in dB, or −120 when the band is empty.
+   */
   function bandLevel(spec, f1, f2) {
     let sum = 0, cnt = 0;
     for (let k = 0; k < spec.n; k++) {
@@ -176,8 +394,9 @@
   }
 
   /**
-   * Median level inside a band — robust against narrow tonal content.
-   * @param {number[]} [excludeHz] frequencies to ignore (mains hum & harmonics)
+   * The mains grid and its low harmonics, in Hz — the frequencies a band
+   * measurement must *exclude*, so that hum is measured as hum
+   * ({@link humStep}) and is not smeared into a band level.
    */
   const HUM_HZ = [50, 60, 100, 120, 150, 180, 200, 300];
 
@@ -192,6 +411,17 @@
    * on different frequencies than it is applied to.
    */
   const EQ_CENTERS = [50, 80, 125, 200, 320, 500, 800, 1250, 2000, 3200, 5000, 8000];
+  /**
+   * Median level inside one band of a spectrum — the workhorse for tonal
+   * diagnosis, because a median ignores the narrow tones (hum, resonances)
+   * that would drag a mean around.
+   * @param {RSDSP.Spectrum} spec - a spectrum from {@link spectrum}.
+   * @param {number} f1 - lower band edge in Hz (inclusive).
+   * @param {number} f2 - upper band edge in Hz (inclusive).
+   * @param {number[]} [excludeHz] - frequencies to skip, defaulting to
+   *   {@link HUM_HZ}: a band that contains the mains grid must not measure it.
+   * @returns {number} the median level in dB, or −120 when the band is empty.
+   */
   function bandMedian(spec, f1, f2, excludeHz) {
     const ex = excludeHz || HUM_HZ;
     const vals = [];
@@ -207,7 +437,13 @@
     return vals[Math.floor(vals.length / 2)];
   }
 
-  /** Smooth a spectrum with a moving average (for robust trend analysis). */
+  /**
+   * Smooth a spectrum with a moving average, for the trend comparisons a
+   * single noisy bin would ruin.
+   * @param {RSDSP.Spectrum} spec - the spectrum to smooth.
+   * @param {number} [radius=2] - half-width in bins.
+   * @returns {Float32Array} the smoothed levels, one per bin.
+   */
   function smoothSpec(spec, radius) {
     const r = radius || 2;
     const out = new Float32Array(spec.n);
@@ -224,7 +460,13 @@
 
   /* --------------------------------------------------------- spectral shapes */
 
-  /** Frequency (Hz) where the spectrum falls below threshold below its own peak. */
+  /**
+   * Frequency where the spectrum falls `thresholdDb` below its own 300 Hz…18 kHz
+   * peak — i.e. where this file's top end ends.
+   * @param {RSDSP.Spectrum} spec - the spectrum to read.
+   * @param {number} [thresholdDb=32] - how far below the peak counts as gone.
+   * @returns {number} the ceiling in Hz, or `0` when no ceiling was found.
+   */
   function hfCutoff(spec, thresholdDb) {
     const th = thresholdDb === undefined ? 32 : thresholdDb;
     const sm = smoothSpec(spec, 3);
@@ -243,7 +485,15 @@
     return cut;
   }
 
-  /** Energy ratio (dB) between two bands — the workhorse for tonal diagnosis. */
+  /**
+   * Energy ratio between two bands — the workhorse for tonal diagnosis.
+   * @param {RSDSP.Spectrum} spec - the spectrum to read.
+   * @param {number} f1a - lower edge of band A in Hz.
+   * @param {number} f2a - upper edge of band A in Hz.
+   * @param {number} f1b - lower edge of the reference band B in Hz.
+   * @param {number} f2b - upper edge of the reference band B in Hz.
+   * @returns {number} A minus B in dB (positive = A is louder).
+   */
   function ratioDb(spec, f1a, f2a, f1b, f2b) {
     return bandLevel(spec, f1a, f2a) - bandLevel(spec, f1b, f2b);
   }
@@ -280,6 +530,11 @@
 
   /**
    * Spectral slope in dB/octave measured between two reference bands.
+   * @param {RSDSP.Spectrum} spec - the spectrum to read.
+   * @param {number} lowF - centre of the lower reference band in Hz.
+   * @param {number} highF - centre of the upper one; each band is measured over
+   *   a 1.6× span around its centre.
+   * @returns {number} the slope in dB per octave (negative = falling).
    */
   function slopeDbPerOct(spec, lowF, highF) {
     const l = bandLevel(spec, lowF, lowF * 1.6);
@@ -314,12 +569,33 @@
    * `estCost` is fixed at build time and only ever used to weight the progress
    * bar, so the bar stays monotone even for the steps whose real unit count is
    * only known once an earlier step has run (the quiet-frame spectrum).
+   *
+   * @param {string} label - stage name for the progress line.
+   * @param {number} units - total addressable work (samples, frames, windows).
+   * @param {number} estCost - estimated cost in relative units.
+   * @param {function(number, number): void} slice - runs the work for the
+   *   half-open range `[from, to)` of `units`.
+   * @returns {RSDSP.Step} the step, without a `value()` — the caller attaches
+   *   one, or leaves it out for a step that only has to be visited.
    */
   function stepRange(label, units, estCost, slice) {
     return { label, units, estCost: Math.max(0, estCost), slice };
   }
 
-  /** A per-sample pass over one or more channels, in channel-major order. */
+  /**
+   * A per-sample pass over one or more channels, in channel-major order — the
+   * shared shape of every cheap statistic in this file.
+   * @param {string} label - stage name for the progress line.
+   * @param {Float32Array[]} channels - the channels to visit.
+   * @param {number} costPerSample - relative cost of one sample.
+   * @param {function(): Object} makeState - builds the accumulator object.
+   * @param {function(Object, number, Float32Array, number): void} onSample -
+   *   `(state, channelIndex, channel, indexInChannel)`.
+   * @param {function(Object): *} [value] - turns the accumulators into the
+   *   step's answer.
+   * @returns {RSDSP.Step} the step, with `state` attached for callers that want
+   *   a single number out of the same walk.
+   */
   function scanStep(label, channels, costPerSample, makeState, onSample, value) {
     const starts = [];
     let total = 0;
@@ -350,6 +626,7 @@
    */
   const nextTask = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+  /** Monotonic-ish timer in milliseconds, `performance.now()` where it exists and `Date.now()` otherwise. */
   const clock = () => (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now());
 
   /**
@@ -413,7 +690,15 @@
     if (onProgress) onProgress(1, steps.length ? steps[steps.length - 1].label : '');
   }
 
-  /** @param {{steps:object[], result:function():object}} plan */
+  /**
+   * Run a plan in slices — the asynchronous twin of {@link runPlanSync}.
+   * @param {{steps:RSDSP.Step[], result:function(): object}} plan - the steps
+   *   to run and the function that turns them into the answer.
+   * @param {function(number, string): void} [onProgress] - fraction and stage.
+   * @param {{budgetMs?:number, reportMs?:number}} [opts] - slice budget and how
+   *   often progress is reported.
+   * @returns {Promise<object>} whatever `plan.result()` returns.
+   */
   async function runPlanAsync(plan, onProgress, opts) {
     await runStepsAsync(plan.steps, onProgress, opts);
     return plan.result();
@@ -421,12 +706,27 @@
 
   /* --- peak ---------------------------------------------------------------- */
 
+  /**
+   * Sample peak as a step — one of the cheapest passes in `measurePlan`, and
+   * the one that feeds both the peak read-out and the true-peak stage's
+   * starting point.
+   * @param {Float32Array[]} channels - the channels to scan.
+   * @returns {{step:RSDSP.Step, value:function():number}} the step and a
+   *   `value()` returning the peak in dBFS (a silent input reports the
+   *   −240 dB floor, never −Infinity).
+   */
   function peakStep(channels) {
     return scanStep('peak', channels, 1.5, () => ({ p: 0 }),
       (st, c, ch, i) => { const a = ch[i] < 0 ? -ch[i] : ch[i]; if (a > st.p) st.p = a; },
       (st) => db(st.p));
   }
 
+  /**
+   * Sample peak of one or more channels, in dBFS.
+   * @param {Float32Array[]} channels - the channels to scan.
+   * @returns {number} the largest absolute sample value in dB (a silent or
+   *   empty input reports the −240 dB floor, never −Infinity).
+   */
   function peakDb(channels) {
     const st = peakStep(channels);
     st.slice(0, st.units);
@@ -435,6 +735,15 @@
 
   /* --- filtering primitives ------------------------------------------------ */
 
+  /**
+   * Coefficients of a high-pass biquad (RBJ, constant peak gain) as a plain
+   * array — the same five numbers the worklet's inlined biquads are built
+   * from, which is why the analyser and the renderer can never disagree.
+   * @param {number} sr - sample rate in Hz.
+   * @param {number} f - corner frequency in Hz, clamped to 5 Hz…0.49·sr.
+   * @param {number} [q] - resonance; default 0.707 (Butterworth).
+   * @returns {number[]} `[b0, b1, b2, a1, a2]`, normalised by `a0`.
+   */
   function biquadHP(sr, f, q) {
     const w = TWO_PI * clamp(f, 5, sr * 0.49) / sr;
     const c = Math.cos(w), s = Math.sin(w), al = s / (2 * (q || 0.707));
@@ -442,6 +751,13 @@
     return [(1 + c) / 2 / a0, -(1 + c) / a0, (1 + c) / 2 / a0, -2 * c / a0, (1 - al) / a0];
   }
 
+  /**
+   * Run one biquad over a signal, one sample at a time, into a new buffer.
+   * @param {Float32Array} signal - the samples to filter.
+   * @param {number[]} coef - `[b0, b1, b2, a1, a2]`, as produced by
+   *   {@link biquadHP}, the worklet's own biquad or {@link RSDSP.Biquad}.
+   * @returns {Float32Array} the filtered copy; the input is left untouched.
+   */
   function applyBiquad(signal, coef) {
     const [b0, b1, b2, a1, a2] = coef;
     let z1 = 0, z2 = 0;
@@ -458,6 +774,15 @@
 
   /* --- loudness (ITU-R BS.1770 flavour) ------------------------------------ */
 
+  /**
+   * Gated loudness (ITU-R BS.1770 flavour) as a step: K-weighting, 400 ms
+   * blocks with 75 % overlap, absolute and relative gating.
+   * @param {Float32Array[]} channels - the decoded channels.
+   * @param {number} sr - sample rate in Hz.
+   * @returns {{step:RSDSP.Step, value:function():number}} the step and a
+   *   `value()` returning the integrated loudness in LUFS (approximately
+   *   ±1.5 LU against a reference implementation; `−70` for silence).
+   */
   function loudnessStep(channels, sr) {
     const nCh = channels.length;
     const len = nCh && channels[0] ? channels[0].length : 0;
@@ -493,6 +818,12 @@
    * cost more than the arithmetic in all four put together. The numbers are the
    * same ones the individual steps produce (same filters, same windows, same
    * order of summation); only the memory traffic changed.
+   *
+   * @param {Float32Array[]} channels - the channels to measure.
+   * @param {number} sr - sample rate in Hz (the loudness K-weighting needs it).
+   * @returns {{steps:RSDSP.Step[], step:RSDSP.Step, peak:object, clip:object,
+   *   loudness:object, dynamic:object}} the four sub-steps, both as a list for
+   *   the plan and under their own names for callers that need one of them.
    */
   function coreSteps(channels, sr) {
     const nCh = channels.length;
@@ -584,7 +915,12 @@
     };
   }
 
-  /** Integrated-style loudness (ITU-R BS.1770 flavour, approx ±1.5 LU). */
+  /**
+   * Integrated-style loudness (ITU-R BS.1770 flavour, approx ±1.5 LU).
+   * @param {Float32Array[]} channels - the channels to measure.
+   * @param {number} sr - sample rate in Hz.
+   * @returns {number} the loudness in LUFS (`−70` for silence).
+   */
   function loudness(channels, sr) {
     const l = loudnessStep(channels, sr);
     l.step.slice(0, l.step.units);
@@ -634,6 +970,16 @@
    * ratio stands above its median — gated to frames where the reference band has
    * real level, so a quiet frame (where both bands are noise) cannot answer.
    * ----------------------------------------------------------------------- */
+  /**
+   * Sibilance as a step: how far the p95 of a per-10-ms-frame 7 kHz / 3 kHz
+   * band ratio stands above that ratio's own median — the "harsh s" signal,
+   * as opposed to a merely bright recording, which is a tilt and is handled
+   * by the tilt term.
+   * @param {Float32Array[]} channels - the decoded channels.
+   * @param {number} sr - sample rate in Hz.
+   * @returns {{step:RSDSP.Step, value:function():object}} the step and a
+   *   `value()` returning `{sibPeakDb, sibRawDb, sibSustained, sibFrames}`.
+   */
   function sibStep(channels, sr) {
     const idle = () => ({ step: stepRange('sib', 0, 0, () => {}), value: () => ({ sibPeakDb: 0, sibSustained: 0, sibFrames: 0 }) });
     if (!channels.length || !channels[0].length) return idle();
@@ -757,6 +1103,18 @@
     };
   }
 
+  /**
+   * Flat-top detection as a step: runs of consecutive samples that are equal
+   * to the file's own resolution (a clipped or limited passage), with a
+   * silence gate relative to the file's peak so digital silence is not
+   * mistaken for clipping.
+   * @param {Float32Array[]} channels - the decoded channels.
+   * @param {number} sr - sample rate in Hz; used by the per-run duration
+   *   estimate, not by the detection itself.
+   * @returns {{step:object, value:function():object}} the step and its value
+   *   getter (`flatRatio`, `levelDb`, `runCount`, `runMedian`, `overshootDb`,
+   *   `maxRun`, `evidence`).
+   */
   function flatTopStep(channels, sr) {
     const nCh = channels.length;
     const len = nCh && channels[0] ? channels[0].length : 0;
@@ -952,6 +1310,17 @@
    * guard, and a card naming "rumble, crackle". With the statistic honest the
    * same file is a general profile, dose 0.08, and the card names only what is
    * actually there.
+   */
+  /**
+   * Vinyl crackle as a step: the high band's energy against its own local
+   * median, frame by frame, with the burst statistics the index is built from.
+   * @param {Float32Array[]} channels - the decoded channels.
+   * @param {number} sr - sample rate in Hz.
+   * @param {number} [winSec] - analysis window in seconds; default 0.02, with
+   *   a 64-sample floor whatever the rate.
+   * @returns {{step:RSDSP.Step, value:function():object}} the step and a
+   *   `value()` returning the crackle picture (`crackleIndex`, `spikeRate`,
+   *   `spikeLevelDb`, `spikeWideShare`, …).
    */
   function crackleStep(channels, sr, winSec) {
     const [b0, b1, b2, a1, a2] = biquadHP(sr, 8500, 0.707);
@@ -1393,6 +1762,15 @@
     };
   }
 
+  /**
+   * Crackle metrics for a whole file, in one call.
+   * @param {Float32Array[]} channels - the decoded channels.
+   * @param {number} sr - sample rate in Hz.
+   * @param {number} [winSec] - analysis window in seconds, forwarded to
+   *   {@link crackleStep}.
+   * @returns {object} the crackle picture (`crackleIndex`, `spikeRate`,
+   *   `spikeLevelDb`, `spikeWideShare`, …).
+   */
   function crackleDetect(channels, sr, winSec) {
     const c = crackleStep(channels, sr, winSec);
     c.step.slice(0, c.step.units);
@@ -1421,6 +1799,19 @@
   const HISS_MID_HZ = 1450;
   const HISS_MID_Q = 0.63;
 
+  /**
+   * The noise & surface-noise stage as a sliceable step: quiet-frame
+   * selection, the spectrum of those frames only, the slope that tells hiss
+   * from rumble, and the fluctuation of the high-frequency envelope that
+   * separates steady hiss from crackle.
+   * @param {Float32Array[]} channels - the decoded channels, all the same
+   *   length.
+   * @param {number} sr - sample rate in Hz.
+   * @returns {{steps:object[], value:function():object, index:object}} the
+   *   step list to run, the `value()` that returns the whole noise picture
+   *   (floors, slope, rumble, crackle, hum and its follow) and the named
+   *   sub-steps for callers that need a single number out of it.
+   */
   function noiseStep(channels, sr) {
     const fftSize = 2048, hop = 1024, half = fftSize / 2;
     const win = hann(fftSize);
@@ -1760,6 +2151,10 @@
          * then say "the noise sits at 6.3 kHz and above" instead of "there is
          * hiss") and the per-song EQ (a band whose music is only 8 dB above the
          * noise floor must not be boosted — that would boost the noise).
+         * @param {number[]} v - per-bin levels in dB.
+         * @param {number} f1 - lower edge in Hz.
+         * @param {number} f2 - upper edge in Hz.
+         * @returns {number} the mean level of the bins inside the band, or −120.
          */
         const bandLevelArr = (v, f1, f2) => {
           let sum = 0, cnt = 0;
@@ -1857,6 +2252,10 @@
    * Noise & surface-noise analysis of a whole file (synchronous form).
    * The crackle pass inside it is shared with `measure()`; this wrapper runs its
    * own so the function keeps working stand-alone.
+   * @param {Float32Array[]} channels - the decoded channels.
+   * @param {number} sr - sample rate in Hz.
+   * @returns {RSDSP.NoiseInfo} the noise picture (floors, slope, rumble,
+   *   crackle, hum and its follow).
    */
   function noiseAnalysis(channels, sr) {
     const nt = noiseStep(channels, sr);
@@ -1879,6 +2278,12 @@
    * A naturally rolled-off old recording has a smooth slope; a badly encoded
    * one has holes, birdies and a comb. The number tells the synthesiser how
    * much it may trust the band it derives the missing top end from.
+   *
+   * @param {RSDSP.Spectrum} spec - the spectrum to read.
+   * @param {number} cut - the measured ceiling in Hz (see {@link hfCutoff});
+   *   bins above it are not part of the answer.
+   * @returns {number} the raggedness in dB — how far the top end wanders off
+   *   its own smoothed trend.
    */
   function hfRaggedness(spec, cut) {
     const sm = smoothSpec(spec, 2);
@@ -1903,6 +2308,12 @@
    * file and the RMS is accumulated per sample — the same numbers as summing
    * each window on its own, without reading the file a second time (the fused
    * `coreSteps` does the walk; this is the same measurement on its own).
+   *
+   * @param {Float32Array[]} channels - the channels to measure.
+   * @param {number} sr - sample rate in Hz (a window is 400 ms).
+   * @returns {{step:RSDSP.Step, value:function():number}} the step and a
+   *   `value()` returning the range in dB (a file with fewer than four windows
+   *   reports the neutral `20`).
    */
   function dynamicRangeStep(channels, sr) {
     const win = Math.max(256, Math.round(sr * 0.05));
@@ -1931,13 +2342,25 @@
     };
   }
 
+  /**
+   * Dynamic range (95th minus 10th percentile of the per-window RMS), in dB.
+   * @param {Float32Array[]} channels - the decoded channels.
+   * @param {number} sr - sample rate in Hz.
+   * @returns {number} the range in dB; a file too short to have four windows
+   *   reports `20`, the neutral value the profile maths expects.
+   */
   function dynamicRange(channels, sr) {
     const d = dynamicRangeStep(channels, sr);
     d.step.slice(0, d.step.units);
     return d.value();
   }
 
-  /** Fraction of samples sitting at digital full scale (clipping / limiting). */
+  /**
+   * Fraction of samples sitting at digital full scale (clipping / limiting).
+   * @param {Float32Array[]} channels - the channels to scan.
+   * @returns {{step:RSDSP.Step, value:function():number}} the step and a
+   *   `value()` returning the clipped fraction, 0…1.
+   */
   function clipStep(channels) {
     const nCh = channels.length;
     const len = nCh && channels[0] ? channels[0].length : 0;
@@ -1955,6 +2378,11 @@
     return { step, value: () => (st.total ? st.clipped / st.total : 0) };
   }
 
+  /**
+   * Fraction of samples sitting at digital full scale (clipping / limiting).
+   * @param {Float32Array[]} channels - the decoded channels.
+   * @returns {number} clipped fraction, `0…1`.
+   */
   function clipRatio(channels) {
     const st = clipStep(channels);
     st.slice(0, st.units);
@@ -1983,12 +2411,19 @@
    * segments spread across the file, and compares them with control frequencies
    * just off the mains grid. Two properties matter for a repair with −40 dB of
    * authority, and both come from that:
-   *   · the level is exact, not grid-dependent;
-   *   · hum is *stationary* — a bass note is not. `steady` is the share of
-   *     segments where the tone is within 6 dB of its own median, which is what
-   *     keeps a sustained musical note out of the notch.
+   * · the level is exact, not grid-dependent;
+   * · hum is *stationary* — a bass note is not. `steady` is the share of
+   * segments where the tone is within 6 dB of its own median, which is what
+   * keeps a sustained musical note out of the notch.
    *
    * Hum is common-mode, so two channels are summed before the measurement.
+   *
+   * @param {Float32Array[]} channels - the channels to measure; a stereo pair
+   *   is summed first, because mains hum is common-mode.
+   * @param {number} sr - sample rate in Hz.
+   * @returns {RSDSP.Step} the hum step; its `value()` returns the hum picture
+   *   (`humScore`, `humPeakDb`, `mainsHz`, `steady`, `persist`, the second and
+   *   third harmonic depths and the 50/60 Hz scores).
    */
   function humStep(channels, sr) {
     const a = channels[0];
@@ -2148,15 +2583,18 @@
         }
         return { lev, prog };
       };
-      /** The line's *slope* against the programme, in dB per dB — not a
-       *  correlation. A correlation is ill-conditioned on the very file that
-       *  needs the test most: a line that is perfectly constant has no variance
-       *  to correlate, and a little leakage from a moving bass is then enough to
-       *  produce a correlation near 0.6 out of nothing (measured on the
-       *  sustained-tone fixture: r = 0.62 where the line itself moves 0.02 dB
-       *  per dB of programme). The slope asks the question the ear asks — when
-       *  the music drops 10 dB, how far does the line drop? — and a constant
-       *  answers 0 whatever else is in the bin. */
+      /**
+       * correlation. A correlation is ill-conditioned on the very file that
+       * needs the test most: a line that is perfectly constant has no variance
+       * to correlate, and a little leakage from a moving bass is then enough to
+       * produce a correlation near 0.6 out of nothing (measured on the
+       * sustained-tone fixture: r = 0.62 where the line itself moves 0.02 dB
+       * per dB of programme). The slope asks the question the ear asks — when
+       * the music drops 10 dB, how far does the line drop? — and a constant
+       * @param {number} f0 - the candidate line frequency in Hz.
+       * @returns {number} the line's slope against the programme, in dB per dB —
+       *   `0` for a constant line, whatever else sits in the bin.
+       */
       const followSlope = (f0) => {
         const s2 = followSeries(f0);
         const nn = s2.lev.length;
@@ -2250,22 +2688,15 @@
     return out;
   }
 
-  /** Highest bin level inside ±tol Hz of `f`. */
-  function spectrumPeak(spec, f, tol) {
-    let v = -140;
-    for (let k = 0; k < spec.n; k++) {
-      if (spec.db[k] > v && Math.abs(spec.freq[k] - f) <= tol) v = spec.db[k];
-    }
-    return v;
-  }
-
   /**
    * The strongest narrow resonances in the low mids — a boxy room, a honky
    * cabinet, a resonant pressing. Broad rises are what the fixed EQ bank is for;
    * this finds the *narrow* offenders so they can be notched precisely instead of
    * pulling a whole octave down with them.
    *
-   * @returns {{hz:number, excessDb:number, q:number}[]} strongest first, max 2
+   * @param {RSDSP.Spectrum} spec - the spectrum to scan.
+   * @returns {{hz:number, excessDb:number, q:number}[]} the strongest narrow
+   *   resonances, strongest first, at most two.
    */
   function resonanceScan(spec) {
     const binHz = spec.n > 1 ? spec.freq[1] - spec.freq[0] : 1;
@@ -2311,7 +2742,13 @@
     return picked;
   }
 
-  /** Pearson correlation between the first two channels (mono-compat check). */
+  /**
+   * Pearson correlation between the first two channels (mono-compat check).
+   * @param {Float32Array[]} channels - the decoded channels; a mono file
+   *   answers `1` by definition.
+   * @returns {{step:RSDSP.Step, value:function():number}} the step and a
+   *   `value()` returning the correlation, −1…1.
+   */
   function correlationStep(channels) {
     if (channels.length < 2) return { step: stepRange('correlation', 0, 0, () => {}), value: () => 1 };
     const a = channels[0], b = channels[1];
@@ -2341,6 +2778,13 @@
     };
   }
 
+  /**
+   * Correlation between the first two channels, `−1…1` — the mono
+   * compatibility check.
+   * @param {Float32Array[]} channels - the decoded channels; a mono file
+   *   reports `1` by definition.
+   * @returns {number} the Pearson correlation of the two channels.
+   */
   function stereoCorrelation(channels) {
     const c = correlationStep(channels);
     c.step.slice(0, c.step.units);
@@ -2363,6 +2807,13 @@
    * measured from decimated samples), while the moment products are accumulated
    * every fourth sample: the bands live far enough below Nyquist that the
    * subset is the same measurement, and it keeps the pass cheap.
+   *
+   * @param {Float32Array[]} channels - the decoded channels (the first two are
+   *   the ones measured).
+   * @param {number} sr - sample rate in Hz; the three band splits are one-pole
+   *   crossovers placed relative to it.
+   * @returns {{step:RSDSP.Step, value:function():object}} the step and a
+   *   `value()` returning `{low, mid, high, balanceDb}`.
    */
   function stereoBandsStep(channels, sr) {
     const flat = () => ({ step: stepRange('stereo-bands', 0, 0, () => {}), value: () => ({ low: 1, mid: 1, high: 1, balanceDb: 0 }) });
@@ -2481,6 +2932,13 @@
     return t;
   }
 
+  /**
+   * Inter-sample peak as a step: a 4-phase, 32-tap oversampled walk over the
+   * samples that can reach full scale between sample instants.
+   * @param {Float32Array[]} channels - the decoded channels.
+   * @returns {{step:object, value:function():number}} the step and a `value()`
+   *   that returns the true peak in dBTP (`−70` for an empty input).
+   */
   function ispStep(channels) {
     const flat = { step: stepRange('isp', 0, 0, () => {}), value: () => -70 };
     if (!channels.length || !channels[0].length) return flat;
@@ -2537,6 +2995,13 @@
    * The whole measurement as a plan: a list of steps (each range-addressable)
    * plus a `result()` that turns the accumulated numbers into the metrics.
    * `measure()` runs it in one go, `measureAsync()` runs it in slices.
+   *
+   * @param {Float32Array[]} channels - the decoded channels, all the same
+   *   length.
+   * @param {number} sr - sample rate in Hz.
+   * @returns {{steps:RSDSP.Step[], result:function():RSDSP.Measurement}} the
+   *   plan: {@link measure} runs `steps` in one go, {@link measureAsync} in
+   *   slices, and both end in `result()`.
    */
   function measurePlan(channels, sr) {
     const sp = spectrumStep(channels, sr, { fftSize: 8192, maxFrames: 140 });
@@ -2568,6 +3033,13 @@
       nt.steps[0], nt.steps[1], nt.steps[2], nt.steps[3], humExact, isp.step, fin,
     ];
 
+    /**
+     * Assemble the one and only metrics object: everything the profile maths,
+     * the diagnosis and the UI read, derived from the step accumulators of
+     * this plan.
+     * @returns {object} the full measurement (levels, noise, hum, crackle,
+     *   spectrum-based shape numbers, per-band levels and the quality score).
+     */
     function result() {
       const spec = sp.value();
       const na = nt.value();
@@ -2825,6 +3297,10 @@
   /**
    * 0–100 "how good does this recording sound" score.
    * Used for the Before/After read-out so users can see the improvement.
+   * @param {RSDSP.Measurement} m - a complete measurement.
+   * @returns {number} 0…100, where 100 is a clean digital master and a worn
+   *   transfer lands in the 20s. A non-finite term is skipped rather than
+   *   dragging the score to `NaN`.
    */
   function qualityScore(m) {
     // every term is guarded: a measurement that came out non-finite (a corrupt
@@ -2852,7 +3328,13 @@
 
   /* ------------------------------------------------------ sample-rate sniff */
 
-  /** Read the source sample rate straight from the container header. */
+  /**
+   * Read the source sample rate straight from the container header, so an
+   * export keeps the rate the file arrived with even when the browser's own
+   * decoder resampled it.
+   * @param {(ArrayBuffer|Uint8Array)} buf - the first bytes of the file.
+   * @returns {number} the rate in Hz, or `0` when no header could be read.
+   */
   function detectSampleRate(buf) {
     const u8 = new Uint8Array(buf);
     const dv = new DataView(buf);
@@ -3055,7 +3537,12 @@
     return buffer;
   }
 
-  /** Decode a RIFF/WAVE buffer into channel arrays (used by the CLI tester). */
+  /**
+   * Decode a RIFF/WAVE buffer into channel arrays.
+   * @param {ArrayBuffer} buffer - the whole file.
+   * @returns {{channels:Float32Array[], sampleRate:number}|null} the decoded
+   *   audio, or `null` for anything that is not 16/24/32-bit integer PCM.
+   */
   function decodeWav(buffer) {
     const view = new DataView(buffer);
     const u8 = new Uint8Array(buffer);
@@ -3103,7 +3590,13 @@
 
   /* ------------------------------------------------------------- downsampler */
 
-  /** Peak envelope (min/max pairs) for waveform drawing. */
+  /**
+   * Peak envelope for waveform drawing.
+   * @param {Float32Array} signal - the samples to summarise.
+   * @param {number} [buckets] - how many buckets to summarise them into.
+   * @returns {{min:Float32Array, max:Float32Array}} the envelope's lower and
+   *   upper edges, one entry per bucket.
+   */
   function peaks(signal, buckets) {
     const n = signal.length;
     const out = new Float32Array(buckets * 2);
@@ -3124,7 +3617,13 @@
     return out;
   }
 
-  /** RMS envelope for waveform drawing (nicer than peak for music). */
+  /**
+   * RMS envelope for waveform drawing (nicer than peak for music).
+   * @param {Float32Array} signal - the samples to summarise.
+   * @param {number} [buckets] - how many buckets to summarise them into.
+   * @returns {{min:Float32Array, max:Float32Array}} the envelope, symmetric
+   *   around zero and scaled so the loudest bucket reaches full height.
+   */
   function rmsEnvelope(signal, buckets) {
     const n = signal.length;
     const out = new Float32Array(buckets);
@@ -3141,8 +3640,28 @@
 
   /* ------------------------------------------------------- tiny biquad class */
 
+  /**
+   * A single direct-form-II biquad with the coefficients the analysis paths
+   * need: low pass, high pass, constant-peak-gain band pass and RBJ notch.
+   * State (`z1`, `z2`) lives on the instance, so a filter can be run across
+   * buffer boundaries — which is what `sibStep` and the band scans do.
+   * @example
+   *   const b = new RSDSP.Biquad().setHighpass(sr, 60, 0.5);
+   *   const y = b.process(x);
+   */
   class Biquad {
+    /**
+     * An identity filter with zeroed state — configure it with one of the
+     * `set*()` methods before processing anything.
+     */
     constructor() { this.b0 = 1; this.b1 = 0; this.b2 = 0; this.a1 = 0; this.a2 = 0; this.z1 = 0; this.z2 = 0; }
+    /**
+     * Configure as a low pass.
+     * @param {number} sr - sample rate in Hz; `f` is clamped to 0.49·sr.
+     * @param {number} f - corner frequency in Hz.
+     * @param {number} [q] - resonance; default 0.707.
+     * @returns {RSDSP.Biquad} `this`, for chaining.
+     */
     setLowpass(sr, f, q) {
       const w = TWO_PI * clamp(f, 5, sr * 0.49) / sr;
       const c = Math.cos(w), s = Math.sin(w), al = s / (2 * (q || 0.707)), a0 = 1 + al;
@@ -3150,6 +3669,13 @@
       this.a1 = -2 * c / a0; this.a2 = (1 - al) / a0;
       return this;
     }
+    /**
+     * Configure as a high pass.
+     * @param {number} sr - sample rate in Hz; `f` is clamped to 0.49·sr.
+     * @param {number} f - corner frequency in Hz.
+     * @param {number} [q] - resonance; default 0.707.
+     * @returns {RSDSP.Biquad} `this`, for chaining.
+     */
     setHighpass(sr, f, q) {
       const w = TWO_PI * clamp(f, 5, sr * 0.49) / sr;
       const c = Math.cos(w), s = Math.sin(w), al = s / (2 * (q || 0.707)), a0 = 1 + al;
@@ -3157,7 +3683,13 @@
       this.a1 = -2 * c / a0; this.a2 = (1 - al) / a0;
       return this;
     }
-    /** Constant-peak-gain band pass, as the worklet's Biquad builds it. */
+    /**
+     * Constant-peak-gain band pass, as the worklet's own Biquad builds it.
+     * @param {number} sr - sample rate in Hz; `f` is clamped to 0.49·sr.
+     * @param {number} f - centre frequency in Hz.
+     * @param {number} [q] - resonance; default 0.707.
+     * @returns {RSDSP.Biquad} `this`, for chaining.
+     */
     setBandpass(sr, f, q) {
       const w = TWO_PI * clamp(f, 5, sr * 0.49) / sr;
       const c = Math.cos(w), s = Math.sin(w), al = s / (2 * (q || 0.707)), a0 = 1 + al;
@@ -3165,7 +3697,13 @@
       this.a1 = -2 * c / a0; this.a2 = (1 - al) / a0;
       return this;
     }
-    /** RBJ notch: a bell of `−60 dB` at its centre is what the band paths use. */
+    /**
+     * RBJ notch — the shape the hum and resonance notches use.
+     * @param {number} sr - sample rate in Hz; `f` is clamped to 0.49·sr.
+     * @param {number} f - notch centre in Hz.
+     * @param {number} [q] - sharpness; default 0.707.
+     * @returns {RSDSP.Biquad} `this`, for chaining.
+     */
     setNotch(sr, f, q) {
       const w = TWO_PI * clamp(f, 5, sr * 0.49) / sr;
       const c = Math.cos(w), s = Math.sin(w), al = s / (2 * (q || 0.707)), a0 = 1 + al;
@@ -3173,6 +3711,11 @@
       this.a1 = -2 * c / a0; this.a2 = (1 - al) / a0;
       return this;
     }
+    /**
+     * Filter one sample and advance the state.
+     * @param {number} x - the input sample.
+     * @returns {number} the filtered sample.
+     */
     process(x) {
       const y = this.b0 * x + this.z1;
       this.z1 = this.b1 * x - this.a1 * y + this.z2;
@@ -3183,7 +3726,225 @@
 
   /* ----------------------------------------------------------------- exports */
 
+  /**
+   * The data structures this module exchanges with its callers.
+   *
+   * @typedef {Object} RSDSP.Step
+   * @property {string} label - stage name, shown in the progress line.
+   * @property {number} units - total work units (samples, frames, windows).
+   * @property {number} estCost - estimated cost in relative units, used to
+   *   slice the work into even time budgets.
+   * @property {function(number, number): void} slice - run the work for the
+   *   half-open range `[from, to)` of `units`.
+   * @property {function(): *} [value] - the step's answer once the whole
+   *   range has been visited.
+   * @property {Object} [state] - the raw accumulators, for callers that want
+   *   a single number without a second walk.
+   *
+   * @typedef {Object} RSDSP.Spectrum
+   * @property {number[]} freq - bin centre frequencies in Hz.
+   * @property {number[]} db - averaged magnitude per bin in dB.
+   * @property {number} n - number of bins.
+   * @property {number} sr - sample rate the spectrum was measured at.
+   * @property {number} binHz - bin width in Hz.
+   * @property {number} frameCount - how many frames were averaged.
+   * @property {number[]} frameRms - per-frame RMS, the envelope a waveform
+   *   drawing can use.
+   *
+   * @typedef {Object} RSDSP.NoiseInfo
+   * @property {RSDSP.Spectrum} spec - the spectrum of the quiet frames only.
+   * @property {number} floorDb - broadband noise floor in dBFS.
+   * @property {number} hfFloorDb - noise floor above 4 kHz.
+   * @property {number} midFloorDb - noise floor around 1 kHz.
+   * @property {number} noiseSlope - dB/octave of the noise floor: negative
+   *   means rumble-heavy, flat means tape or digital hiss.
+   * @property {number} flatness - how flat the noise spectrum is, 0…1.
+   * @property {number} rumble - low-frequency noise excess, 0…1.
+   * @property {number} crackleIndex - burst evidence in the quiet parts.
+   * @property {number} musicTiltDb - HF-minus-mid tilt of the music itself.
+   * @property {number} hissTiltDb - the same tilt measured on the noise.
+   * @property {number} hissDeficitDb - how much quieter the top end is than
+   *   its own music implies — the de-hisser's reason to exist.
+   * @property {number} hfFollowDb - how far the HF envelope follows the music.
+   * @property {number} confidence - how much the quiet frames prove, 0…1.
+   * @property {number} total - frames examined.
+   * @property {number} frameRms - per-frame RMS of the whole file.
+   * @property {number} spikeFrames - frames flagged as impulsive.
+   *
+   * @typedef {Object} RSDSP.Measurement
+   * @property {number} peakDb - sample peak in dBFS.
+   * @property {number} loudness - integrated loudness in LUFS.
+   * @property {number} dynamicRangeDb - 95th-minus-10th percentile RMS spread.
+   * @property {number} snrDb - music level minus noise floor.
+   * @property {number} correlation - inter-channel correlation, −1…1.
+   * @property {number} ispDb - inter-sample peak in dBTP.
+   * @property {number} hissAmount - 0…1 de-hiss depth the evidence supports.
+   * @property {number} crackleIndex - 0…1 vinyl-crackle evidence.
+   * @property {number} humScore - 0…1 mains-hum evidence.
+   * @property {Array<{hz:number, excessDb:number, q:number}>} resonances - measured
+   *   box resonances, loudest first.
+   * @property {number[]} bandDb - the twelve measured EQ-band levels.
+   * @property {number[]} bandSnrDb - each band's level above its own noise.
+   * @property {number} score - the 0…100 quality score.
+   * @property {RSDSP.Spectrum} spec - the averaged spectrum behind all of it.
+   *
+   * @typedef {Object} RSDSPApi
+   * @property {function(Float32Array, Float32Array): number} siSdr - aligned-reference SI-SDR in dB.
+   * @property {function(Float32Array, Float32Array, number=): number} logSpectralDistance - mean STFT log-power distance in dB.
+   * @property {function(Float32Array[], number): RSDSP.Measurement} measure
+   * @property {function(Float32Array[], number, ?function(number, string): void, ?Object): Promise<RSDSP.Measurement>} measureAsync
+   * @property {function(number): number} qualityScore
+   * @property {function(Float32Array[], number, ?Object): RSDSP.Spectrum} spectrum
+   * @property {function(new: RSDSP.Biquad)} Biquad
+   * @property {function(number, number, number): number[]} biquadHP
+   * @property {function(Float32Array, number[]): Float32Array} applyBiquad
+   * @property {function(ArrayBuffer): ({channels: Float32Array[], sampleRate: number}|null)} decodeWav
+   * @property {function(Float32Array[], number, ?number): ArrayBuffer} encodeWav
+   */
+  /** Validate aligned, finite mono samples; no implicit truncation or alignment.
+   * @param {Float32Array} reference - clean reference.
+   * @param {Float32Array} estimate - restored or degraded signal.
+   * @returns {void}
+   */
+  function qualityInputs(reference, estimate) {
+    if (!reference || !estimate || !reference.length || reference.length !== estimate.length)
+      throw new RangeError('Quality metrics require non-empty equal-length aligned signals');
+    for (let i = 0; i < reference.length; i++)
+      if (!Number.isFinite(reference[i]) || !Number.isFinite(estimate[i]))
+        throw new RangeError('Quality metrics require finite samples');
+  }
+
+  /** Explicit, bounded normalized cross-correlation alignment for diagnostics.
+   * Positive lag means estimate lags reference. A common central window of at
+   * most 32768 samples bounds FFT storage; full input validation is retained.
+   * This compensates a constant delay, NOT frequency-dependent filter phase.
+   * Silent/constant windows yield lag zero and correlation NaN. Returned views
+   * exclude non-overlapping edges; callers must report lag and overlap, not
+   * silently substitute this best-lag score for a declared-latency acceptance.
+   * @param {Float32Array} reference - finite reference observations.
+   * @param {Float32Array} estimate - finite estimated observations.
+   * @param {number} [maxLag=16] - predeclared maximum absolute lag (0..2048).
+   * @returns {Object} reference, estimate, lag, correlation, overlap.
+   */
+  function alignSignals(reference, estimate, maxLag = 16) {
+    qualityInputs(reference, reference); qualityInputs(estimate, estimate);
+    if (!Number.isInteger(maxLag) || maxLag < 0 || maxLag > 2048)
+      throw new RangeError('maxLag must be an integer in [0, 2048]');
+    const length = Math.min(reference.length, estimate.length);
+    const n = Math.min(32768, length), start = Math.floor((length - n) / 2);
+    const bound = Math.min(maxLag, Math.floor(n / 4));
+    let size = 1;
+    while (size < n * 2) size *= 2;
+    const ar = new Float64Array(size), ai = new Float64Array(size);
+    const br = new Float64Array(size), bi = new Float64Array(size);
+    const sumsA = new Float64Array(n + 1), sumsB = new Float64Array(n + 1);
+    const energyA = new Float64Array(n + 1), energyB = new Float64Array(n + 1);
+    // Centre before the FFT as well as normalizing each overlap, avoiding DC
+    // cancellation for small signals riding on a large constant offset.
+    let ma = 0, mb = 0;
+    for (let i = 0; i < n; i++) { ma += reference[start + i] / n; mb += estimate[start + i] / n; }
+    for (let i = 0; i < n; i++) {
+      const a = reference[start + i] - ma, b = estimate[start + i] - mb;
+      ar[i] = a; br[i] = b;
+      sumsA[i + 1] = sumsA[i] + a; sumsB[i + 1] = sumsB[i] + b;
+      energyA[i + 1] = energyA[i] + a * a; energyB[i + 1] = energyB[i] + b * b;
+    }
+    fft(ar, ai); fft(br, bi);
+    for (let i = 0; i < size; i++) {
+      const re = br[i] * ar[i] + bi[i] * ai[i];
+      const im = bi[i] * ar[i] - br[i] * ai[i];
+      br[i] = re; bi[i] = -im;
+    }
+    fft(br, bi);
+    let lag = 0, correlation = NaN, best = -1;
+    for (let l = -bound; l <= bound; l++) {
+      const a = Math.max(0, -l), b = Math.max(0, l), count = n - Math.abs(l);
+      const sa = sumsA[a + count] - sumsA[a], sb = sumsB[b + count] - sumsB[b];
+      const ea = Math.max(0, energyA[a + count] - energyA[a] - sa * sa / count);
+      const eb = Math.max(0, energyB[b + count] - energyB[b] - sb * sb / count);
+      if (!(ea > 0 && eb > 0)) continue;
+      const corr = clamp((br[l >= 0 ? l : size + l] / size - sa * sb / count) / Math.sqrt(ea * eb), -1, 1);
+      const score = Math.abs(corr);
+      if (score > best + 1e-12 || (Math.abs(score - best) <= 1e-12 && Math.abs(l) < Math.abs(lag))) {
+        best = score; lag = l; correlation = corr;
+      }
+    }
+    const a = Math.max(0, -lag), b = Math.max(0, lag);
+    const overlap = Math.min(reference.length - a, estimate.length - b);
+    return { reference: reference.subarray(a, a + overlap), estimate: estimate.subarray(b, b + overlap), lag, correlation, overlap };
+  }
+
+  /** Report both raw and explicitly lag-compensated SI-SDR.
+   * @param {Float32Array} reference - clean reference.
+   * @param {Float32Array} estimate - estimate at the same sample rate.
+   * @param {number} [maxLag=16] - predeclared diagnostic search bound.
+   * @returns {Object} raw, aligned, lag, correlation, overlap.
+   */
+  function siSdrAligned(reference, estimate, maxLag = 16) {
+    const a = alignSignals(reference, estimate, maxLag);
+    return { raw: reference.length === estimate.length ? siSdr(reference, estimate) : NaN,
+      aligned: siSdr(a.reference, a.estimate), lag: a.lag, correlation: a.correlation, overlap: a.overlap };
+  }
+
+  /** Zero-mean scale-invariant signal-to-distortion ratio in dB.
+   * alpha = dot(estimate, reference) / energy(reference). The residual is
+   * estimate - alpha * reference (not a separately supplied noise signal).
+   * Constant references are undefined (NaN); perfect reconstruction is +Infinity,
+   * a zero/orthogonal estimate is -Infinity. Inputs must already be time aligned.
+   * @param {Float32Array} reference - clean signal.
+   * @param {Float32Array} estimate - processed signal.
+   * @returns {number} SI-SDR in dB.
+   */
+  function siSdr(reference, estimate) {
+    qualityInputs(reference, estimate);
+    const n = reference.length;
+    let sm = 0, em = 0;
+    for (let i = 0; i < n; i++) { sm += reference[i]; em += estimate[i]; }
+    sm /= n; em /= n;
+    let ss = 0, dot = 0;
+    for (let i = 0; i < n; i++) { const s = reference[i] - sm; ss += s * s; dot += s * (estimate[i] - em); }
+    if (!ss) return NaN;
+    const alpha = dot / ss;
+    let residual = 0;
+    for (let i = 0; i < n; i++) { const e = estimate[i] - em - alpha * (reference[i] - sm); residual += e * e; }
+    const target = alpha * alpha * ss;
+    return target === 0 ? -Infinity : residual === 0 ? Infinity : 10 * Math.log10(target / residual);
+  }
+
+  /** Mean per-frame RMS log-power spectral distance, in dB (lower is better).
+   * Hann STFT, 50% overlap, one-sided spectrum including DC/Nyquist, absolute
+   * power floor 1e-12 after window-energy normalization. Last frame zero-padded.
+   * @param {Float32Array} reference - aligned original or known clean signal.
+   * @param {Float32Array} estimate - processed signal, same rate and length.
+   * @param {number} [fftSize=1024] - power-of-two frame size.
+   * @returns {number} log-spectral distance in dB.
+   */
+  function logSpectralDistance(reference, estimate, fftSize = 1024) {
+    qualityInputs(reference, estimate);
+    if (!Number.isInteger(fftSize) || fftSize < 4 || fftSize > 32768 || (fftSize & (fftSize - 1)))
+      throw new RangeError('fftSize must be a power of two in [4, 32768]');
+    const window = hann(fftSize), bins = fftSize / 2 + 1;
+    let norm = 0, total = 0, frames = 0;
+    for (const w of window) norm += w * w;
+    for (let start = 0; start < reference.length; start += fftSize / 2) {
+      const spectra = [reference, estimate].map(signal => {
+        const re = new Float64Array(fftSize), im = new Float64Array(fftSize);
+        for (let j = 0; j < fftSize; j++) re[j] = (signal[start + j] || 0) * window[j];
+        fft(re, im);
+        return Array.from({ length: bins }, (_, k) => 10 * Math.log10(Math.max(1e-12, (re[k] * re[k] + im[k] * im[k]) / norm)));
+      });
+      let sum = 0;
+      for (let k = 0; k < bins; k++) sum += (spectra[0][k] - spectra[1][k]) ** 2;
+      total += Math.sqrt(sum / bins); frames++;
+      if (start + fftSize >= reference.length) break;
+    }
+    return total / frames;
+  }
+
+  /** @type {RSDSPApi} */
   const API = {
+    SpectralWiener, denoiseWiener,
+    alignSignals, siSdrAligned, siSdr, logSpectralDistance,
     flatTopStep,
     TWO_PI, clamp, db, lin,
     hann, blackman, fft, spectrum, bandLevel, bandMedian, smoothSpec,

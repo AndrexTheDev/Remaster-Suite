@@ -229,6 +229,15 @@ code { font-family: var(--mono); }
 .ctl { display: flex; flex-direction: column; gap: 6px; min-width: 230px; }
 .ctl-row { display: flex; align-items: center; gap: 12px; }
 .ctl-hint { font-size: .74rem; color: var(--ink-mute); max-width: 34ch; }
+.model-progress { display: grid; gap: 4px; margin-top: 8px; width: 100%; max-width: 34ch; }
+/* `display: grid` above would otherwise beat the UA sheet's [hidden] rule —
+   the row must really be gone until a download needs it */
+.model-progress[hidden] { display: none; }
+.model-progress-head { display: flex; align-items: baseline; gap: 8px; font-size: .72rem; }
+.model-progress-text { flex: 1; min-width: 0; color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-progress-pct { color: var(--gold); font-weight: 800; font-variant-numeric: tabular-nums; }
+.model-progress.is-done .work-fill { background: var(--green); }
+.model-progress.is-failed .work-fill { background: var(--red); }
 .ctl-check { display: flex; align-items: center; gap: 8px; font-size: .86rem; font-weight: 650; cursor: pointer; }
 .ctl-check input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--gold); cursor: pointer; }
 .ctl-actions { flex-direction: row; align-items: center; gap: 10px; margin-left: auto; }
@@ -536,7 +545,93 @@ dialog.dialog:not([open]) { display: none; }
 @keyframes toastIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
 @keyframes toastOut { to { opacity: 0; transform: translateY(10px); } }
 
-/* ---------------------------------------------------------- 13b · compare FAB */
+/* ═══════════════════════════════════════ 13b · the phone's card inspector ══
+   Below 768 px the per-file controls do not live in the card any more: they
+   slide up from the bottom edge as one vertical list, on top of a scrim, with
+   the page behind them frozen. Nothing in the drawer scrolls sideways, which
+   is the whole reason it exists — a horizontally scrolling strip *inside* a
+   card inside a vertically panning page is three gestures fighting for one
+   finger. The global effect rack keeps its carousel; a card no longer has one
+   to conflict with. */
+
+.card-inspect { display: none; }
+.sheet-scrim {
+  position: fixed; inset: 0; z-index: 96;
+  background: rgba(4, 6, 9, .64); backdrop-filter: blur(3px);
+  opacity: 0; transition: opacity .22s var(--ease);
+}
+.sheet-scrim[hidden] { display: none; }
+.sheet-scrim.is-open { opacity: 1; }
+.sheet {
+  /* above the toast layer (90) and the compare FAB (70): a leftover toast must
+     never paint over the drawer's own controls — the screenshot that caught it
+     had "Alle Dateien sind fertig" sitting exactly on the save row. The toast
+     layer is inert while the sheet is open anyway, so it is hidden too. */
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 97;
+  display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto;
+  max-height: min(86vh, 720px);
+  background: linear-gradient(180deg, var(--panel), var(--bg-2));
+  border: 1px solid var(--line); border-bottom: 0; border-radius: 20px 20px 0 0;
+  box-shadow: 0 -22px 60px rgba(0, 0, 0, .55);
+  transform: translateY(104%);
+  transition: transform .28s cubic-bezier(.2, .9, .25, 1);
+}
+.sheet[hidden] { display: none; }
+.sheet.is-open { transform: none; }
+.sheet-grab { display: grid; place-items: center; padding: 10px 0 2px; touch-action: none; cursor: grab; }
+.sheet-grab i { width: 44px; height: 5px; border-radius: 999px; background: var(--line); display: block; }
+.sheet-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  padding: 4px 16px 10px 18px; border-bottom: 1px solid var(--line-soft);
+}
+.sheet-headings { min-width: 0; display: grid; gap: 2px; }
+.sheet-title { font-size: 1rem; font-weight: 750; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sheet-sub { font-size: .78rem; color: var(--ink-mute); font-variant-numeric: tabular-nums; }
+.sheet-body {
+  overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
+  touch-action: pan-y; padding: 14px 18px 18px;
+}
+/* one column, full width, nothing that can be dragged sideways */
+.sheet-body .card-grid { grid-template-columns: minmax(0, 1fr); gap: 18px; }
+.sheet-body .field { min-width: 0; }
+.sheet-body .field-row { flex-wrap: wrap; }
+.sheet-body .select, .sheet-body .select-sm { width: 100%; }
+.sheet-body .range-sm { width: 100%; max-width: none; height: 34px; }
+.sheet-body .seg-sm { display: flex; }
+.sheet-body .seg-sm button { flex: 1 1 0; }
+.sheet-body .field-actions { justify-content: stretch; }
+.sheet-body .field-actions .field-row { display: grid; grid-template-columns: 1fr; }
+.sheet-body .field-actions .btn { width: 100%; }
+.sheet-foot {
+  display: flex; gap: 10px;
+  padding: 10px 18px calc(12px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--line-soft); background: rgba(13, 15, 18, .6);
+}
+.sheet-foot .btn { width: 100%; }
+/* the page behind is pinned, so the document must not paint a second scrollbar */
+html.sheet-open, html.sheet-open body { overflow: hidden; }
+/* …and a toast from before the drawer opened is not allowed to sit on it */
+html.sheet-open .toasts { opacity: 0; }
+
+/* ------------------------------------------------------- haptic micro-animations
+   The Vibration API is Android-Chrome-only; iOS Safari has never shipped it. A
+   touch that cannot buzz still has to be acknowledged, so the same call that
+   tries to vibrate knocks the control it belongs to: a short scale-down and a
+   ring that expands out of it. `prefers-reduced-motion` collapses this to
+   nothing along with every other animation in the app, which is correct. */
+@keyframes hapticKnock {
+  0% { transform: scale(1); }
+  32% { transform: scale(.955); }
+  68% { transform: scale(1.018); }
+  100% { transform: scale(1); }
+}
+@keyframes hapticGlow {
+  0% { box-shadow: 0 0 0 0 rgba(0, 230, 118, .42); }
+  100% { box-shadow: 0 0 0 12px rgba(0, 230, 118, 0); }
+}
+.is-haptic { animation: hapticKnock .34s var(--ease), hapticGlow .42s var(--ease); }
+
+/* ═════════════════════════════════════════════════ 13 · compare FAB ═══════ */
 /* The live A/B/C compare control: a thumb-reachable floating button, visible
    only while something is actually playing. A tap cycles Original → DSP →
    DSP+AI (whichever of those this device/card can actually offer); a press
@@ -640,6 +735,17 @@ dialog.dialog:not([open]) { display: none; }
   .wave { height: 96px; }
 }
 @media (max-width: 768px) {
+  /* the card inspector: the only way to reach a file's own controls now, and
+     the reason a card must not contain a horizontal scroller of its own */
+  .card-inspect { display: grid; }
+  .card { cursor: pointer; }
+  /* one column, always: the grid is only ever shown inside the drawer on a
+     phone, and the drawer is a vertical list by definition */
+  .card-grid { grid-template-columns: minmax(0, 1fr); }
+  /* a card's fields never turn into a sideways strip, whatever they contain */
+  .card .field-row { flex-wrap: wrap; }
+  .card .card-grid, .card .field { min-width: 0; max-width: 100%; }
+
   /* The effect rack becomes a wischbares Karussell: each control group is its
      own full-width, snap-aligned page instead of a dense wall of sliders —
      one thing to set at a time, a thumb-swipe apart. Scrolling is native
@@ -649,6 +755,10 @@ dialog.dialog:not([open]) { display: none; }
     flex-wrap: nowrap; overflow-x: auto; scroll-snap-type: x mandatory;
     gap: 0; margin: 0 -20px; padding: 2px 20px 6px; -webkit-overflow-scrolling: touch;
     scrollbar-width: none;
+    /* a horizontal swipe stops at the rack: it must not chain into the page's
+       own history gesture, and a vertical drag still pans the page */
+    overscroll-behavior-x: contain;
+    touch-action: pan-x pan-y;
   }
   .ctl-rack::-webkit-scrollbar { display: none; }
   .ctl-rack .ctl-group {
