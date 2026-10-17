@@ -147,8 +147,7 @@ async function engineChecks() {
   ok(Math.abs(posBefore - 0.75) < 0.02, 'position tracks elapsed time before any swap', posBefore.toFixed(3) + ' s');
 
   engine.switchBuffer(bufB, { start: 0, end: bufB.duration });
-  // switchBuffer() re-engages play() the same fire-and-forget way the rest of
-  // the engine's API already does (see ensurePlaying()) — the context is
+  // switchBuffer() re-engages play() without an await — the context is
   // already live here, so this only needs a microtask to settle
   await new Promise((r) => setTimeout(r, 0));
   ok(engine.playing === true, 'switchBuffer() does not stop playback');

@@ -328,6 +328,7 @@ class AudioContextStub extends BaseContextStub {
     this.state = 'running';
   }
   get currentTime() { return this._t; }
+  async suspend() { this.state = 'suspended'; }
   createAudioWorkletNode(name, opts) { return new WorkletNodeStub(this, name, opts); }
 }
 

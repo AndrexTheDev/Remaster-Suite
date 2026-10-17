@@ -30,6 +30,69 @@
   const DSP = global.RSDSP;
   const Presets = global.RSPresets;
 
+  /** Worker offload is optional: unsupported/CSP-blocked environments retain
+   * the exact yielding implementation below. Input buffers are copied before
+   * transfer, so previews and A/B never lose their source observations.
+   * @type {Worker|null}
+   */
+  let measurementWorker = null;
+  let workerDisabled = false, workerSequence = 0, workerIdle = null;
+  const workerJobs = new Map();
+  const measurementWorkerUrl = global.document && global.document.currentScript
+    ? new URL('analysis-worker.js', global.document.currentScript.src).href : 'assets/js/analysis-worker.js';
+
+  /** Dispose an unavailable worker and let all callers use yielding fallback.
+   * @returns {void}
+   */
+  function disableMeasurementWorker() {
+    workerDisabled = true;
+    if (measurementWorker) measurementWorker.terminate();
+    measurementWorker = null; global.clearTimeout(workerIdle);
+    for (const job of workerJobs.values()) { global.clearTimeout(job.timer); job.resolve(null); }
+    workerJobs.clear();
+  }
+
+  /** Submit optional off-thread analysis, returning null when unsupported.
+   * @param {string} mode - analyze, after or envelope.
+   * @param {Float32Array[]} channels - source observations, never transferred.
+   * @param {number} sr - sample rate.
+   * @param {Object} options - analysis/envelope options.
+   * @param {function(number,string):void} [progress] - progress callback.
+   * @returns {Promise<Object>|null} remote result or yielding fallback sentinel.
+   */
+  function offloadMeasurement(mode, channels, sr, options, progress) {
+    if (workerDisabled || !global.document || !global.Worker || !global.Worker.prototype
+        || typeof global.Worker.prototype.addEventListener !== 'function') return null;
+    global.clearTimeout(workerIdle);
+    if (!measurementWorker) {
+      try {
+        measurementWorker = new global.Worker(measurementWorkerUrl);
+        measurementWorker.onerror = measurementWorker.onmessageerror = disableMeasurementWorker;
+        measurementWorker.onmessage = ({ data }) => {
+          const job = workerJobs.get(data.id);
+          if (!job) return;
+          if (data.progress !== undefined) { if (job.progress) job.progress(data.progress, data.stage); return; }
+          global.clearTimeout(job.timer); workerJobs.delete(data.id);
+          if (data.error) job.reject(new Error(data.error)); else job.resolve(data.result);
+          if (!workerJobs.size) {
+            workerIdle = global.setTimeout(() => {
+              if (!workerJobs.size && measurementWorker) { measurementWorker.terminate(); measurementWorker = null; }
+            }, 30000);
+          }
+        };
+      } catch (e) { disableMeasurementWorker(); return null; }
+    }
+    return new Promise((resolve, reject) => {
+      const id = ++workerSequence;
+      const timer = global.setTimeout(disableMeasurementWorker, 30000);
+      workerJobs.set(id, { resolve, reject, timer, progress });
+      try {
+        const copies = channels.map(channel => channel.slice());
+        measurementWorker.postMessage({ id, mode, channels: copies, sr, options }, copies.map(c => c.buffer));
+      } catch (e) { disableMeasurementWorker(); }
+    });
+  }
+
   /**
    * Clamp a number into an inclusive range.
    * @param {number} x - value to clamp.
@@ -331,6 +394,8 @@
     const sr = audioBuffer.sampleRate;
     const channels = [];
     for (let c = 0; c < audioBuffer.numberOfChannels; c++) channels.push(audioBuffer.getChannelData(c));
+    const remote = offloadMeasurement('analyze', channels, sr, o, onProgress);
+    if (remote) { const result = await remote; if (result) return result; }
     const buckets = o.buckets || 1400;
     /**
      * Report progress as a clamped 0…1 fraction plus the stage name, and do
@@ -400,6 +465,31 @@
     };
   }
 
+  /** Yielding remeasurement of rendered audio for live UI use.
+   * @param {Float32Array[]} channels - rendered channels.
+   * @param {number} sr - sample rate.
+   * @returns {Promise<Object>} same measurements as analyzeChannels.
+   */
+  async function analyzeChannelsAsync(channels, sr) {
+    const remote = offloadMeasurement('after', channels, sr, {});
+    if (remote) { const result = await remote; if (result) return result; }
+    const metrics = await DSP.measureAsync(channels, sr);
+    return { metrics, score: metrics.score, chips: chipsFrom(metrics), diag: Presets.diagnose(metrics) };
+  }
+
+  /** Yielding envelope with the same exact buckets as envelope().
+   * @param {Float32Array[]} channels - source channels.
+   * @param {number} buckets - display buckets.
+   * @returns {Promise<Object>} min/max/RMS envelope.
+   */
+  async function envelopeAsync(channels, buckets) {
+    const remote = offloadMeasurement('envelope', channels, 48000, { buckets });
+    if (remote) { const result = await remote; if (result) return result; }
+    const plan = envelopeStep(channels, buckets, 0, channels[0].length, 'envelope');
+    await DSP.runStepsAsync([plan.step]);
+    return plan.value();
+  }
+
   /**
    * Pick the handful of headline numbers out of a full measurement — the ones
    * small enough to sit as chips on a card, and the only part of the metrics a
@@ -451,6 +541,8 @@
    * @property {function(AudioBuffer, Object=): AnalysisResult} analyze
    * @property {function(AudioBuffer, Object=, function(number, AnalyzerStage)=): Promise<AnalysisResult>} analyzeAsync
    * @property {function(Float32Array[], number): Object} analyzeChannels
+   * @property {function(Float32Array[], number): Promise<Object>} analyzeChannelsAsync
+   * @property {function(Float32Array[], number): Promise<Envelope>} envelopeAsync
    * @property {function(Float32Array[], number, number=, number=): Envelope} envelope
    * @property {function(Float32Array[], number, number=, number=, string=): {step: Step, value: function(): Envelope}} envelopeStep
    * @property {function(Float32Array[], number, number): PreviewWindow} pickPreviewWindow
@@ -461,7 +553,7 @@
 
   /** @type {RSAnalyzerApi} */
   const API = {
-    analyze, analyzeAsync, analyzeChannels, envelope, envelopeStep, pickPreviewWindow, chipsFrom,
+    analyze, analyzeAsync, analyzeChannels, analyzeChannelsAsync, envelopeAsync, envelope, envelopeStep, pickPreviewWindow, chipsFrom,
     mixdown, loudnessProfile,
   };
   /** @type {RSAnalyzerApi} */

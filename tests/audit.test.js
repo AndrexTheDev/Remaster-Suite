@@ -63,6 +63,11 @@ section('audit · repository hygiene');
   // via a <script src>: dsp-utils.js through importScripts()/require() inside
   // workers and the Node test harness, neural-worker.js as a dedicated Worker
   // script (`new Worker('assets/js/neural-worker.js')` in neural-controller.js).
+  // analyzer.js resolves its worker relative to the executing script. Recognize
+  // the real reference (not an unconditional whitelist for another source file).
+  if (/new URL\(['"]analysis-worker\.js['"]/.test(fs.readFileSync(path.join(ROOT, 'assets/js/analyzer.js'), 'utf8'))) {
+    referenced.add('assets/js/analysis-worker.js');
+  }
   const orphans = jsFiles.filter((f) => !referenced.has(f) && f.indexOf('dsp-utils') === -1 && f.indexOf('neural-worker') === -1 && f.indexOf('encoding-worker') === -1);
   ok(orphans.length === 0, 'no orphaned JavaScript file', orphans.join(', '));
   ok(referenced.has('assets/css/app.css'), 'stylesheet is referenced');

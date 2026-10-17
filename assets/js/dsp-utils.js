@@ -654,7 +654,7 @@
    */
   async function runStepsAsync(steps, onProgress, opts) {
     const o = opts || {};
-    const budget = Math.max(4, o.budgetMs || 26);      // work per slice
+    const budget = Math.max(4, o.budgetMs || 6);      // work per slice
     const reportMs = Math.max(16, o.reportMs || 60);   // DOM updates per second
     let total = 0;
     for (const st of steps) total += st.estCost || 0;
@@ -666,7 +666,7 @@
       const units = st.units | 0;
       if (units <= 0) continue;
       const share = st.estCost || 0;    // this step's slice of the bar
-      let span = Math.max(1, Math.ceil(units / 10));
+      let span = 1;
       let i = 0;
       while (i < units) {
         const prev = i;
@@ -675,9 +675,9 @@
         st.slice(prev, to);
         const dt = Math.max(0.25, clock() - t0);
         i = to;
-        // keep each slice in the 8–35 ms region: long enough that the yield
-        // costs nothing, short enough that a phone stays responsive
-        span = Math.max(1, Math.min(Math.ceil(units / 2), Math.round(span * (budget / dt))));
+        // Target sub-frame work, growing conservatively from one unit so a
+        // cold/JIT-uncalibrated first slice cannot monopolize the UI.
+        span = Math.max(1, Math.min(Math.ceil(units / 2), span * 2, Math.round(span * (budget / dt))));
         const now = clock();
         if (onProgress && (now - last >= reportMs || i >= units)) {
           last = now;

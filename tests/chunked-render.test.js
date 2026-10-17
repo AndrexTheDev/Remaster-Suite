@@ -566,6 +566,24 @@ async function appWiringTests() {
     App.removeCard(card);
   }
 
+  section('App.renderCard() · blocked MP3 worker falls back to a real WAV');
+  {
+    const win = bootApp(); await new Promise(r => setTimeout(r, 40));
+    const App = win.RSApp;
+    const file = wavFile(win, [H.tone(440, SR, 1, .2)], SR, 'fallback.wav');
+    await App.addFiles([file]); App.State.format = 'mp3';
+    win.Worker = class { constructor() { throw new Error('CSP blocked'); } };
+    let warning = false; const toast = win.RSUI.toast;
+    win.RSUI.toast = (...args) => { if (args[1] === 'warn') warning = true; return toast(...args); };
+    const card = App.State.cards[0], res = await App.renderCard(card, { force: true, streaming: true });
+    ok(res.format === 'wav' && /\.wav$/.test(res.name) && card.status === 'done' && warning,
+      'CSP failure produces a named WAV and an explicit warning, not a fake MP3');
+    const bytes = res.bytes || new Uint8Array(await readAsArrayBuffer(win, res.file));
+    const decoded = DSP.decodeWav(bytes.buffer);
+    ok(decoded && decoded.channels[0].length === SR, 'fallback WAV is decodable with its exact original duration');
+    App.removeCard(card);
+  }
+
   section('App.renderCard() · short files below the threshold still take the original, unchunked path');
   {
     const win = bootApp();

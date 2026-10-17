@@ -937,7 +937,7 @@
    */
   function memoryWriter(key) {
     const parts = [];
-    let size = 0;
+    let size = 0, closed = false;
     return {
       key,
       /**
@@ -946,8 +946,9 @@
        * @returns {Promise<void>} resolves when the copy is kept.
        */
       async write(chunk) {
+        if (closed) throw new Error('writer already closed');
         const u8 = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
-        parts.push(u8);
+        parts.push(u8.slice());
         size += u8.length;
       },
       /**
@@ -956,11 +957,14 @@
        * @returns {Promise<{size:number, key:string}>} bytes written and key.
        */
       async close() {
+        if (closed) return { size, key };
+        closed = true;
         const blob = new global.Blob(parts, { type: 'application/octet-stream' });
         MEMORY_FILES.set(key, blob);
+        parts.length = 0;
         return { size, key };
       },
-      async abort() { MEMORY_FILES.delete(key); },
+      async abort() { closed = true; parts.length = 0; MEMORY_FILES.delete(key); },
     };
   }
   /**

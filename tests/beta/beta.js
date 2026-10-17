@@ -54,8 +54,8 @@ const H = require('./../harness.js');
 const DSP = H.loadDsp();
 const SIM_SR = 44100;
 const fixtures = new Map();
-function fixture(name, channels, seconds) {
-  const bytes = Buffer.from(DSP.encodeWav(channels, SIM_SR, 16));
+function fixture(name, channels, seconds, rate = SIM_SR) {
+  const bytes = Buffer.from(DSP.encodeWav(channels, rate, 16));
   fixtures.set(name, bytes);
   // …and the same bytes on disk: the file-picker rows below are driven through
   // DevTools' `DOM.setFileInputFiles`, which needs a path, and a picker row
@@ -174,9 +174,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const step = (n) => { lastStep = n; console.log('  … ' + n); };
   setInterval(() => { console.error('.'); }, 10000);   // canary: node heartbeat on stderr
   const evalJS = async (expr) => {
-    const r = await Promise.race([
+    const r = await cdp.withDeadline(
       page.send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true }),
-      new Promise((_, rej) => setTimeout(async () => {
+      60000, async () => {
         try {
           let prof = 'no profile';
           try {
@@ -209,10 +209,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
             }),
             new Promise((r) => setTimeout(r, 8000)),
           ]);
-          rej(new Error('evalJS stall (>120 s) at step: ' + lastStep + ' · page state: ' + (diag && diag.result ? diag.result.value : 'main thread BUSY') + ' · hot: ' + prof));
-        } catch (e) { rej(e); }
-      }, 60000)),
-    ]);
+          throw new Error('evalJS stall (>60 s) at step: ' + lastStep + ' · page state: ' + (diag && diag.result ? diag.result.value : 'main thread BUSY') + ' · hot: ' + prof);
+        } catch (e) { throw e; }
+      });
     if (r.exceptionDetails) throw new Error('page error: ' + (r.exceptionDetails.exception ? r.exceptionDetails.exception.description : r.exceptionDetails.text));
     return r.result.value;
   };
@@ -239,8 +238,23 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const clickSelector = async (sel) => {
     await evalJS(`document.querySelector('${sel}').scrollIntoView({ block: 'center', behavior: 'instant' })`);
     await sleep(120);
-    const r = await evalJS(`(() => { const el = document.querySelector('${sel}');
-      const b = el.getBoundingClientRect(); return { x: b.x + b.width / 2, y: b.y + b.height / 2 }; })()`);
+    let r;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      r = await evalJS(`(() => { const el = document.querySelector('${sel}');
+        const b = el.getBoundingClientRect(), x=b.x+b.width/2, y=b.y+b.height/2;
+        const hit=document.elementFromPoint(x,y);
+        if(hit && el.contains(hit)) return {x,y,hit:true};
+        // A tall sticky rack can cover a centred card button. Scroll it below
+        // that rack instead of dispatching a real click to the wrong control.
+        const bottom=Math.max(...['.topbar','.controls-wrap'].map(s=>{
+          const n=document.querySelector(s);return n?n.getBoundingClientRect().bottom:0;
+        }));
+        window.scrollBy(0,b.top-Math.min(innerHeight-60,bottom+20));
+        return {x,y,hit:false}; })()`);
+      if(r.hit) break;
+      await sleep(50);
+    }
+    if(!r.hit) throw new Error('Click target remains occluded: '+sel);
     await clickAt(r.x, r.y);
   };
 
@@ -621,7 +635,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       return r && r.opfsKey ? 'streamed through OPFS' : 'in the heap'; };
     // one MP3 render, started without being awaited (a promise awaited through
     // the DevTools protocol deadlocks in this headless sandbox) and reported as
-    // "format:bytes", or "ERR:…" 
+    // "format:bytes", or "ERR:…"
     window.__renderMp3 = () => {
       window.__mp3done = '';
       RSApp.renderCard(RSApp.State.cards[0], { force: true })
@@ -902,6 +916,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     wrap(RSAnalyzer, 'analyzeAsync');
     wrap(RSEngine, 'render');
     wrapSync(RSAnalyzer, 'analyzeChannels');
+    wrap(RSAnalyzer, 'analyzeChannelsAsync');
     true;
   })()`);
   // ── a baseline, on this machine, through exactly the same path ───────────
@@ -924,7 +939,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       const addMs = Math.round(performance.now() - t0);
       const ph = Object.assign({}, window.__phase);
       const card = RSApp.State.cards[RSApp.State.cards.length - 1];
-      const out = { addMs, measureMs: ph.measureAsync, duration: Math.round(card.analysis.duration) };
+      const out = { addMs, analysisMs: ph.analyzeAsync, duration: Math.round(card.analysis.duration) };
       RSApp.clearAll();
       window.__result = out;
     })().catch((e) => { window.__error = String((e && e.message) || e); })
@@ -962,10 +977,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     window.__result = {
       addMs: window.__addMs,
       decodeMs: ph.decodeFile,
-      measureMs: ph.measureAsync,
+      analysisMs: ph.analyzeAsync,
       analyzeMs: ph.analyzeAsync,
       previewMs: ph.render,
-      previewMeasureMs: ph.analyzeChannels,
+      previewMeasureMs: ph.analyzeChannelsAsync || ph.analyzeChannels,
       renderMs: Math.round(renderMs),
       preset: card.analysis.preset,
       duration: Math.round(card.analysis.duration),
@@ -988,8 +1003,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // slower. Both rates travel with the row, so the number is visible either way.
   const FLOOR_MEASURE = 6;        // × realtime the measurement must at least reach
   const FLOOR_READY = 3;          // …and upload-to-ready
-  const baseRate = base.measureMs / base.duration;
-  const bigRate = perf.measureMs / perf.duration;
+  const baseRate = base.analysisMs / base.duration;
+  const bigRate = perf.analysisMs / perf.duration;
   const baseAddRate = base.addMs / base.duration;
   const bigAddRate = perf.addMs / perf.duration;
   // The measurement is what the user watches a progress bar for: seconds, not
@@ -997,13 +1012,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // sliced, and the bar tells the truth about it).
   check('a 3-minute recording is measured at the rate a 30-second one is, and at ≥ ' + FLOOR_MEASURE + '× realtime',
     perf.duration === 180 && bigRate <= baseRate * SLOPE
-      && perf.measureMs <= perf.duration * 1000 / FLOOR_MEASURE,
-    perf.measureMs + ' ms for ' + perf.duration + ' s · ' + bigRate.toFixed(1) + ' ms per audio-second against '
+      && perf.analysisMs <= perf.duration * 1000 / FLOOR_MEASURE,
+    perf.analysisMs + ' ms for ' + perf.duration + ' s · ' + bigRate.toFixed(1) + ' ms per audio-second against '
       + baseRate.toFixed(1) + ' on the 30 s baseline · '
-      + (perf.duration * 1000 / perf.measureMs).toFixed(0) + '× realtime · ' + perf.preset);
+      + (perf.duration * 1000 / perf.analysisMs).toFixed(0) + '× realtime · ' + perf.preset);
   check('upload to ready — decode, measure, preview render, preview measure — grows with the file, not faster',
     bigAddRate <= baseAddRate * SLOPE && perf.addMs <= perf.duration * 1000 / FLOOR_READY,
-    perf.addMs + ' ms (decode ' + perf.decodeMs + ' · measure ' + perf.measureMs + ' · preview render ' +
+    perf.addMs + ' ms (decode ' + perf.decodeMs + ' · analysis ' + perf.analysisMs + ' · preview render ' +
     perf.previewMs + ' · preview measure ' + perf.previewMeasureMs + ') · '
       + bigAddRate.toFixed(1) + ' ms per audio-second against ' + baseAddRate.toFixed(1));
   const latSorted = lat.slice().sort((a, b) => a - b);
@@ -1039,7 +1054,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     })().catch((e) => { window.__error = String((e && e.message) || e); })
       .then(() => { window.__batchDone = true; });
     true`, `window.__batchDone`, 300000, 'the six-file batch');
-  check('six-file batch renders sequentially, all done', batch.done === 6, batch.done + '/6 in ' + (batch.ms / 1000).toFixed(1) + ' s');
+  check('six-file batch renders concurrently, all done', batch.done === 6, batch.done + '/6 in ' + (batch.ms / 1000).toFixed(1) + ' s');
   check('batch keeps the heap calm', batch.heapMB < 900, batch.heapMB + ' MB');
 
   /* ------------------------------------------------------------- progress ---- */
@@ -1094,6 +1109,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       jobText: document.getElementById('globalProgressText').textContent,
     }), 50);
     await RSApp.processAll();
+    window.__samples.push({p:card.progress,stage:card.el.stage.textContent,eta:card.el.eta.textContent,
+      jobUp:!document.getElementById('globalProgress').hidden,job:document.getElementById('globalProgressPct').textContent,
+      jobText:document.getElementById('globalProgressText').textContent});
     clearInterval(iv);
     window.__renderDone = true;
   })(); true`);
@@ -1681,6 +1699,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await shotAt1x('22-iphone14pro-card');
   await shotElement('.card', '23-iphone14pro-card-closeup', true);
 
+  // Keep this visual-only scenario observable on fast machines too: use the
+  // existing real 30-second fixture, not a six-second render that may finish
+  // before a phone-scale screenshot reaches its first low-progress frame.
+  await evalJS(`RSApp.clearAll(); RSApp.State._magicFixAutoProcess=false; true`);
+  await evalJS(`(async()=>__drop([await __fixture('garage-30.wav','A-B-Test.wav')]))()`);
+  if(!await until(`RSApp.State.cards[0] && RSApp.State.cards[0].status==='ready'`,100)) {
+    throw new Error('Progress-paint fixture did not become ready');
+  }
+
   /* The bars have to be *painted*, not just set: sample the pixels of the
      progress bar while a real render runs, and hold the painting to it. The
      block the bar lives in has to be on screen for that, or the pixels being
@@ -2225,8 +2252,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await evalJS(`__set('.card [data-act="preset"]', 'auto'); __set('#presetSelect', 'auto'); true`);
 
   /* — listening: play, pause, seek, loop, A/B — */
+  await evalJS(`RSEngine.stop(); true`); // explicit stopped precondition
   await clickSelector('.card [data-act="play"]');
-  await sleep(800);
+  await until(`RSEngine.playing && RSEngine.ctx.state==='running'`, 40);
   const gPlayOn = await evalJS(`({ playing: RSEngine.playing, ctx: RSEngine.ctx && RSEngine.ctx.state })`);
   const p1 = await evalJS(`RSEngine.position`);
   await sleep(900);
@@ -2780,6 +2808,97 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       await evalJS(`RSApp.State.cards.length + ' card(s)'`));
   }
 
+  section('beta · heterogeneous ten-file UI workflow, continuous frame/long-task measurement');
+  // CPU profiling is diagnostic instrumentation, not production UI work.
+  try { await page.send('Profiler.stop'); } catch (e) { /* already stopped */ }
+  await useDevice('desktop');
+  await evalJS(`RSApp.clearAll(); RSApp.State.neuralEnabled = false; true`);
+  // Configure format through its real listener before upload; controls are
+  // intentionally hidden on the empty page, so this setup is not a trusted
+  // pointer click. Picker, Process All and ZIP remain actual UI interactions.
+  await evalJS(`document.querySelector('[data-format="mp3"]').click(); __set('#mp3Rate', 192); true`);
+  const speechWords = [0,1,2].map(digit => {
+    const bytes=fs.readFileSync(path.join(ROOT,'tests','fixtures','speech',digit+'_jackson_0.wav'));
+    const decoded=DSP.decodeWav(bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength));
+    return {sr:decoded.sr, samples:H.normalize(decoded.channels[0],.45)};
+  });
+  const heterogeneous = [];
+  for (const [i, seconds] of [5, 7, 10, 12, 15, 20, 25, 30, 45, 60].entries()) {
+    const rate = i % 2 ? 48000 : 44100;
+    const kind = ['speech-recorded-digits', 'music', 'noise'][i % 3];
+    const x = H.noise(rate, seconds, .025, 100 + i);
+    for (let n = 0; n < x.length; n++) {
+      const t = n / rate;
+      if (kind === 'speech-recorded-digits') {
+        const word=speechWords[Math.floor(t/.9)%speechWords.length], position=(t%.9)*word.sr, k=Math.floor(position);
+        if(k+1<word.samples.length) x[n] += word.samples[k]+(word.samples[k+1]-word.samples[k])*(position-k);
+      } else if (kind === 'music') x[n] += .2 * Math.sin(2 * Math.PI * 440 * t) + .1 * Math.sin(2 * Math.PI * 659.25 * t);
+    }
+    const name = 'e2e-' + i + '-' + kind + '.wav';
+    fixture(name, i % 2 ? stereo(x) : [x], seconds, rate);
+    heterogeneous.push(path.join(FILE_DIR, name));
+  }
+  // Test fixtures are synthesized outside the measured browser workflow.
+  // Speech uses pinned CC BY-SA FSDD human digit recordings (fixture README),
+  // resampled/repeated with pauses, not a conversational intelligibility corpus.
+  await evalJS(`(() => {
+    const m = window.__workflow = { gaps: [], longTasks: [], longTaskDetails: [], running: true, start: performance.now() };
+    m.observer = new PerformanceObserver(list => { for (const e of list.getEntries()) {
+      m.longTasks.push(e.duration); m.longTaskDetails.push({ms:e.duration,atMs:e.startTime-m.start});
+    } });
+    m.observer.observe({type:'longtask', buffered:false});
+    m.originalDownload=RSCodecs.download;
+    RSCodecs.download=function(...args) {
+      const result=m.originalDownload.apply(this,args);
+      if (/\\.zip$/.test(args[1])) setTimeout(()=>{
+        m.longTasks.push(...m.observer.takeRecords().map(e=>e.duration));m.observer.disconnect();
+        m.running=false;m.elapsedMs=performance.now()-m.start;RSCodecs.download=m.originalDownload;m.stopped=true;
+      },0);
+      return result;
+    };
+    let previous;
+    function frame(t) { if (previous !== undefined) m.gaps.push(t-previous); previous=t; if(m.running) requestAnimationFrame(frame); }
+    requestAnimationFrame(frame);
+  })(); true`);
+  const wfDoc = await page.send('DOM.getDocument');
+  const wfInput = await page.send('DOM.querySelector', { nodeId: wfDoc.root.nodeId, selector: '#fileInput' });
+  await page.send('DOM.setFileInputFiles', { files: heterogeneous, nodeId: wfInput.nodeId });
+  let readyTen = false;
+  for (let i=0;i<1800;i++) {
+    if (await evalJS(`RSApp.State.cards.length === 10 && RSApp.State.cards.every(c=>c.analysis && c.status === 'ready')`)) { readyTen=true; break; }
+    await sleep(200);
+  }
+  check('all ten real picker files decode/analyse at 44.1/48k, mono/stereo, 5–60s', readyTen);
+  if (!readyTen) throw new Error('Heterogeneous batch analysis failed');
+  await clickSelector('#btnProcessAll');
+  let allTen = false;
+  for(let i=0;i<3000;i++) {
+    if(await evalJS(`!RSApp.State.busy && RSApp.State.cards.every(c=>c.status==='done')`)) {allTen=true;break;}
+    if(await evalJS(`!RSApp.State.busy && RSApp.State.cards.some(c=>c.status==='error')`)) break;
+    await sleep(200);
+  }
+  check('trusted Process All click restores and MP3-encodes all ten files', allTen &&
+    await evalJS(`RSApp.State.cards.every(c=>c.result && c.result.format==='mp3')`),
+    await evalJS(`RSApp.State.cards.map(c=>c.status+':'+(c.result&&c.result.format)).join(',')`));
+  for (const old of fs.readdirSync(DL_DIR)) if (old.endsWith('.zip')) fs.unlinkSync(path.join(DL_DIR,old));
+  const beforeWorkflowZip = fs.readdirSync(DL_DIR);
+  await clickSelector('#btnZip');
+  const workflowZip = await waitDownload('.zip', beforeWorkflowZip, 600);
+  await sleep(100);
+  const workflow = await evalJS(`(() => {
+    const m=__workflow;
+    if(!m.stopped) throw new Error('Workflow measurement did not stop at ZIP export');
+    return { frames:m.gaps.length, meanFps:1000/(m.gaps.reduce((a,b)=>a+b,0)/m.gaps.length),
+      maxFrameMs:Math.max(...m.gaps),longTasks:m.longTasks,longTaskDetails:m.longTaskDetails,elapsedMs:m.elapsedMs,
+      done:RSApp.State.cards.filter(c=>c.status==='done').length };
+  })()`);
+  fs.writeFileSync(path.join(ROOT,'docs','UI-WORKFLOW-RESULT.json'), JSON.stringify(workflow,null,2)+'\n');
+  check('full UI workflow exports the ten-file ZIP', !!workflowZip && workflow.done===10, workflowZip || 'missing');
+  check('decode→restore→encode→ZIP averages at least 59 FPS', workflow.frames>60 && workflow.meanFps>=59,
+    workflow.meanFps.toFixed(3)+' FPS, '+workflow.frames+' intervals, max '+workflow.maxFrameMs.toFixed(2)+' ms');
+  check('no full-workflow UI long task exceeds 50 ms', workflow.longTasks.every(ms=>ms<=50),
+    workflow.longTasks.length+' tasks; max '+Math.max(0,...workflow.longTasks).toFixed(2)+' ms');
+
   section('beta · console hygiene');
   const realNoise = consoleNoise.filter((l) => !/Autoplay|deprecat/i.test(l));
   check('no console errors or page exceptions during the whole session', realNoise.length === 0,
@@ -2797,14 +2916,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     try { return os.cpus().length + ' × ' + String(os.cpus()[0].model).replace(/\s+/g, ' '); }
     catch (e) { return 'unknown CPU'; }
   })();
-  const rate = perf && perf.duration ? perf.measureMs / perf.duration : null;
+  const rate = perf && perf.duration ? perf.analysisMs / perf.duration : null;
   md += `## The machine\n\n${cpuLine} · ${browserLine}.\n\n`;
   if (rate) {
     md += `On this machine the analyser reads **${rate.toFixed(1)} ms per second of stereo audio**\n`
       + `(${(1000 / rate).toFixed(0)}× realtime). That is the number the two scale rows are\n`
       + `calibrated against, and the reason they are calibrated at all: the same code measured\n`
       + `a three-minute take in 1.7 s on the workstation that wrote the first report and needs\n`
-      + `${(perf.measureMs / 1000).toFixed(1)} s here, and a row that means *the app got slower* on one\n`
+      + `${(perf.analysisMs / 1000).toFixed(1)} s here, and a row that means *the app got slower* on one\n`
       + `machine and *the room got colder* on another is not a measurement.\n\n`;
   }
   md += `## Checks (${results.length - failures}/${results.length} passed)\n\n| # | check | result | detail |\n|---|-------|--------|--------|\n`;
@@ -2879,13 +2998,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     '- The recordings are the same synthesised fixtures the node suites use (garage session,\n' +
     '  cassette, vinyl rip, low-bitrate) — built with `tests/harness.js`, served to the page on a\n' +
     '  loopback port and dropped as real files. A page-local fake would only test the fake.\n' +
+    '- Full analysis timings include worker round-trip, diagnosis and envelopes on both the\n' +
+    '  calibration and long input; worker computation is not falsely counted as zero UI time.\n' +
+    '- The heterogeneous workflow uses CC BY-SA FSDD human spoken digits, music and noise;\n' +
+    '  fixture provenance/license is in `tests/fixtures/speech/README.md`. It is not a speech\n' +
+    '  intelligibility certification. Its continuous UI metrics are in `UI-WORKFLOW-RESULT.json`.\n' +
     '- Analysis/render timings are sandbox-CPU numbers; real hardware is faster.\n' +
     '- The two scale rows are **calibrated against this machine and this run**: a 30-second\n' +
     '  recording goes through the identical instrumented path seconds before the three-minute\n' +
     '  one, and the rows hold the app to *that* rate (work may not grow faster than the file)\n' +
     '  plus a floor in x realtime. Both rates travel with the row, so a faster machine is held\n' +
     '  to a faster number and a slower one is not failed for being slow.\n' +
-    '- The upload path is timed phase by phase (decode · measurement · preview render · preview\n' +
+    '- The upload path is timed phase by phase (decode · full analysis · preview render · preview\n' +
     '  measurement) by wrapping the app from the test, so a slowdown can be attributed. A wrapper\n' +
     '  must not change the contract of the thing it wraps: `analyzeChannels` is synchronous and\n' +
     '  its caller reads `.chips` and `.score` straight off the value returned, so it gets a\n' +

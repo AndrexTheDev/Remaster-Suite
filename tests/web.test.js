@@ -477,9 +477,18 @@ async function run() {
   ok(stages.indexOf(DICT['work.wait']) === -1 || seenStage[0] === DICT['work.wait'],
     'the queue wording never covers work that is already running');
   const later = ['work.diagnose', 'work.window', 'work.envelope', 'work.preview'];
-  const missed = later.filter((k) => stages.indexOf(DICT[k]) === -1);
-  ok(missed.length === 0, 'every later stage announces itself as well — nothing falls back to a generic word',
-    stages.length + ' distinct stage words, missing: ' + (missed.join(', ') || 'none'));
+  // Progress is frame-coalesced: a sub-frame diagnosis/window transition
+  // need not be painted during the live run. Explicitly exercise every label
+  // at its contractual paint boundary instead of asserting timer accidents.
+  const missed = [];
+  for (const key of later) {
+    win.RSApp.setCardWork(cardP, key.slice(5), .5, 0);
+    await new Promise(resolve => win.requestAnimationFrame(resolve));
+    if (cardP.el.stage.textContent !== DICT[key]) missed.push(key);
+  }
+  win.RSApp.setCardWork(cardP, null, 0, 0);
+  ok(missed.length === 0, 'every later stage paints its specific label at a frame boundary',
+    later.length + ' labels checked, missing: ' + (missed.join(', ') || 'none'));
   ok(cardP.el.work.hidden && jobBar.hidden, 'both bars are gone when the file is ready');
   ok(cardP.status === 'ready' && cardP.el.name.textContent === LONG_NAME,
     'the card keeps its name and ready state', cardP.status + ' · ' + JSON.stringify(cardP.el.name.textContent));
@@ -487,10 +496,12 @@ async function run() {
   section('progress · the bar itself answers to the contract');
   const track = cardP.el.track;
   win.RSApp.setCardWork(cardP, 'decode', null);
+  await new Promise(resolve => win.requestAnimationFrame(resolve));
   ok(!cardP.el.work.hidden && cardP.el.work.classList.contains('is-indeterminate'),
     'an unmeasurable step (browser decode) animates instead of inventing a number');
   ok(cardP.el.pct.textContent === '', 'and shows no percentage at all', JSON.stringify(cardP.el.pct.textContent));
   win.RSApp.setCardWork(cardP, 'render', 0.4, 45);
+  await new Promise(resolve => win.requestAnimationFrame(resolve));
   ok(!cardP.el.work.classList.contains('is-indeterminate') && cardP.el.pct.textContent === '40 %',
     'a measured step shows its share', cardP.el.pct.textContent);
   ok(cardP.el.bar.style.width === '40%' && track.getAttribute('aria-valuenow') === '40',
@@ -498,6 +509,7 @@ async function run() {
   ok(cardP.el.eta.textContent === DICT['work.eta'].replace('{s}', '45'),
     'the time left is spelled out, not guessed to the second', cardP.el.eta.textContent);
   win.RSApp.setCardWork(cardP, 'render', 0.4, 200);
+  await new Promise(resolve => win.requestAnimationFrame(resolve));
   ok(cardP.el.eta.textContent === DICT['work.etaMin'].replace('{m}', '3'),
     'long waits switch to minutes', cardP.el.eta.textContent);
   ok(cardP.el.stage.textContent === DICT['work.render'], 'the stage word follows the stage', cardP.el.stage.textContent);
@@ -506,6 +518,7 @@ async function run() {
 
   section('progress · the job bar counts files honestly');
   win.RSApp.Job.start(4, cardP);
+  ok(win.document.body.classList.contains('is-working'), 'audio jobs select the low-repaint chrome');
   ok(win.document.getElementById('globalProgressFill').style.width === '0%', 'a fresh job starts at zero');
   win.RSApp.Job.file(2, 'third-of-four.wav', cardP);
   win.RSApp.Job.at(0.5, 'render');
@@ -529,6 +542,7 @@ async function run() {
     && jobFill.style.width === '25%',
     'the next measurable step puts the fill back on the number', jobFill.style.width);
   win.RSApp.Job.end();
+  ok(!win.document.body.classList.contains('is-working'), 'ending a job restores the normal idle chrome');
   ok(win.document.getElementById('globalProgress').hidden, 'the job bar disappears when the job ends');
 
   section('progress · the play button speaks the current language');

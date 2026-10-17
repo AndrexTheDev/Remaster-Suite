@@ -532,40 +532,86 @@
   const poolLimit = Math.max(1, Math.min(2, (global.navigator && global.navigator.hardwareConcurrency || 2) - 1));
   const idleEncoders = [], encoderWaiters = [];
   const pendingEncoderRequests = new WeakMap();
+  const idleEncoderTimers = new WeakMap();
   let encoderCount = 0;
   const encodingWorkerUrl = global.document && global.document.currentScript
     ? new URL('encoding-worker.js', global.document.currentScript.src).href : 'assets/js/encoding-worker.js';
 
-  /** Lease a dedicated worker. Backpressure bounds simultaneous WASM heaps.
-   * @returns {Promise<Worker>} exclusively owned worker.
+  /** Named cancellation/deadline failure for callers to distinguish from CSP.
+   * @param {string} name - error type.
+   * @param {string} message - diagnostic text.
+   * @returns {Error} tagged error.
    */
-  async function acquireEncoder() {
-    if (!global.Worker) throw new Error('MP3 export requires Web Workers and WebAssembly');
-    if (idleEncoders.length) return idleEncoders.pop();
-    if (encoderCount < poolLimit) {
-      const w = new global.Worker(encodingWorkerUrl);
-      encoderCount++;
-      return w;
+  function encodingError(name, message) { const e = new Error(message); e.name = name; return e; }
+
+  /** Lease a worker with cancellable, deadline-bounded waiting.
+   * @param {AbortSignal} [signal] - cancellation, including queued jobs.
+   * @returns {Promise<Worker>} exclusively leased worker.
+   */
+  async function acquireEncoder(signal) {
+    if (signal && signal.aborted) throw encodingError('AbortError', 'MP3 encoding aborted');
+    if (!global.Worker || !global.WebAssembly) throw encodingError('EncodingUnavailableError', 'MP3 export requires Web Workers and WebAssembly');
+    if (idleEncoders.length) {
+      const w = idleEncoders.pop(); global.clearTimeout(idleEncoderTimers.get(w)); idleEncoderTimers.delete(w); return w;
     }
-    return new Promise((resolve, reject) => encoderWaiters.push({ resolve, reject }));
+    if (encoderCount < poolLimit) {
+      let w;
+      try { w = new global.Worker(encodingWorkerUrl); }
+      catch (e) { throw encodingError('EncodingUnavailableError', 'MP3 worker blocked: ' + e.message); }
+      encoderCount++; return w;
+    }
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const job = { resolve: w => finish(null, w), reject: e => finish(e) };
+      /** Settle once and remove timer, listener and queue membership.
+       * @param {?Error} error - rejection or null.
+       * @param {Worker} [worker] - granted lease.
+       * @returns {void}
+       */
+      function finish(error, worker) {
+        // Replacing a broken worker grants asynchronously. Cancellation may
+        // win after dequeue but before delivery: return that unclaimed lease.
+        if (settled) { if (worker) releaseEncoder(worker, false); return; }
+        settled = true; global.clearTimeout(timer);
+        if (signal) signal.removeEventListener('abort', abort);
+        const index = encoderWaiters.indexOf(job); if (index >= 0) encoderWaiters.splice(index, 1);
+        if (error) reject(error); else resolve(worker);
+      }
+      /** Cancel a queued lease. @returns {void} */
+      function abort() { finish(encodingError('AbortError', 'MP3 queue aborted')); }
+      const timer = global.setTimeout(() => finish(encodingError('TimeoutError', 'MP3 queue timeout (15s)')), 15000);
+      if (timer.unref) timer.unref();
+      encoderWaiters.push(job);
+      if (signal) { signal.addEventListener('abort', abort, { once: true }); if (signal.aborted) abort(); }
+    });
   }
 
-  /** Return a lease; discard poisoned workers and wake queued jobs.
+  /** Return a lease; terminate failures and release unused heaps after 30s.
    * @param {Worker} worker - leased worker.
-   * @param {boolean} broken - terminate rather than reuse.
+   * @param {boolean} broken - discard failed worker.
    * @returns {void}
    */
   function releaseEncoder(worker, broken) {
     worker.onmessage = worker.onerror = worker.onmessageerror = null;
     if (broken) {
       const cancel = pendingEncoderRequests.get(worker);
-      if (cancel) cancel(new Error('MP3 encoding aborted'));
+      if (cancel) cancel(encodingError('AbortError', 'MP3 encoding aborted'));
       worker.terminate(); encoderCount--;
       const next = encoderWaiters.shift();
       if (next) acquireEncoder().then(next.resolve, next.reject);
     } else {
       const next = encoderWaiters.shift();
-      if (next) next.resolve(worker); else idleEncoders.push(worker);
+      if (next) next.resolve(worker);
+      else {
+        idleEncoders.push(worker);
+        const timer = global.setTimeout(() => {
+          const index = idleEncoders.indexOf(worker);
+          if (index >= 0) { idleEncoders.splice(index, 1); worker.terminate(); encoderCount--; }
+          idleEncoderTimers.delete(worker);
+        }, 30000);
+        idleEncoderTimers.set(worker, timer);
+        if (timer.unref) timer.unref();
+      }
     }
   }
 
@@ -577,8 +623,10 @@
    */
   function encoderRequest(worker, message, transfer) {
     return new Promise((resolve, reject) => {
+      let settled = false;
       const timer = global.setTimeout(() => done(new Error('MP3 worker timeout')), 30000);
       function done(err, data) {
+        if (settled) return; settled = true;
         global.clearTimeout(timer);
         pendingEncoderRequests.delete(worker);
         worker.onmessage = worker.onerror = worker.onmessageerror = null;
@@ -619,12 +667,13 @@
    *        straight into this sink (e.g. an `RSOPFS` writer) instead of
    *        returning it as one `Uint8Array` — the only way a long batch file
    *        does not sit fully encoded in the main thread's heap.
+   * @param {Object} [options] - optional AbortSignal in signal.
    * @returns {Promise<EncodeResult>} the encoded bytes (when no sink was
    *   given), the rate really used, and the source frame count.
    * @throws {Error} `'mp3-empty'` / `'mp3-invalid'` from the final gate —
    *   never a silently silent file.
    */
-  async function encodeMp3(channels, sr, kbps, onProgress, sink) {
+  async function encodeMp3(channels, sr, kbps, onProgress, sink, options) {
     if (!channels.length || !channels[0].length) throw new Error('mp3-empty');
     const out = sink || collectingSink();
     let firstChunk = null, bytesWritten = 0;
@@ -633,7 +682,7 @@
       bytesWritten += bytes.length;
       await out.write(bytes);
     } };
-    const encoder = await createMp3StreamEncoder(sr, kbps, channels.length, writer);
+    const encoder = await createMp3StreamEncoder(sr, kbps, channels.length, writer, options);
     try {
       const len = channels[0].length, chunk = 16384;
       for (let off = 0; off < len; off += chunk) {
@@ -788,14 +837,16 @@
    * @param {number} nCh - channel count, 1 or 2.
    * @param {{write: function(Uint8Array): Promise<void>}} sink - the writer to
    *   stream into.
+   * @param {Object} [options] - optional AbortSignal in signal.
    * @returns {Promise<StreamEncoder>} the encoder, with its `rate` property set
    *   to the rate actually used. Leasing the worker (and loading LAME WASM inside
    *   it) happens here, so the first `appendChannels()` is pure encoding.
    */
-  async function createMp3StreamEncoder(sr, kbps, nCh, sink) {
+  async function createMp3StreamEncoder(sr, kbps, nCh, sink, options) {
     const rate = MP3_RATES.includes(sr) ? sr : mp3RateFor(sr);
     const ch = Math.min(2, Math.max(1, nCh || 1));
-    const worker = await acquireEncoder();
+    const signal = options && options.signal;
+    const worker = await acquireEncoder(signal);
     let released = false, finished = false, bytesWritten = 0;
     let chain = Promise.resolve();
     /** Release this file's lease exactly once.
@@ -803,10 +854,13 @@
      * @returns {void}
      */
     function release(broken) {
-      if (!released) { released = true; releaseEncoder(worker, broken); }
+      if (!released) { released = true; if (signal) signal.removeEventListener('abort', abortSignal); releaseEncoder(worker, broken); }
     }
+    /** Abort a leased file and its in-flight request. @returns {void} */
+    function abortSignal() { release(true); }
+    if (signal) { signal.addEventListener('abort', abortSignal, { once: true }); if (signal.aborted) { release(true); throw encodingError('AbortError', 'MP3 encoding aborted'); } }
     try { await encoderRequest(worker, { cmd: 'init', sr: rate, kbps, nCh: ch }); }
-    catch (err) { release(true); throw err; }
+    catch (err) { release(true); if (err.name === 'AbortError') throw err; throw encodingError('EncodingUnavailableError', 'MP3 WASM initialization failed: ' + err.message); }
     /** Encode bounded PCM slices with sink backpressure.
      * @param {Float32Array[]} channels - source PCM.
      * @param {boolean} last - finalize after this chunk.
@@ -927,13 +981,13 @@
    * @property {function(Blob, number=): Promise<AudioBuffer>} decodeWithFFmpeg
    * @property {function(Float32Array[], number, (16|24|32)=): Uint8Array} encodeWav
    * @property {function(Float32Array[], number, (16|24|32), Object, function(number)=): Promise<Object>} encodeWavStream
-   * @property {function(Float32Array[], number, number, function(number)=, Object=): Promise<EncodeResult>} encodeMp3
+   * @property {function(Float32Array[], number, number, function(number)=, Object=, Object=): Promise<EncodeResult>} encodeMp3
    * @property {function(Float32Array[], number): (AudioBuffer|null)} makeBuffer
    * @property {function(Blob): Promise<ArrayBuffer>} readBlob
    * @property {function((Uint8Array|ArrayBuffer), string=): Blob} blobOf
    * @property {function(string): string} mimeFor
    * @property {function(number, number, (16|24|32), Object): StreamEncoder} createWavStreamEncoder
-   * @property {function(number, number, number, Object): Promise<StreamEncoder>} createMp3StreamEncoder
+   * @property {function(number, number, number, Object, Object=): Promise<StreamEncoder>} createMp3StreamEncoder
    * @property {function(Array<Object>, function(number)=): Promise<Uint8Array>} zip
    * @property {function((Uint8Array|Blob), string): string} download
    * @property {function(string, string, string=): string} outputName

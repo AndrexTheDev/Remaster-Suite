@@ -399,8 +399,8 @@ async function run() {
     // Process All
     App.State.power = 0.7;
     await App.processAll();
-    ok(App.State.cards.every((c) => c.status === 'done' && c.result && c.result.bytes.length > 1000),
-      'every file was rendered and encoded', App.State.cards[0].result.bytes.length + ' bytes each');
+    ok(App.State.cards.every((c) => c.status === 'done' && c.result && (c.result.bytes ? c.result.bytes.length : c.result.file.size) > 1000),
+      'every file was rendered and encoded', (App.State.cards[0].result.bytes ? App.State.cards[0].result.bytes.length : App.State.cards[0].result.file.size) + ' bytes each');
     ok(App.State.cards.every((c) => c.result.name.indexOf('.wav') !== -1), 'names carry the right extension');
 
     // ZIP

@@ -792,3 +792,14 @@ html.sheet-open .toasts { opacity: 0; }
   *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
   html { scroll-behavior: auto; }
 }
+
+/* During audio jobs, spend the frame budget on progress, not repeated software
+   backdrop blurs and width tween paints. Restore the normal chrome at Job.end;
+   idle/ready screenshots and layout are unchanged. Progress still paints via
+   requestAnimationFrame, including the transform-only indeterminate sweep. */
+body.is-working .topbar { backdrop-filter: none; background: #0d0f12; }
+body.is-working .controls-wrap { backdrop-filter: none; background: #14171d; }
+body.is-working .btn-magic { animation: none; }
+body.is-working .job-fill, body.is-working .work-fill { transition: none; }
+.job-track, .work-track { contain: layout paint; }
+body.is-working { background-image: none; }

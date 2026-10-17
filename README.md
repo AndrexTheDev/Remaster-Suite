@@ -484,6 +484,7 @@ assets/
                                  FileSystemSyncAccessHandle in a Worker (RSOPFS)
     encoding-worker.js           dedicated pooled LAME WASM encoder worker
     codecs.js                    decode, WAV/MP3 encode (in memory or streamed), ZIP, download (RSCodecs)
+    analysis-worker.js           off-thread measurement/envelope worker, yielding fallback in analyzer
     analyzer.js                  file → measurements, diagnosis, waveform envelopes (RSAnalyzer)
     neural-controller.js         main-thread handle onto neural-worker.js — one Promise-returning
                                  call per model, never rejects (RSNeural)
@@ -518,7 +519,7 @@ tests/
                                  de-click, measured hum/hiss repair, and the contract that a
                                  broken file never becomes NaN parameters (173 checks)
   tuning.test.js                 the tuning contract: what the automatic mode may do to a file (17 checks)
-  web.test.js                    static, DOM and app suite (137 checks)
+  web.test.js                    static, DOM and app suite (139 checks)
   audit.test.js                  repository hygiene, markup, contrast, i18n, parameter,
                                  codec and robustness audit — including the mains-notch law,
                                  a rich-hum fixture, the effect budgets, the
@@ -546,7 +547,7 @@ tests/
                                  level-preserving crossfades, the streaming WAV/MP3 encoders,
                                  the mid-render shrink, the abort path that a failing onChunk
                                  triggers, and a sink that takes the buffer it is handed —
-                                 the way the OPFS writer does; failed/aborted pool leases (57 checks)
+                                 the way the OPFS writer does; failed/aborted pool leases and explicit CSP WAV fallback (59 checks)
   stage0.test.js                 the pre-DSP neural stage: the SharedArrayBuffer ring under
                                  back-pressure (wrap-around, refused-not-truncated blocks, the
                                  underrun counter, the plain-buffer fallback), the chunk plan's
@@ -557,9 +558,11 @@ tests/
   encoding-worker-adapter.js     worker_threads adapter for the unmodified production worker
   declip-ar.test.js              masked LPC, Hermite boundaries, strict rail constraints,
                                  untouched observations and linked headroom (43 checks)
-  wiener.test.js                 STFT WOLA, latency, reset and explicit lag diagnostics (22 checks)
+  analysis-worker.test.js        off-thread parity, queue ordering and yielding CSP fallback (6 checks)
+  worker-safety.test.js          encoding queue, cancellation, idle disposal and CDP deadline cleanup (12 checks)
+  wiener.test.js                 STFT WOLA, latency, reset and explicit lag diagnostics (25 checks)
   audio-quality.test.js          known-clean reference metrics and real-worklet gain (9 checks)
-  encoding-batch.test.js         real Chromium batch and frame pacing (5 checks)
+  encoding-batch.test.js         real Chromium batch and frame pacing (6 checks)
   mobile-ux.test.js              the carousel effect rack, the gold "AI Magic Fix" button,
                                  the live A/B/C compare FAB and the phone's card inspector:
                                  markup/CSS, the focus trap, the exact restore index, the
@@ -624,7 +627,7 @@ belong to the test suite.
 
 ## Tests
 
-**16 dependency-free suites · 1319 checks.** Counts are declared checks, not a claim
+**18 dependency-free suites · 1345 checks.** Counts are declared checks, not a claim
 that all acceptance criteria currently pass. The unchanged audio-quality suite now
 passes **9/9**: broadband STFT Wiener repair gains **+14.64 dB** on seeded white
 noise; AR/Hermite de-clipping retains **+27.17 dB**. Full workflow/browser acceptance
@@ -636,24 +639,26 @@ fails if this file, `tests/` and `package.json` ever disagree.
 | :-- | :-- | --: | :-- |
 | DSP & engine | `tests/dsp.test.js` | 173 | transparency, sub, air, exciter, de-hiss, de-click, de-resonator, level match, power scaling, WAV/MP3/ZIP, classification |
 | Tuning law | `tests/tuning.test.js` | 17 | what the automatic mode may do to a file: octave bands, loudness, the level match, the soft-clip guard, level-normalised synthesis, honest extremes |
-| Web & DOM | `tests/web.test.js` | 137 | static integrity, bilingual coverage, boot, drop → analyse → render → save → ZIP, error handling, resampling |
+| Web & DOM | `tests/web.test.js` | 139 | static integrity, bilingual coverage, boot, drop → analyse → render → save → ZIP, error handling, resampling |
 | Audit | `tests/audit.test.js` | 340 | repository hygiene, markup, stylesheet, contrast, bilingual coverage, parameter ranges, DSP edge cases, the several-problems-at-once chain, codec round-trips, budgets |
 | End to end | `tests/e2e.test.js` | 108 | five problem recordings, slider sweep, profile overrides, 10-file batch → ZIP, mono/32 k/96 k, hostile input |
 | OPFS | `tests/opfs.test.js` | 52 | the shipped worker source against a simulated file system: streaming writes, a streamed ZIP cross-checked with JSZip and unzip(1), the oversized-batch guard, the model store under `models/` (write, read, list, clear, abort, surviving a scratch reset), the in-memory fallback |
 | Cross-origin isolation | `tests/coi.test.js` | 19 | coi-serviceworker.js as a Service Worker and as a page script: the COOP/COEP rewrite, the one-reload rule, never a reload loop |
 | Neural | `tests/neural.test.js` | 127 | the controller/worker contract, T-frame alignment, STFT round-trips, the capability probe, WebGPU-first provider order, quantised-variant selection, **the model manager** (cache hit, CDN download, progress, variant fallback, short-read and HTML-refusal aborts, inflight dedup, cache report), the watchdog and the Stage-7 coupling |
 | Memory guard | `tests/memory-guard.test.js` | 21 | the heap watchdog on a host without `performance.memory`: the honest no-signal default, the one-way shrink ramp, a stop function that never leaks a timer |
-| Chunked render | `tests/chunked-render.test.js` | 57 | chunk boundaries and level-preserving crossfades, the streaming WAV/MP3 encoders, the mid-render shrink, the abort a failing onChunk triggers, a sink that takes ownership of the buffer it is handed; poisoned lease recovery, idempotent abort, unavailable-worker rejection |
+| Chunked render | `tests/chunked-render.test.js` | 59 | chunk boundaries and level-preserving crossfades, the streaming WAV/MP3 encoders, the mid-render shrink, the abort a failing onChunk triggers, a sink that takes ownership of the buffer it is handed; poisoned lease recovery, idempotent abort, unavailable-worker rejection |
 | Stage 0 (pre-DSP) | `tests/stage0.test.js` | 86 | the SAB ring (exact round-trips, wrap, all-or-nothing writes, the underrun/overflow counters, the non-shared fallback), the chunk plan and its seam crossfades, the 48 kHz resampling, stem mixing, the fallback contract, and the engine wiring: C really is Stage 0 + DSP, and a missing model leaves B bit-identical |
 | Mobile UX | `tests/mobile-ux.test.js` | 103 | the carousel effect rack, the gold "AI Magic Fix" button, the live A/B/C compare FAB, **the phone's card inspector** (markup, focus trap, the grid handed back to its exact index, haptic fallback), navigator.vibrate safety, switchBuffer() position preservation, seek() clamping and its no-buffer no-op, tap/hold |
 | De-clipping AR | `tests/declip-ar.test.js` | 43 | 32–96 kHz reference gains >8.5 dB, independent frequencies, raw-only masked LPC, boundary tangents, strict rail projection, retained clean samples, safe manual/auto and linked stereo headroom |
 | Audio quality | `tests/audio-quality.test.js` | 9 | SI-SDR/LSD identities and edge cases; real-worklet clipping/noise/hum gains (clipping ≥8.5 dB; noise +14.64 dB, hum +11.60 dB) |
-| Wiener & alignment | `tests/wiener.test.js` | 22 | STFT unity reconstruction, streaming parity, latency/tail flush, reset, stereo, explicit bounded lag diagnostics, whole-file/chunked/bypass exports |
-| Encoding batch | `tests/encoding-batch.test.js` | 5 | ten real WASM MP3 encodes with browser decode, ten streamed WAVs, source ownership, rAF gaps and long tasks |
+| Analysis worker | `tests/analysis-worker.test.js` | 6 | exact measurement/envelope parity, ordered requests, bad-command recovery and CSP fallback |
+| Worker safety | `tests/worker-safety.test.js` | 12 | queued abort/deadline, idle disposal/reuse, active cancellation, worker/WASM feature failures, CDP diagnostic deadline cleanup |
+| Wiener & alignment | `tests/wiener.test.js` | 25 | STFT unity reconstruction, streaming parity, latency/tail flush, reset, stereo, explicit bounded lag diagnostics, whole-file/chunked/bypass exports |
+| Encoding batch | `tests/encoding-batch.test.js` | 6 | ten real WASM MP3 encodes with browser decode, ten streamed WAVs, source ownership, rAF gaps and long tasks |
 
 ```bash
 npm install          # only for the test suite and the static analysis (jsdom, acorn)
-npm test             # runs all sixteen suites, including unchanged audio-quality gates
+npm test             # runs all eighteen suites, including unchanged audio-quality gates
 node scripts/validate-docs.js        # README ↔ tests/ ↔ package.json consistency
 node scripts/validate-docs.js --run  # the same, and re-counts every suite
 node scripts/analyze-code.js         # static analysis of the shipped JavaScript

@@ -78,6 +78,33 @@ const ROOT = path.resolve(__dirname, '..');
     })()` });
     if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
     const metrics = { browser: version, ...result.result.value };
+    // Separate codec requalification, deliberately outside the isolated rAF
+    // interval above. Run the actual engine/limiter, WASM encoder and browser
+    // decoder; never infer decoded true peak merely from the input ceiling.
+    const matrixResult = await page.send('Runtime.evaluate', { awaitPromise:true, returnByValue:true, expression:`(async()=>{
+      const rows=[];
+      for(const rate of [44100,48000]) for(const kbps of [128,192]) for(const kind of ['tone','music','noise']) {
+        const x=new Float32Array(rate*2); let seed=31415;
+        for(let i=0;i<x.length;i++) {
+          const t=i/rate; seed=(Math.imul(seed,1664525)+1013904223)>>>0;
+          x[i]=kind==='tone'?.98*Math.sin(2*Math.PI*997*t):kind==='music'?
+            .6*Math.sin(2*Math.PI*440*t)+.3*Math.sin(2*Math.PI*997*t)+.15*Math.sin(2*Math.PI*2203*t):
+            .95*(seed/2147483648-1);
+        }
+        const channels=kind==='tone'?[x]:[x,Float32Array.from(x,v=>-.9*v)];
+        const ceiling=Math.min(-1.5,-1-RSPresets.codecMargin('mp3',kbps));
+        const rendered=await RSEngine.render(channels,rate,{power:1,autoLevel:0,tpCeil:ceiling});
+        const encoded=await RSCodecs.encodeMp3(rendered.channels,rate,kbps);
+        const ctx=new OfflineAudioContext(channels.length,1,rate);
+        const decoded=await ctx.decodeAudioData(encoded.bytes.slice().buffer);
+        const pcm=Array.from({length:decoded.numberOfChannels},(_,c)=>decoded.getChannelData(c));
+        const isp=RSDSP.ispStep(pcm); await RSDSP.runStepsAsync([isp.step]);
+        rows.push({rate,kbps,kind,channels:channels.length,ceiling,decodedDbTP:isp.value()});
+      }
+      return rows;
+    })()` });
+    if(matrixResult.exceptionDetails) throw new Error(JSON.stringify(matrixResult.exceptionDetails));
+    metrics.codecMatrix=matrixResult.result.value;
     console.log(JSON.stringify(metrics, null, 2));
     fs.writeFileSync(path.join(ROOT, 'docs/ENCODING-BATCH-RESULT.json'), JSON.stringify(metrics, null, 2) + '\n');
     const checks = [
@@ -86,10 +113,11 @@ const ROOT = path.resolve(__dirname, '..');
       [metrics.frames > 60, 'animation callbacks continue during encoding; source stays intact'],
       [metrics.meanFps >= 59 && metrics.maxFrameMs <= 20, 'continuous ~60 FPS (no gap >20ms)'],
       [metrics.longTasks.length === 0, 'no encoding long tasks on UI thread'],
+      [metrics.codecMatrix.length === 12 && metrics.codecMatrix.every(r=>Number.isFinite(r.decodedDbTP) && r.decodedDbTP<=0), 'decoded WASM MP3 true peak ≤0 dBTP at 128/192 kbps, 44.1/48k, mono/stereo'],
     ];
     for (const [ok, label] of checks) console.log((ok ? '  ✓ ' : '  ✗ ') + label);
     const failed = checks.filter(([ok]) => !ok).length;
-    console.log(failed ? 'FAILED (' + failed + ' of 5)' : 'ALL TESTS PASSED (5)');
+    console.log(failed ? 'FAILED (' + failed + ' of 6)' : 'ALL TESTS PASSED (6)');
     if (failed) process.exitCode = 1;
   } finally {
     if (page) page.close(); if (browser) browser.close();

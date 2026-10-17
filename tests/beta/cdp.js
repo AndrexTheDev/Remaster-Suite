@@ -72,4 +72,19 @@ async function pageForTarget(port, targetId, ms) {
   }
 }
 
-module.exports = { CDP, connect, waitDevtools, pageForTarget };
+/** Race an operation against diagnostics, cancelling the deadline on BOTH
+ * success and rejection. Promise.race alone leaves thousands of stale timers
+ * issuing DevTools requests a minute after successful polling has finished. */
+async function withDeadline(operation, ms, onTimeout) {
+  let timer;
+  try {
+    return await Promise.race([operation, new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        Promise.resolve().then(onTimeout).then(
+          () => reject(new Error('Operation timed out')), reject);
+      }, ms);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
+module.exports = { CDP, connect, waitDevtools, pageForTarget, withDeadline };

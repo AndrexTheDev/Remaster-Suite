@@ -85,6 +85,8 @@ check('worklet declares spectral delay only on the broadband path', () => {
 });
 (async () => {
   const WA = require('./webaudio-stub'); WA.install(globalThis);
+  globalThis.requestAnimationFrame = fn => setTimeout(() => fn(performance.now()), 16);
+  globalThis.cancelAnimationFrame = clearTimeout;
   const Engine = require('../assets/js/engine');
   const P = H.loadProcessor(48000), engine = new Engine();
   async function checkAsync(name, fn) {
@@ -112,6 +114,20 @@ check('worklet declares spectral delay only on the broadband path', () => {
     const params = Object.assign({}, H.DEFAULT_PARAMS, { dehiss: 1, bypass: 1 });
     const out = await engine.render([x], 48000, params);
     assert.deepEqual(out.channels[0], x);
+  });
+  await checkAsync('stopped live graph is suspended and init resumes the same context', async () => {
+    const ctx = await engine.init(); engine.stop(); await engine._idleSuspension;
+    assert.equal(ctx.state, 'suspended'); assert.equal(await engine.init(), ctx); assert.equal(ctx.state, 'running');
+  });
+  await checkAsync('rapid pause/resume serializes the pending live suspension', async () => {
+    engine.setBuffer(engine.ctx.createBuffer(1, 48000, 48000)); await engine.play();
+    engine.pause(); await engine.play(); assert(engine.playing); assert.equal(engine.ctx.state, 'running');
+    engine.stop(); await engine._idleSuspension;
+  });
+  await checkAsync('stop resets worklet history before another recording is played', async () => {
+    let resets = 0; const send = engine.node.port.postMessage;
+    engine.node.port.postMessage = message => { if (message.type === 'reset') resets++; send.call(engine.node.port, message); };
+    engine.stop(); await engine._idleSuspension; assert.equal(resets, 1);
   });
   console.log(`Wiener/alignment: ${passed} passed, ${failed} failed`);
   if (!failed) console.log(`ALL TESTS PASSED (${passed})`);

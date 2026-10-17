@@ -219,6 +219,7 @@
      */
     constructor() {
       this.ctx = null;
+      this._idleSuspension = Promise.resolve();
       this.node = null;
       this.gain = null;
       this.src = null;
@@ -249,7 +250,11 @@
      *   `AudioContext` constructor at all.
      */
     async init() {
-      if (this.ctx && this._loaded.has(this.ctx)) return this.ctx;
+      await this._idleSuspension;
+      if (this.ctx && this._loaded.has(this.ctx)) {
+        if (this.ctx.state === 'suspended') await this.ctx.resume();
+        return this.ctx;
+      }
       const Ctor = global.AudioContext || global.webkitAudioContext;
       if (!Ctor) throw new Error('Web Audio unavailable');
       if (!this.ctx) {
@@ -447,6 +452,7 @@
           this.offset = this.bounds ? this.bounds.start : 0;
           this._stopSource();
           this.playing = false;
+          this._suspendIdle();
           this._notifyState();
         }
       };
@@ -469,6 +475,7 @@
       this.offset = this.position;
       this._stopSource();
       this.playing = false;
+      this._suspendIdle();
       this._notifyState();
     }
 
@@ -480,7 +487,22 @@
     stop() {
       this._stopSource();
       this.playing = false;
+      if (this.node) this.node.port.postMessage({ type: 'reset' });
+      this._suspendIdle();
       this._notifyState();
+    }
+
+    /** Suspend the idle live graph: an attached worklet otherwise keeps
+     * processing silence after Stop, competing with batch restoration/UI.
+     * init()/play() wait for this transition before resuming the same context.
+     * @private
+     * @returns {void}
+     */
+    _suspendIdle() {
+      if (this.ctx && typeof this.ctx.suspend === 'function' && this.ctx.state !== 'closed') {
+        try { this._idleSuspension = Promise.resolve(this.ctx.suspend()).catch(() => {}); }
+        catch (e) { /* an old context can refuse suspension; playback still works */ }
+      }
     }
 
     /**
@@ -886,7 +908,8 @@
         const spanSrcChans = [];
         for (let c = 0; c < nCh; c++) spanSrcChans.push(srcChans[c].subarray(inStart, inEnd));
 
-        const span = await this._renderSpan(spanSrcChans, inRate, sr, nCh, effectiveParams, spanOutLen, neuralCurve, stage0On ? o.stage0 : null);
+        const span = await this._renderSpan(spanSrcChans, inRate, sr, nCh, effectiveParams, spanOutLen, neuralCurve, stage0On ? o.stage0 : null,
+          o.onProgress ? p => o.onProgress((nominalStart + (nominalEnd - nominalStart) * p) / len) : null);
         const spanOut = span.channels;
         if (stage0On && span.stage0) {
           stage0Info.spans++;
@@ -980,10 +1003,11 @@
      *   the graph starts.
      * @param {?Object} [stage0] - the pre-DSP neural stage for this span, or
      *   `null` for the pure DSP route.
+     * @param {?function(number):void} [onProgress] - progress within this span.
      * @returns {Promise<{channels: Float32Array[], stage0: ?Object}>} the
      *   rendered span, one array per channel, and what Stage 0 did to it.
      */
-    async _renderSpan(spanSrcChans, inRate, sr, nCh, params, spanOutLen, neuralCurve, stage0) {
+    async _renderSpan(spanSrcChans, inRate, sr, nCh, params, spanOutLen, neuralCurve, stage0, onProgress) {
       // Stage 0 before the graph, on this span only — the span already carries
       // a preroll and a crossfade tail, so the neural stage and the DSP stage
       // see the same seams and the same context around them.
@@ -1026,6 +1050,16 @@
         try { p.setValueAtTime(v, 0); } catch (e) { p.value = v; }
       }
 
+      if (onProgress) {
+        const duration = spanOutLen / sr;
+        // Pre-register distinct suspensions so progress advances within spans,
+        // not in ten-second jumps. Rendering resumes even if the UI callback fails.
+        for (let i = 1; i <= 8 && spanOutLen >= 128 * 9; i++) {
+          Promise.resolve().then(() => ctx.suspend(duration * i / 9)).then(() => {
+            try { onProgress(i / 9); } finally { ctx.resume(); }
+          }).catch(() => { /* unsupported suspension: final chunk progress still reports */ });
+        }
+      }
       const rendered = await ctx.startRendering();
       const out = [];
       for (let c = 0; c < rendered.numberOfChannels; c++) out.push(rendered.getChannelData(c).subarray(padding, padding + spanOutLen));

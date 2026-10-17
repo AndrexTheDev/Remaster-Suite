@@ -663,6 +663,7 @@
        * you hear is still what you save, at every format and bitrate; a ceiling
        * that was switched off (0) stays off. */
       if (params.tpCeil < 0) params.tpCeil -= Presets.codecMargin(State.format, State.mp3Rate);
+      if (State.format === 'mp3') params.tpCeil = Math.min(-1.5, params.tpCeil);
       /* When the neural stage runs in front of the chain, the noise floor it
        * removes is no longer there for the de-hisser to find. Left at full
        * depth the expander would chase the programme's own top end instead —
@@ -839,6 +840,27 @@
    * @returns {void}
    */
   function setCardWork(card, stage, p, etaSeconds) {
+    card.progress = p == null ? 0 : Math.max(0, Math.min(1, p));
+    card._pendingWork = [stage, p, etaSeconds];
+    if (!stage) { card._pendingWork = null; paintCardWork(card, stage, p, etaSeconds); return; }
+    if (card._workPaintPending) return;
+    card._workPaintPending = true;
+    const raf = global.requestAnimationFrame || (fn => global.setTimeout(fn, 16));
+    raf(() => {
+      card._workPaintPending = false;
+      const pending = card._pendingWork; card._pendingWork = null;
+      if (pending) paintCardWork(card, ...pending);
+    });
+  }
+
+  /** Paint the latest coalesced per-card progress at a frame boundary.
+   * @param {RSApp.Card} card - card being painted.
+   * @param {?string} stage - active stage or null.
+   * @param {?number} p - progress or unknown.
+   * @param {number} etaSeconds - estimated remaining time.
+   * @returns {void}
+   */
+  function paintCardWork(card, stage, p, etaSeconds) {
     const el = card.el;
     const busy = !!stage;
     const known = p !== null && p !== undefined;
@@ -877,7 +899,7 @@
    * @param {RSApp.Card} card - the card to clear.
    * @returns {void}
    */
-  const clearCardWork = (card) => setCardWork(card, null, 0, 0);
+  const clearCardWork = (card) => setCardWork(card, null, card.status === 'processing' ? 1 : 0, 0);
 
   /**
    * Keep the screen awake while a long job runs: a phone that dims the display
@@ -918,6 +940,7 @@
   /** @type {JobController} */
   const Job = {
     start(total, card) {
+      document.body.classList.add('is-working');
       State.job = {
         total: Math.max(1, total), index: 0, name: (card && card.name) || '',
         card: card || null, stage: 'wait', p: 0, t0: nowMs(), indeterminate: false,
@@ -957,6 +980,7 @@
       paintJob();
     },
     end() {
+      document.body.classList.remove('is-working');
       State.job = null;
       const wrap = $('#globalProgress');
       if (wrap) wrap.hidden = true;
@@ -1416,8 +1440,8 @@
         onProgress: slow ? (p) => setCardWork(card, 'preview', p, estimateLeft(card, p)) : undefined,
       });
       if (slow) clearCardWork(card);
-      const env = Analyzer.envelope(res.channels, card.analysis.windowEnvelope.max.length);
-      card.after = { envelope: env, chips: Analyzer.analyzeChannels(res.channels, res.sampleRate).chips };
+      const env = await Analyzer.envelopeAsync(res.channels, card.analysis.windowEnvelope.max.length);
+      card.after = { envelope: env, chips: (await Analyzer.analyzeChannelsAsync(res.channels, res.sampleRate)).chips };
       refreshCardText(card);
       await computeComparePreview(card, card.analysisWindowChannels, card.analysis.sampleRate, params);
     } catch (err) { /* preview refresh is best effort */ }
@@ -1504,20 +1528,21 @@
     if (!card.previewBuffer) { UI.toast(t('toast.needDecode'), 'bad'); return; }
     try {
       await Engine.init();
+      if (State.current !== card) {
+        State.current = card;
+        Engine.setBuffer(card.previewBuffer, { start: 0, end: card.previewBuffer.duration });
+        Engine.setLoop(card.loop);
+        applyLiveParams(card);
+        markPlaying(null);
+        FAB.syncFromAB();           // a new card starts on whatever the top A/B switch says
+      }
+      // Stop/setBuffer may still be suspending the previous monitor context.
+      // Do not report readiness until play has serialized suspension/resume.
+      await Engine.play();
+      markPlaying(card);
     } catch (err) {
       UI.toast(err && err.message === 'worklet-load-failed' ? t('toast.workletFail') : t('toast.engineFail'), 'bad', 7000);
-      return;
     }
-    if (State.current !== card) {
-      State.current = card;
-      Engine.setBuffer(card.previewBuffer, { start: 0, end: card.previewBuffer.duration });
-      Engine.setLoop(card.loop);
-      applyLiveParams(card);
-      markPlaying(null);
-      FAB.syncFromAB();           // a new card starts on whatever the top A/B switch says
-    }
-    Engine.play();
-    markPlaying(card);
   }
 
   /**
@@ -1866,8 +1891,8 @@
            */
           onProgress: (p) => setCardWork(card, 'preview', p, estimateLeft(card, p)),
         });
-        const env = Analyzer.envelope(res.channels, 1400);
-        const after = Analyzer.analyzeChannels(res.channels, res.sampleRate);
+        const env = await Analyzer.envelopeAsync(res.channels, 1400);
+        const after = await Analyzer.analyzeChannelsAsync(res.channels, res.sampleRate);
         card.after = { envelope: env, chips: after.chips };
         card.afterScore = after.score;
         await computeComparePreview(card, chans, analysis.sampleRate, params);
@@ -1982,9 +2007,11 @@
    * @param {?Object} stage0Opt - the pre-DSP neural stage, or `null`.
    * @param {string} name - the output name the render key is built from.
    * @param {string} signature - the settings signature for that key.
+   * @param {string} [format] - actual output format, including fallback.
+   * @param {AbortSignal} [signal] - encoding cancellation.
    * @returns {Promise<RSApp.RenderResult>} the streamed render's handle.
    */
-  async function renderCardChunked(card, dec, rate, params, neuralOpt, stage0Opt, name, signature) {
+  async function renderCardChunked(card, dec, rate, params, neuralOpt, stage0Opt, name, signature, format = State.format, signal) {
     await forgetRender(card);
     const key = renderKeyFor(card);
     const sink = await OPFS.createWriter(key);
@@ -1994,8 +2021,8 @@
     try {
       card._workT0 = nowMs();
       setCardWork(card, 'render', 0);
-      const isMp3 = State.format === 'mp3';
-      mp3Enc = isMp3 ? await Codecs.createMp3StreamEncoder(rate, State.mp3Rate, nCh, sink) : null;
+      const isMp3 = format === 'mp3';
+      mp3Enc = isMp3 ? await Codecs.createMp3StreamEncoder(rate, State.mp3Rate, nCh, sink, { signal }) : null;
       const wavEnc = isMp3 ? null : Codecs.createWavStreamEncoder(totalSamples, rate, State.wavDepth, sink);
       const chunked = await Engine.renderChunked(dec.buffer, rate, params, {
         chunkSeconds: CONFIG.chunkSeconds,
@@ -2016,6 +2043,8 @@
          * @returns {Promise<void>}
          */
         onChunk: async (channels, info) => {
+          setCardWork(card, 'encode', info.endSample / info.totalSamples, estimateLeft(card, info.endSample / info.totalSamples));
+          await nextPaint();
           if (mp3Enc) await mp3Enc.appendChannels(channels, info.isLast);
           else await wavEnc.appendChannels(channels);
         },
@@ -2024,7 +2053,7 @@
       const stats = mp3Enc ? await mp3Enc.finish() : await wavEnc.finish();
       const closed = await sink.close();
       const file = await OPFS.getFile(key);
-      return { file, size: closed.size, name, format: State.format, rate: stats.sampleRate || rate,
+      return { file, size: closed.size, name, format, rate: stats.sampleRate || rate,
         signature, stale: false, opfsKey: key, stage0: stage0Stats };
     } catch (err) {
       if (mp3Enc) mp3Enc.abort();
@@ -2075,8 +2104,29 @@
    * @returns {Promise<RSApp.RenderResult>} the render, or the card's existing
    *   result when nothing about its settings has changed.
    */
+  /** Render with explicit WAV fallback if worker/WASM initialization is blocked.
+   * Does not disguise abort, queue timeout, quota or DSP failures as success.
+   * @param {RSApp.Card} card - card to render.
+   * @param {Object} [opts] - render options, signal and optional format.
+   * @returns {Promise<RSApp.RenderResult>} correctly named/typed output.
+   */
   async function renderCard(card, opts) {
+    try { return await renderCardAttempt(card, opts); }
+    catch (error) {
+      if ((opts && opts.format || State.format) !== 'mp3' || error.name !== 'EncodingUnavailableError') throw error;
+      UI.toast(t('toast.wavFallback'), 'warn', 6000);
+      return renderCardAttempt(card, Object.assign({}, opts, { force: true, format: 'wav' }));
+    }
+  }
+
+  /** Execute one render in the requested actual format.
+   * @param {RSApp.Card} card - card to render.
+   * @param {Object} [opts] - streaming, signal, force and format.
+   * @returns {Promise<RSApp.RenderResult>} actual output.
+   */
+  async function renderCardAttempt(card, opts) {
     const o = opts || {};
+    const format = o.format || State.format;
     const params = P.params(card);
     if (!params) throw new Error('not analysed');
     const signature = P.signature(card);
@@ -2108,17 +2158,17 @@
     // fails for any reason (see the comment there).
     const neuralOpt = neuralOptFor();
     const stage0Opt = stage0For();
-    const name = Codecs.outputName(card.name, State.format === 'mp3' ? 'mp3' : 'wav');
+    const name = Codecs.outputName(card.name, format === 'mp3' ? 'mp3' : 'wav');
 
     let result;
-    if (shouldChunkRender(dec.buffer.duration)) {
+    if (OPFS && (o.streaming || shouldChunkRender(dec.buffer.duration))) {
       // Long file, OPFS available: render *and* encode in small, overlapping
       // chunks streamed straight to the scratch file — see
       // renderCardChunked() — instead of materialising the whole restored
       // signal (Engine.render()'s own return value) and then the whole
       // encoded file as two more full-length allocations on top of it.
-      setNote(card, State.format === 'mp3' ? t('toast.mp3Slow') : t('status.export'));
-      result = await renderCardChunked(card, dec, rate, params, neuralOpt, stage0Opt, name, signature);
+      setNote(card, format === 'mp3' ? t('toast.mp3Slow') : t('status.export'));
+      result = await renderCardChunked(card, dec, rate, params, neuralOpt, stage0Opt, name, signature, format, o.signal);
     } else {
       const res = await Engine.render(dec.buffer, rate, params, {
         progressSteps: 24,
@@ -2132,7 +2182,7 @@
         stage0: stage0Opt,
       });
 
-      setNote(card, State.format === 'mp3' ? t('toast.mp3Slow') : t('status.export'));
+      setNote(card, format === 'mp3' ? t('toast.mp3Slow') : t('status.export'));
       /**
        * Feed the encoder's progress into the card's bar — this is the stage the
        * MP3 note warns about, so it is the one that most needs a moving bar.
@@ -2151,14 +2201,14 @@
         try {
           card._workT0 = nowMs();
           setCardWork(card, 'encode', 0);
-          if (State.format === 'mp3') {
-            await Codecs.encodeMp3(res.channels, res.sampleRate, State.mp3Rate, onEncodeProgress, sink);
+          if (format === 'mp3') {
+            await Codecs.encodeMp3(res.channels, res.sampleRate, State.mp3Rate, onEncodeProgress, sink, { signal: o.signal });
           } else {
             await Codecs.encodeWavStream(res.channels, res.sampleRate, State.wavDepth, sink, onEncodeProgress);
           }
           const closed = await sink.close();
           const file = await OPFS.getFile(key);
-          result = { file, size: closed.size, name, format: State.format, rate: res.sampleRate,
+          result = { file, size: closed.size, name, format: format, rate: res.sampleRate,
             signature, stale: false, opfsKey: key, stage0: res.stage0 };
         } catch (err) {
           await sink.abort();
@@ -2168,8 +2218,8 @@
         card._workT0 = nowMs();
         setCardWork(card, 'encode', 0);
         let bytes;
-        if (State.format === 'mp3') {
-          const out = await Codecs.encodeMp3(res.channels, res.sampleRate, State.mp3Rate, onEncodeProgress);
+        if (format === 'mp3') {
+          const out = await Codecs.encodeMp3(res.channels, res.sampleRate, State.mp3Rate, onEncodeProgress, undefined, { signal: o.signal });
           bytes = out.bytes;
         } else {
           const pieces = [];
@@ -2179,14 +2229,14 @@
           let offset = 0;
           for (const chunk of pieces) { bytes.set(chunk, offset); offset += chunk.length; }
         }
-        result = { bytes, name, format: State.format, rate: res.sampleRate, signature, stale: false, stage0: res.stage0 };
+        result = { bytes, name, format: format, rate: res.sampleRate, signature, stale: false, stage0: res.stage0 };
       }
     }
 
     clearCardWork(card);
     card.result = result;
     setStatus(card, 'done');
-    setNote(card, t('note.done', { fmt: State.format.toUpperCase() }));
+    setNote(card, t('note.done', { fmt: format.toUpperCase() }));
     refreshCardText(card);
     return card.result;
   }
@@ -2223,10 +2273,9 @@
   }
 
   /**
-   * Render every card that is not already up to date, one at a time, under the
-   * job bar. Sequential on purpose — the memory budget is about the peak, and a
-   * batch running in parallel would multiply it. A second call while a batch is
-   * running is ignored.
+   * Render cards concurrently under CPU and decoded-memory limits. Per-card
+   * progress is coalesced at frame boundaries; encoding has independent pool
+   * backpressure. A second batch call while running is ignored.
    * @returns {Promise<void>} resolves when the queue is empty.
    */
   async function processAll() {
@@ -2247,16 +2296,25 @@
         UI.toast(t('toast.bigBatchMemory'), 'warn', 6000);
       }
       Job.start(todo.length, todo[0]);
-      for (let i = 0; i < todo.length; i++) {
-        const card = todo[i];
-        Job.file(i, card.name, card);
-        try {
-          await renderCard(card);
-        } catch (err) {
-          setStatus(card, 'error');
-          setNote(card, (err && err.message) || t('err.render'), true);
+      // Bound concurrency by both logical CPUs and the decoded PCM budget.
+      // The encoder pool independently bounds WASM heaps and applies backpressure.
+      const cores = Math.max(1, Math.floor(global.navigator && global.navigator.hardwareConcurrency || 2));
+      const largest = Math.max(1, ...todo.map(c => c.analysis.duration * P.exportRate(c) * (c.analysis.channels > 1 ? 2 : 1) * 4));
+      const lanes = Math.min(todo.length, cores, Math.max(1, Math.floor(CONFIG.softMemoryMB * 1e6 / (largest * 3))));
+      let cursor = 0;
+      /** Process independent cards without letting one failed file cancel siblings.
+       * @returns {Promise<void>} lane completion.
+       */
+      async function lane() {
+        while (cursor < todo.length) {
+          const i = cursor++, card = todo[i];
+          Job.file(i, card.name, card);
+          try { await renderCard(card, { streaming: true }); }
+          catch (err) { setStatus(card, 'error'); setNote(card, (err && err.message) || t('err.render'), true); }
+          await nextPaint();
         }
       }
+      await Promise.all(Array.from({ length: lanes }, () => lane()));
       UI.toast(t('batch.done', { n: todo.length }), 'ok');
     } catch (err) {
       UI.toast(t('toast.renderFail', { msg: (err && err.message) || '?' }), 'bad', 6000);
@@ -2315,6 +2373,10 @@
         });
         file = await OPFS.getFile(zipKey);
       } else {
+        for (const entry of entries) if (entry.key) {
+          const stored = await OPFS.getFile(entry.key);
+          entry.bytes = new Uint8Array(await Codecs.readBlob(stored));
+        }
         entries.readme = readmeText;
         file = await Codecs.zip(entries, (p) => Job.at(0.9 + p * 0.1, 'zip'));
       }
