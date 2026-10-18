@@ -1335,7 +1335,7 @@
         for (let b = fb.edges[band]; b < fb.edges[band + 1]; b++) {
           const r = re[f * nBins + b], i = im[f * nBins + b]; power += r * r + i * i; count++;
         }
-        const db = 10 * Math.log10(Math.max(power / Math.max(1, count), 1e-10));
+        const db = 10 * Math.log10(power / Math.max(1, count) + 1e-10);
         erbState[band] = db * (1 - alpha) + erbState[band] * alpha;
         featErb[f * erbBands + band] = (db - erbState[band]) / 40;
       }

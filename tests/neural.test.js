@@ -959,7 +959,7 @@ async function testRealOrtGroup() {
     ok(realOutput.length === audio.length && delta > 0.01 && peak <= 1.5, 'real model output is applied and remains inside the safety ceiling', 'Δ ' + delta.toFixed(3) + ' · peak ' + peak.toFixed(3));
     const pcmHash = require('crypto').createHash('sha256')
       .update(Buffer.from(realOutput.buffer, realOutput.byteOffset, realOutput.byteLength)).digest('hex');
-    ok(pcmHash === '76e1cc217b496c53933be215143b68a91bede9e9b49ea02e249f29207ff3e53a', 'real model PCM has a frozen golden SHA-256', pcmHash);
+    ok(pcmHash === '0f397d29300de35c18f156ee9b14e82e5a106072616760b8dfd069e68d19801a', 'real model PCM has a frozen golden SHA-256', pcmHash);
   } finally {
     await enc.release(); await erb.release(); await df.release();
   }

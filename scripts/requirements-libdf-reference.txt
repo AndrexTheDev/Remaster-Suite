@@ -1,3 +1,4 @@
 # Official prebuilt Rust/libDF reference binding.
 DeepFilterLib==0.5.6
 numpy==1.26.4
+onnxruntime==1.20.1
