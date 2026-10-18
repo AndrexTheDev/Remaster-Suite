@@ -68,7 +68,8 @@ Aus `config.ini` des gewählten Exports:
 - [x] Deterministischen Golden-Hash für normalisierte Features und vollständiges ORT/WASM-PCM einfrieren.
 - [x] Aktive Browser-Inferenz mit der hashfixierten Wailing-Wailers-Musikdatei durch das Safety Gate führen.
 - [ ] Diese Goldens zusätzlich byteweise gegen den offiziellen Python/Rust-Pfad abgleichen.
-- [ ] Erst danach INT8 quantisieren und gegen FP32 qualifizieren.
+- [x] Reproduzierbaren QInt8-Kandidatenlauf bereitstellen und ungeeignete Kandidaten nicht publizieren. Der erste dynamische ORT-Lauf quantisiert nur Nebenpfade, vergrößert die Gruppe und bleibt deshalb gesperrt.
+- [ ] Einen tatsächlich kleineren INT8-Export erzeugen und gegen FP32 sowie die Realmusik-Fixture qualifizieren.
 
 Dieser Vertrag ersetzt die bisherige Annahme eines monolithischen DeepFilterNet3-Modells als
 technische Zieldefinition. Die Dreifach-Pipeline ist mit realen Gewichten in Node/WASM und Chromium/WASM

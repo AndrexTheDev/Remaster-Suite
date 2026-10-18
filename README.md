@@ -615,6 +615,9 @@ scripts/
                                  check cannot see), accidental globals, duplicate keys in one
                                  object literal, and module-level declarations nothing calls
                                  (`--dead` fails on the last group too, `--json` for machines)
+  quantize-deepfilternet3.py     verifies the pinned official graph bytes and creates isolated,
+                                 explicitly unpublished QInt8 candidates with hashes and node coverage
+  requirements-quantize.txt     pinned ONNX/ORT toolchain for that reproducible candidate build
 tools/                           measurement probes, not part of the app — the evidence the
                                  restoration claims rest on (see util.js)
   util.js                        measurement toolkit: fixtures, renderers, spectrum meters

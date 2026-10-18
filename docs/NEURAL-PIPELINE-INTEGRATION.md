@@ -327,7 +327,7 @@ Erfassen: Download, Sessionstart, Real-Time-Faktor, Peak-Heap, OPFS, GPU-Speiche
 ### P0 – vor jeder öffentlichen Neural-Freigabe
 
 - [x] Reales DeepFilterNet-Artefakt und Lizenz festlegen.
-- [ ] Reproduzierbares Export-/Quantisierungsskript hinzufügen.
+- [x] Reproduzierbares, versionsgepinntes Prüf-/Quantisierungsskript hinzufügen (`scripts/quantize-deepfilternet3.py`). Es schreibt Kandidaten grundsätzlich als nicht veröffentlichbar; das aktuelle dynamische QInt8-Verfahren erfasst in diesem Export nur je einen Nebenpfad in Encoder/DF-Decoder, spart keine Bytes und besteht daher das Veröffentlichungs-Gate ausdrücklich nicht.
 - [x] Versioniertes Manifest mit SHA-256 einführen.
 - [x] Same-Origin-Modellverzeichnis veröffentlichen; toten `@models`-Default entfernen.
 - [x] Modellvertrag beim Sessionstart prüfen.
