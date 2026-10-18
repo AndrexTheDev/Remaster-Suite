@@ -67,7 +67,8 @@ Aus `config.ini` des gewählten Exports:
 - [x] Die libDF-Verzögerungskompensation mit initialem Null-Hop und abschließendem 960-Sample-Flush nachbilden.
 - [x] Deterministischen Golden-Hash für normalisierte Features und vollständiges ORT/WASM-PCM einfrieren.
 - [x] Aktive Browser-Inferenz mit der hashfixierten Wailing-Wailers-Musikdatei durch das Safety Gate führen.
-- [ ] Diese Goldens zusätzlich byteweise gegen den offiziellen Python/Rust-Pfad abgleichen.
+- [x] STFT/ISTFT und Verzögerungskompensation gegen das offizielle vorgebaute Rust/libDF-Binding prüfen: Analyse max. `1,07e-8`, Synthese max. `5,96e-8` (`scripts/compare-libdf-reference.py`).
+- [ ] Den vollständigen PCM-Golden zusätzlich gegen einen unabhängigen offiziellen Python-Modell-Forward abgleichen; libDF-DSP und ONNX-Grenzen sind bereits separat referenzgeprüft.
 - [x] Reproduzierbare FP16/QInt8-Kandidatenläufe bereitstellen und ungeeignete Kandidaten nicht publizieren. Dynamisches QInt8 quantisiert nur Nebenpfade und bleibt gesperrt.
 - [x] Den 4,34-MB-FP16-Kandidaten durch ein deterministisches FP32-Graphparitätsgate führen; Masken und Koeffizienten bleiben deutlich innerhalb der festgelegten 0,5-%-/0,01-Grenzen.
 - [x] FP16 durch Chromium/WASM-PCM, die Realmusik-Fixture sowie emulierte Android-/iPhone-Profile qualifizieren (7/7).

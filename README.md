@@ -619,9 +619,10 @@ scripts/
                                  (`--dead` fails on the last group too, `--json` for machines)
   quantize-deepfilternet3.py     verifies pinned graph bytes and creates isolated, explicitly
                                  unpublished FP16/QInt8 candidates with hashes and conversion coverage
-  compare-dfn3-candidate.py      deterministic encoder/dual-decoder FP32 parity gate; browser PCM
-                                 and real-music qualification remain mandatory before publication
+  compare-dfn3-candidate.py      deterministic encoder/dual-decoder FP32 parity gate
+  compare-libdf-reference.py    official Rust/libDF-wheel analysis/synthesis parity gate
   requirements-quantize.txt     pinned NumPy/ONNX/ORT conversion and comparison toolchain
+  requirements-libdf-reference.txt pinned official libDF reference binding
 tools/                           measurement probes, not part of the app — the evidence the
                                  restoration claims rest on (see util.js)
   util.js                        measurement toolkit: fixtures, renderers, spectrum meters
@@ -684,6 +685,7 @@ node scripts/analyze-code.js         # static analysis of the shipped JavaScript
 python3 scripts/quantize-deepfilternet3.py                         # verify pinned FP32 bytes
 python3 scripts/quantize-deepfilternet3.py --output /tmp/dfn-fp16 # unpublished FP16 candidate
 python3 scripts/compare-dfn3-candidate.py /tmp/dfn-fp16            # deterministic graph parity
+python3 scripts/compare-libdf-reference.py                          # official Rust/libDF DSP parity
 DFN3_CANDIDATE_DIR=/tmp/dfn-fp16 npm run test:neural-browser      # real Chromium/music gate
 
 node tests/dsp.test.js             # engine: transparency … classification

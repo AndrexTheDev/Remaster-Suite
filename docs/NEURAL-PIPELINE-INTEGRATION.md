@@ -339,7 +339,7 @@ Erfassen: Download, Sessionstart, Real-Time-Faktor, Peak-Heap, OPFS, GPU-Speiche
 - [x] AbortSignal durch Download, atomare Installation, Controller, laufende ORT-Ausführung und Render führen; Worker-Neustarts lösen kollaterale wartende Aufträge explizit als `worker-restarted` auf.
 - [x] Direkte Denoiser-Eingaben vor STFT-/Tensorallokation begrenzen; Stage 0 bleibt zusätzlich chunk-basiert.
 - [x] Provider-Fallback innerhalb desselben Auftrags implementieren: Accelerator-Sessions freigeben und denselben Chunk einmal über WASM wiederholen.
-- [ ] Modellzustände über Chunks führen, falls der Export sie besitzt.
+- [x] Modellzustandsvertrag geprüft: Der gepinnte Export besitzt keine externen Recurrent-State-Ein-/Ausgänge; seine GRU-Zustände werden graphintern je Aufruf initialisiert. Der Session-Vertrag weist Exporte mit unerwarteten State-Eingängen zurück, statt Zustände stillschweigend zu verlieren. Chunkübergänge werden deshalb weiterhin über Kontext und Crossfade gekoppelt.
 - [x] Nach Stage 0 neu analysieren und DSP-Dehiss aus gemessener SNR-Verbesserung adaptiv dosieren; 15-%-Sicherheitsnetz und voller DSP-Fallback bleiben erhalten.
 - [x] Modellcache-Verwaltung in der UI ergänzen: Variante, Größe, Version, Lizenz und Updates anzeigen; bestätigtes Löschen entfernt Gewichte und Provenienz und ist während Render/Download gesperrt.
 
