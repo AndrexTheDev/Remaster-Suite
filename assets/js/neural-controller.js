@@ -322,9 +322,13 @@
 
   /** Browser delivery policy: large or legally unidentified models are not installable. */
   const MODEL_POLICY = Object.freeze({
-    deepfilternet3: Object.freeze({ maxBytes: 32 * 1024 * 1024, requireLicense: false }),
-    bsroformer: Object.freeze({ maxBytes: 256 * 1024 * 1024, requireLicense: true }),
-    audiosr: Object.freeze({ maxBytes: 128 * 1024 * 1024, requireLicense: true }),
+    deepfilternet3: Object.freeze({ maxBytes: 32 * 1024 * 1024, requireLicense: false,
+      fixtureSha256: '5e05962c42d4f18c466c9f7259da6c5fa42c89b09cc95e0f8286bc427f3c3bfe',
+      maxRelativeRms: 0.01, maxAbsoluteError: 0.05 }),
+    bsroformer: Object.freeze({ maxBytes: 256 * 1024 * 1024, requireLicense: true,
+      maxRelativeRms: 0.01, maxAbsoluteError: 0.05 }),
+    audiosr: Object.freeze({ maxBytes: 128 * 1024 * 1024, requireLicense: true,
+      maxRelativeRms: 0.01, maxAbsoluteError: 0.05 }),
   });
 
   /**
@@ -1537,12 +1541,27 @@
             ortMin: String(spec.ortMin || modelInfo.ortMin || ''),
             ortMaxTested: String(spec.ortMaxTested || modelInfo.ortMaxTested || ''),
           };
-          const policy = MODEL_POLICY[key] || { maxBytes: Infinity, requireLicense: true };
+          const policy = MODEL_POLICY[key] || { maxBytes: Infinity, requireLicense: true,
+            maxRelativeRms: 0.01, maxAbsoluteError: 0.05 };
           const qualityGate = spec.qualityGate && typeof spec.qualityGate === 'object' ? spec.qualityGate : null;
-          if (variant === 'int4' && !(qualityGate && qualityGate.passed === true
-            && qualityGate.reference && qualityGate.fixture && qualityGate.metrics)) {
-            manifestRejections.push({ model: key, variant, reason: 'missing-quality-gate' });
-            continue;
+          if (variant === 'int4') {
+            const metrics = qualityGate && qualityGate.metrics;
+            const complete = qualityGate && qualityGate.passed === true && qualityGate.reference
+              && /^[0-9a-f]{64}$/i.test(qualityGate.referenceSha256 || '')
+              && /^[0-9a-f]{64}$/i.test(qualityGate.fixtureSha256 || '') && metrics
+              && Number.isFinite(Number(metrics.relativeRms)) && Number.isFinite(Number(metrics.maxAbsoluteError))
+              && metrics.safetyPassed === true;
+            if (!complete) {
+              manifestRejections.push({ model: key, variant, reason: 'missing-quality-gate' });
+              continue;
+            }
+            const failed = Number(metrics.relativeRms) > policy.maxRelativeRms
+              || Number(metrics.maxAbsoluteError) > policy.maxAbsoluteError
+              || (policy.fixtureSha256 && qualityGate.fixtureSha256.toLowerCase() !== policy.fixtureSha256);
+            if (failed) {
+              manifestRejections.push({ model: key, variant, reason: 'quality-gate-failed' });
+              continue;
+            }
           }
           if (policy.requireLicense && !provenance.license) {
             manifestRejections.push({ model: key, variant, reason: 'missing-license' });

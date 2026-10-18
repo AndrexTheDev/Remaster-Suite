@@ -1170,18 +1170,23 @@ async function testModelManager() {
     const rejectedEntries = RSNeural.setModelManifest({ models: {
       deepfilternet3: { variants: {
         int8: { file: 'renamed.onnx', bytes: 1, sha256: '0'.repeat(64) },
-        int4: { file: 'deepfilternet3_int4.onnx', bytes: 1024, sha256: '3'.repeat(64) },
+        int4: { file: 'deepfilternet3_int4.onnx', bytes: 1024, sha256: '3'.repeat(64), qualityGate: {
+          passed: true, reference: 'fp16', referenceSha256: '4'.repeat(64),
+          fixtureSha256: '5e05962c42d4f18c466c9f7259da6c5fa42c89b09cc95e0f8286bc427f3c3bfe',
+          metrics: { relativeRms: 0.02, maxAbsoluteError: 0.01, safetyPassed: true },
+        } },
       } },
-      bsroformer: { version: 'test', upstream: 'https://example.test/bsr', variants: { fp16: {
-        file: 'bs_roformer_4stem_rhythm_fp16.onnx', bytes: 1024, sha256: '1'.repeat(64),
-      } } },
+      bsroformer: { version: 'test', upstream: 'https://example.test/bsr', variants: {
+        fp16: { file: 'bs_roformer_4stem_rhythm_fp16.onnx', bytes: 1024, sha256: '1'.repeat(64) },
+        int4: { file: 'bs_roformer.int4.onnx', bytes: 1024, sha256: '6'.repeat(64) },
+      } },
       audiosr: { version: 'test', license: 'MIT', upstream: 'https://example.test/audiosr', variants: { fp16: {
         file: 'audiosr_lite.fp16.onnx', bytes: 129 * 1024 * 1024, sha256: '2'.repeat(64),
       } } },
     } });
     const rejectionReasons = RSNeural.getModelManifestRejections().map((item) => item.reason).sort();
-    ok(rejectedEntries === 0 && rejectionReasons.join(',') === 'filename-mismatch,missing-license,missing-quality-gate,size-budget',
-      'manifests report why adapters, unlicensed weights, unqualified INT4 and oversized models were rejected',
+    ok(rejectedEntries === 0 && rejectionReasons.join(',') === 'filename-mismatch,missing-license,missing-quality-gate,quality-gate-failed,size-budget',
+      'manifests distinguish absent and numerically failed INT4 quality gates from other policy failures',
       rejectionReasons.join(', '));
     RSNeural.setModelManifest({});
   }
