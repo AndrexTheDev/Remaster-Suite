@@ -1179,6 +1179,17 @@
       : (mode === 'separate'
         ? (sig) => API.separate(sig, { signal: o.signal })
         : (sig) => API.denoise(sig, { signal: o.signal }));
+    // Preserve runtime provenance across every channel/chunk. A provider or
+    // variant change mid-render is reported as `mixed`, never silently
+    // attributed to whichever chunk happened to finish last.
+    const provenance = { provider: null, variant: null, pipeline: null };
+    /** Merge one chunk's runtime identity into the stage report. @param {NeuralResult} res chunk result. @returns {void} */
+    const observeProvenance = (res) => {
+      for (const key of ['provider', 'variant', 'pipeline']) {
+        if (!res || !res[key]) continue;
+        provenance[key] = provenance[key] && provenance[key] !== res[key] ? 'mixed' : res[key];
+      }
+    };
     /**
      * Process one planned chunk into a block of `frames` per channel.
      * @param {{start:number,end:number,inStart:number,inEnd:number}} p - the plan.
@@ -1194,6 +1205,7 @@
         let res;
         try { res = await run(input); } catch (err) { return { error: 'stage-error: ' + ((err && err.message) || err) }; }
         if (!res || !res.applied) return { error: (res && res.reason) || 'stage-fallback' };
+        observeProvenance(res);
         let out = null;
         if (mode === 'separate') out = mixStems(res.stems, o.stems);
         else out = res.output && res.output.length ? res.output : null;
@@ -1286,6 +1298,7 @@
       stats: Object.assign(ring.stats(), {
         chunks: chunksDone, frames: framesDone, ms: elapsedMs, mode, sourceRate,
         chunkSeconds: chosenChunkSeconds, nextChunkSeconds, realTimeFactor,
+        provider: provenance.provider, variant: provenance.variant, pipeline: provenance.pipeline,
       }),
     };
   }

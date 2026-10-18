@@ -963,6 +963,10 @@
             stage0Info.underflows += span.stage0.underflows || 0;
             stage0Info.overflows += span.stage0.overflows || 0;
             stage0Info.ms += span.stage0.ms || 0;
+            for (const key of ['provider', 'variant', 'pipeline']) {
+              const value = span.stage0[key];
+              if (value) stage0Info[key] = stage0Info[key] && stage0Info[key] !== value ? 'mixed' : value;
+            }
           } else {
             stage0Info.failed++;
             // One failed span disables the stage for the rest of the file: a

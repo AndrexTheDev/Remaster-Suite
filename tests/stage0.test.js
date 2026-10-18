@@ -78,7 +78,8 @@ function peak(channels) {
 /** A deterministic "model": scales its input, so any deviation from that
  *  scale is the pipeline's own doing and not a plausible denoiser's. */
 function gainProcess(gain) {
-  return async (sig) => ({ applied: true, output: Float32Array.from(sig, (v) => v * gain) });
+  return async (sig) => ({ applied: true, output: Float32Array.from(sig, (v) => v * gain),
+    provider: 'wasm', variant: 'fp16', pipeline: 'official' });
 }
 
 /* ====================================================================== *
@@ -233,7 +234,9 @@ async function testStageChunking() {
   ok(res.channels[0].length === len, 'the output has exactly the input length', res.channels[0].length + ' frames');
   ok(channelDiff([src], res.channels) === 0, 'an identity model comes back sample-exact across every seam',
     'max |Δ| 0');
-  ok(res.rate === SR, 'the stage reports its output rate', res.rate);
+  ok(res.rate === SR && res.stats.provider === 'wasm' && res.stats.variant === 'fp16' && res.stats.pipeline === 'official',
+    'the stage reports its output rate and actual runtime provenance',
+    res.rate + ' Hz · ' + res.stats.variant + ' · ' + res.stats.provider);
   ok(res.stats.chunks >= 3 && res.stats.underflows === 0 && res.stats.overflows === 0,
     'chunks were processed with no ring underrun or overflow',
     res.stats.chunks + ' chunks, ' + res.stats.underflows + ' under, ' + res.stats.overflows + ' over');
@@ -438,8 +441,10 @@ async function testEngineChunked() {
     chunkSeconds: 1,
     stage0: { process: gainProcess(0.5) },
   });
-  ok(half.stage0.applied === true && half.stage0.spans >= 1, 'the stage ran on the spans',
-    half.stage0.spans + ' span(s), ' + half.stage0.chunks + ' chunk(s)');
+  ok(half.stage0.applied === true && half.stage0.spans >= 1 && half.stage0.variant === 'fp16'
+    && half.stage0.provider === 'wasm' && half.stage0.pipeline === 'official',
+    'the stage ran on the spans and retained one runtime provenance',
+    half.stage0.spans + ' span(s), ' + half.stage0.chunks + ' chunk(s) · ' + half.stage0.variant);
   ok(half.stage0.underflows === 0 && half.stage0.overflows === 0, 'with no ring underrun at a span boundary');
   ok(channelDiff(half.channels, [dry.channels[0].map((v) => v * 0.5)]) < 1e-6,
     'the streamed render is the stage\'s audio through the same chain',
