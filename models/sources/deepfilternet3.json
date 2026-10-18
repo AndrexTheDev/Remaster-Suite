@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "model": "deepfilternet3",
+  "version": "DeepFilterNet3",
+  "upstream": "https://github.com/Rikorose/DeepFilterNet",
+  "upstreamCommit": "d375b2d8309e0935d165700c91da9de862a99c31",
+  "sourceArchive": "models/DeepFilterNet3_onnx.tar.gz",
+  "license": "MIT OR Apache-2.0",
+  "sampleRate": 48000,
+  "fftSize": 960,
+  "hopSize": 480,
+  "erbBands": 32,
+  "dfBins": 96,
+  "dfOrder": 5,
+  "dfLookahead": 2,
+  "graphs": [
+    {
+      "role": "encoder",
+      "file": "enc.onnx",
+      "bytes": 1954042,
+      "sha256": "7c5399d3da8a50ebef1c1a0ae421b33376aa5e45d0e92df16da7e83c9c131916",
+      "inputs": ["feat_erb", "feat_spec"],
+      "outputs": ["e0", "e1", "e2", "e3", "emb", "c0", "lsnr"]
+    },
+    {
+      "role": "erbDecoder",
+      "file": "erb_dec.onnx",
+      "bytes": 3292397,
+      "sha256": "ab669a1d10afe20911728b33053a452071042317a90581092b325da7b2f9d895",
+      "inputs": ["emb", "e3", "e2", "e1", "e0"],
+      "outputs": ["m"]
+    },
+    {
+      "role": "dfDecoder",
+      "file": "df_dec.onnx",
+      "bytes": 3340803,
+      "sha256": "23114ce3b0f6464b763ee62f7bb8aab6b2a129a21eabd5bcfe59413db05f278a",
+      "inputs": ["emb", "c0"],
+      "outputs": ["coefs", "235"]
+    }
+  ]
+}

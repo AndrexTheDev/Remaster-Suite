@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "file": "01 I'm Gonna Put It On - The Wailing Wailers - Bob Marley & The Wailers.mp3",
+  "sourceCommit": "72a2179922c720b041d799b577ca9bd0c8d41511",
+  "bytes": 3011756,
+  "sha256": "5e05962c42d4f18c466c9f7259da6c5fa42c89b09cc95e0f8286bc427f3c3bfe",
+  "decoded": {
+    "sampleRate": 48000,
+    "channels": 2,
+    "frames": 9032377,
+    "durationSeconds": 188.17452083333333
+  },
+  "baseline": {
+    "peakDb": -0.99242239204563,
+    "loudness": -20.058634820227795,
+    "noiseFloorDb": -27.223314452339046,
+    "hfNoiseFloorDb": -55.11791934168745,
+    "musicTiltDb": -19.207776569241823,
+    "hissTiltStepDb": 6.299704582929563,
+    "crackleIndex": 0.2608542954473786,
+    "crackleCrestP98Db": 13.991858780317987,
+    "clipEvidence": 0.000011071282786358452
+  },
+  "notes": "Decoded once with miniaudio float32 stereo at 48 kHz, then measured by the shipped DSP analyser. This lock makes the uploaded recording a stable future real-music validation input; metric changes require an explicit fixture review."
+}

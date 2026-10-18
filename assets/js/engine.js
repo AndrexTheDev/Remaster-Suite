@@ -178,8 +178,37 @@
    * @returns {Promise<{applied: boolean, channels: Float32Array[], rate: number,
    *   info: Object}>} `applied:false` carries the untouched source.
    */
+  /**
+   * Remaining DSP de-hiss dose after neural Stage 0, derived from measured SNR
+   * improvement. No improvement keeps the complete DSP repair; every 9 dB of
+   * improvement roughly leaves the former one-third safety-net dose.
+   * @param {?Object} before - pre-neural noise analysis.
+   * @param {?Object} after - post-neural noise analysis.
+   * @returns {number} multiplier in the conservative 0.15…1 range.
+   */
+  function adaptiveDehissScale(before, after) {
+    const b = before && Number(before.musicDb) - Number(before.floorDb);
+    const a = after && Number(after.musicDb) - Number(after.floorDb);
+    if (!Number.isFinite(b) || !Number.isFinite(a)) return 1;
+    const improvementDb = Math.max(0, a - b);
+    return Math.max(0.15, Math.min(1, Math.pow(10, -improvementDb / 20)));
+  }
+
+  /**
+   * Run optional Stage 0 and retain untouched source on ordinary model failure.
+   * @param {Float32Array[]} channels - source channels.
+   * @param {number} rate - source sample rate.
+   * @param {?Object} stage0 - stage options or null.
+   * @param {function(number): void} [onProgress] - progress callback.
+   * @returns {Promise<{applied:boolean,channels:Float32Array[],rate:number,info:Object}>} stage result.
+   */
   async function runStage0(channels, rate, stage0, onProgress) {
     const untouched = { applied: false, channels, rate, info: { applied: false, reason: 'not-requested' } };
+    const DSP = global.RSDSP;
+    let beforeNoise = null;
+    if (stage0 && DSP && typeof DSP.noiseAnalysis === 'function') {
+      try { beforeNoise = DSP.noiseAnalysis(channels, rate); } catch (e) { /* telemetry must not block inference */ }
+    }
     if (!stage0) return untouched;
     const N = global.RSNeural;
     if (!N || typeof N.denoiseChannels !== 'function') return Object.assign({}, untouched, { info: { applied: false, reason: 'unavailable' } });
@@ -192,14 +221,26 @@
     } catch (err) {
       return Object.assign({}, untouched, { info: { applied: false, reason: 'stage-error: ' + ((err && err.message) || err) } });
     }
+    if (res && res.reason === 'aborted') {
+      const err = new Error('Neural stage aborted');
+      err.name = 'AbortError';
+      throw err;
+    }
     if (!res || !res.applied || !res.channels || !res.channels.length) {
       return Object.assign({}, untouched, { info: { applied: false, reason: (res && res.reason) || 'stage-fallback', stats: res && res.stats } });
     }
+    let afterNoise = null;
+    if (DSP && typeof DSP.noiseAnalysis === 'function') {
+      try { afterNoise = DSP.noiseAnalysis(res.channels, res.rate || rate); } catch (e) { /* retain full DSP dose */ }
+    }
+    const dehissScale = adaptiveDehissScale(beforeNoise, afterNoise);
     return {
       applied: true,
       channels: res.channels,
       rate: res.rate || rate,
-      info: Object.assign({ applied: true, rate: res.rate || rate }, res.stats || {}),
+      info: Object.assign({ applied: true, rate: res.rate || rate, dehissScale,
+        snrBefore: beforeNoise ? beforeNoise.musicDb - beforeNoise.floorDb : null,
+        snrAfter: afterNoise ? afterNoise.musicDb - afterNoise.floorDb : null }, res.stats || {}),
     };
   }
 
@@ -668,6 +709,9 @@
         : undefined);
       srcChans = stage0.channels;
       inRate = stage0.rate;
+      if (stage0.applied && params && params.dehiss > 0) {
+        params = Object.assign({}, params, { dehiss: params.dehiss * stage0.info.dehissScale });
+      }
       const srcLen = srcChans[0].length;
       // output length follows the target rate: playing a buffer whose rate differs
       // from the context resamples it, which is exactly what we want here
@@ -1019,6 +1063,9 @@
         srcChans = pre.channels;
         srcRate = pre.rate;
         stageInfo = pre.info;
+        if (pre.applied && params && params.dehiss > 0) {
+          params = Object.assign({}, params, { dehiss: params.dehiss * pre.info.dehissScale });
+        }
       }
       const Ctor = global.OfflineAudioContext || global.webkitOfflineAudioContext;
       const padding = spectralPadding(params);
@@ -1072,6 +1119,8 @@
    * stubbed Web Audio layer per case; the app itself only ever uses the
    * singleton below.
    */
+  /** Pure post-neural de-hiss policy, exposed for diagnostics and tests. */
+  AudioEngine.adaptiveDehissScale = adaptiveDehissScale;
   global.RSAudioEngine = AudioEngine;
   /**
    * The application's one live engine instance. Rendering does not use it —

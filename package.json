@@ -2,7 +2,7 @@
   "name": "remaster-suite",
   "version": "1.6.0",
   "private": true,
-  "description": "Harmonic Restoration \u00b7 Remaster Suite \u2014 100 % client-side audio restoration in vanilla HTML/CSS/JS",
+  "description": "Harmonic Restoration · Remaster Suite — 100 % client-side audio restoration in vanilla HTML/CSS/JS",
   "scripts": {
     "test": "node tests/dsp.test.js && node tests/web.test.js && node tests/audit.test.js && node tests/e2e.test.js && node tests/tuning.test.js && node tests/opfs.test.js && node tests/stage0.test.js && node tests/coi.test.js && node tests/neural.test.js && node tests/memory-guard.test.js && node tests/chunked-render.test.js && node tests/mobile-ux.test.js && node tests/encoding-batch.test.js && node tests/declip-ar.test.js && node tests/audio-quality.test.js && node tests/wiener.test.js && node tests/worker-safety.test.js && node tests/analysis-worker.test.js",
     "test:dsp": "node tests/dsp.test.js",
@@ -28,11 +28,13 @@
     "test:declip-ar": "node tests/declip-ar.test.js",
     "test:wiener": "node tests/wiener.test.js",
     "test:worker-safety": "node tests/worker-safety.test.js",
-    "test:analysis-worker": "node tests/analysis-worker.test.js"
+    "test:analysis-worker": "node tests/analysis-worker.test.js",
+    "test:neural-browser": "node tests/beta/neural-browser.js"
   },
   "devDependencies": {
     "jsdom": "^22.1.0",
-    "acorn": "^8.19.0"
+    "acorn": "^8.19.0",
+    "onnxruntime-web": "1.20.1"
   },
   "license": "MIT",
   "author": "AndrexTheDev <hippie.highho@gmail.com>",

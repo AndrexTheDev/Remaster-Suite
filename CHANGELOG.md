@@ -6,6 +6,33 @@ All notable changes to the Remaster Suite. The format follows
 
 ## [Unreleased]
 
+### Neural integration hardening — phases 1–8
+
+* ONNX Runtime Web 1.20.1 is now bundled locally (`ort.webgpu.min.js` plus JSEP SIMD/threaded `.mjs`/`.wasm`), hash-pinned, licensed and preferred before CDN rescue mirrors. A real WASM smoke test creates all three shipped sessions and runs encoder plus both decoders, asserting their actual finite output shapes.
+* The pinned official ONNX graphs now ship under `models/deepfilternet3/` with MIT and Apache-2.0 license texts and a production same-origin `models/manifest.json`. Tests hash the shipped bytes and cross-check every size/hash against both manifest and source lock.
+* The official libDF feature front end is ported: 10·log10 ERB power, −60…−90 dB mean-state initialization, 0.99 one-second EMA and /40 scaling; complex bins use 0.001…0.0001 unit-state initialization and magnitude EMA normalization. Time padding stays zero.
+* Official inference now runs encoder → ERB decoder + DF decoder, validates every output, applies the full-band ERB mask and the complex order-5/lookahead-2 deep filter as a low-bin replacement, matching the upstream forward path, then reconstructs exact-length PCM by ISTFT. An identity-coefficient test proves routing and reconstruction.
+* Numerical parity now includes exact libDF ERB-number spacing/minimum-width carry and the official delay-compensated offline flush (initial zero hop plus a trailing 960-sample FFT window). This removed unsafe segment-boundary peaks without weakening the safety gate; genuine Chromium/WASM inference now passes on a hash-pinned 144,000-sample Wailing Wailers segment as well as desktop, Android and iPhone profiles.
+* The worker now discovers the official three files as one unit and creates encoder/ERB-decoder/DF-decoder ORT sessions on one execution provider. Every graph boundary is validated; any incompatible graph or mixed-provider group releases the complete partial group. Worker reset releases all three sessions.
+* Multi-graph variants now download every member, verify each size/hash before publication, publish the group with rollback backups, and validate complete cached groups offline. The official manifest automatically selects this path.
+* The manifest schema now accepts filename-pinned multi-file variants as indivisible artifact groups. The official DeepFilterNet3 group is accepted only when all three graphs carry valid sizes and hashes; incomplete groups are rejected.
+* Selected and locked the official `Rikorose/DeepFilterNet` DeepFilterNet3 ONNX export at commit `d375b2d…`: three graphs (`enc.onnx`, `erb_dec.onnx`, `df_dec.onnx`), exact sizes, SHA-256 hashes, graph boundaries, DSP configuration and dual MIT/Apache-2.0 license are recorded in `models/sources/deepfilternet3.json` and `docs/DEEPFILTERNET3-CONTRACT.md`. The worker now describes the real three-session target instead of treating a fictitious monolithic graph as the final contract.
+* Added a complete integration audit and prioritized production roadmap in
+  `docs/NEURAL-PIPELINE-INTEGRATION.md`; the README now distinguishes the
+  implemented fallback architecture from a production model delivery.
+* Every neural model definition now freezes its required ONNX input/output
+  names. A newly created ORT session is validated before inference; renamed,
+  incomplete or stateful-but-unsupported exports fail as
+  `model-contract-mismatch` and release their provider resources instead of
+  reaching the audio path.
+* Added seven model-contract checks plus sixty-two real-runtime, shipped-artifact, normalization, routing, filter, contract, session-group, install, provenance and cache-management checks (neural suite: 224; complete suite: 1453).
+* The dead hard-coded `@models` jsDelivr channel was removed. The safe default is same-origin `models/`; startup discovers `manifest.json` and the UI offers downloads only after a compatible manifest is active.
+* The neural settings row now shows the installed variant, size, version, license and update availability, with a confirmed delete action that is locked during downloads/renders and clears the worker session plus stale renders.
+* Model status now reports total installed weight bytes and update availability by manifest hash. New APIs summarize all model storage and remove one variant together with its provenance sidecar; removal is idempotent and resets worker sessions.
+* Verified installs now persist a JSON sidecar with model version, license, upstream URL/commit, ORT compatibility, size, hash and installation time; cache status restores it offline.
+* Model downloads now stage under private OPFS names and promote only after verification. A failed update preserves the previous active model byte-for-byte and removes its staging artifact.
+* Deployments can now install a filename-pinned model manifest. Network and cached artifacts are checked for exact size and SHA-256 before activation; corrupt files are removed from OPFS.
+
 ### Round 38 — adaptive broadband STFT Wiener repair (5.1A)
 
 * Shared streaming FFT-1024/Hann/75%-overlap Wiener processor, rolling minimum

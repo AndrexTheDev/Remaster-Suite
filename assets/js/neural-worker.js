@@ -207,6 +207,7 @@
     } catch (err) { /* no document in a worker — library-loader.js tolerates that */ }
     if (ctx.RSLibs && typeof ctx.RSLibs.ortUrls === 'function') return ctx.RSLibs.ortUrls();
     return [
+      '../vendor/onnxruntime-web/ort.webgpu.min.js',
       'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.webgpu.min.js',
       'https://unpkg.com/onnxruntime-web@1.20.1/dist/ort.webgpu.min.js',
     ];
@@ -236,7 +237,8 @@
         try {
           ctx.importScripts(url);
           if (ctx.ort) {
-            const base = url.slice(0, url.lastIndexOf('/') + 1);
+            let base = url.slice(0, url.lastIndexOf('/') + 1);
+            try { if (ctx.location && ctx.location.href) base = new URL(base, ctx.location.href).href; } catch (e) { /* CDN/relative fallback */ }
             // WASM is the fallback provider, so it has to be fast on its own
             // merits: SIMD on, and a thread count that does not starve the
             // one thread actually doing the decode/encode work around it.
@@ -719,21 +721,25 @@
   function buildErbFilterbank(nBins, nBands, sr, nfft, minBins) {
     const minW = minBins || 2;
     const hzPerBin = sr / nfft;
-    const edges = [0];
-    let bin = 0;
-    for (let band = 0; band < nBands - 1; band++) {
-      const remainingBands = nBands - band;
-      const remainingBins = nBins - bin;
-      const fHz = Math.max(1, bin * hzPerBin);
-      const erbHz = 24.7 * ((4.37 * fHz) / 1000 + 1);
-      let width = Math.max(minW, Math.round(erbHz / hzPerBin));
-      // never leave fewer bins than the remaining bands each need at least minW
-      width = Math.min(width, remainingBins - (remainingBands - 1) * minW);
-      width = Math.max(minW, width);
-      bin = Math.min(nBins, bin + width);
-      edges.push(bin);
+    // Exact libDF `erb_fb`: equal spacing on its ERB-number axis, with
+    // minimum-width overflow carried into the following band.
+    const freq2erb = (hz) => 9.265 * Math.log1p(hz / (24.7 * 9.265));
+    const erb2freq = (erb) => 24.7 * 9.265 * Math.expm1(erb / 9.265);
+    const step = freq2erb(sr / 2) / nBands;
+    const widths = new Array(nBands);
+    let prevBin = 0, overflow = 0;
+    for (let i = 1; i <= nBands; i++) {
+      const nextBin = Math.round(erb2freq(i * step) / hzPerBin);
+      let width = nextBin - prevBin - overflow;
+      if (width < minW) { overflow = minW - width; width = minW; } else overflow = 0;
+      widths[i - 1] = width;
+      prevBin = nextBin;
     }
-    edges.push(nBins);
+    widths[nBands - 1] += 1;
+    const excess = widths.reduce((sum, width) => sum + width, 0) - nBins;
+    if (excess > 0) widths[nBands - 1] -= excess;
+    const edges = [0];
+    for (const width of widths) edges.push(edges[edges.length - 1] + width);
     const fwd = new Float32Array(nBands * nBins);
     const inv = new Float32Array(nBins * nBands);
     for (let band = 0; band < nBands; band++) {
@@ -875,6 +881,25 @@
     deepfilternet3: {
       kind: 'denoise',
       dir: 'models/deepfilternet3',
+      // Frozen host/model boundary. A file with the expected name but a
+      // different graph is not allowed to reach session.run(): ORT exposes
+      // these names after session creation, so the worker can reject a wrong
+      // export deterministically instead of reporting an opaque shape error
+      // after the first (expensive) inference.
+      // `io` is the legacy monolithic adapter kept behind the clean fallback
+      // while the official three-graph export below is wired end to end.
+      io: {
+        inputs: ['feat_erb', 'feat_spec'],
+        outputs: ['erb_mask', 'df_coefs'],
+      },
+      officialPipeline: {
+        sourceLock: 'models/sources/deepfilternet3.json',
+        graphs: {
+          encoder: { file: 'enc.onnx', inputs: ['feat_erb', 'feat_spec'], outputs: ['e0', 'e1', 'e2', 'e3', 'emb', 'c0', 'lsnr'] },
+          erbDecoder: { file: 'erb_dec.onnx', inputs: ['emb', 'e3', 'e2', 'e1', 'e0'], outputs: ['m'] },
+          dfDecoder: { file: 'df_dec.onnx', inputs: ['emb', 'c0'], outputs: ['coefs', '235'] },
+        },
+      },
       files: {
         fp32: 'deepfilter.onnx', fp16: 'deepfilter.fp16.onnx', aux: 'deepfilter-auxiliary.bin',
         // The quantised exports the brief names explicitly, under the names
@@ -894,6 +919,10 @@
     bsroformer: {
       kind: 'stems',
       dir: 'models/bsroformer',
+      io: {
+        inputs: ['in_spec_real', 'in_spec_imag'],
+        outputs: ['out_spec_real', 'out_spec_imag'],
+      },
       files: {
         fp32: 'bs_roformer.onnx', fp16: 'bs_roformer_4stem_rhythm_fp16.onnx',
         // a compressed/quantised voice-vs-music separator variant, same
@@ -912,6 +941,10 @@
     audiosr: {
       kind: 'superres',
       dir: 'models/audiosr',
+      io: {
+        inputs: ['mel_in'],
+        outputs: ['gain_db'],
+      },
       // already the lightweight, magnitude-curve-only path (see the comment
       // below) — small enough on its own that no further mobile-specific
       // quantised variant is needed to stay under the VRAM budget.
@@ -1014,6 +1047,28 @@
   }
 
   /**
+   * Resolve all three official DeepFilterNet3 graphs as one byte group.
+   * @returns {Promise<?Object<string, Uint8Array>>} bytes keyed by graph role,
+   *   or null unless every member is present.
+   */
+  async function loadOfficialDfn3Artifacts() {
+    const graphs = MODELS.deepfilternet3.officialPipeline.graphs;
+    const out = {};
+    for (const role of ['encoder', 'erbDecoder', 'dfDecoder']) {
+      const rel = MODELS.deepfilternet3.dir + '/' + graphs[role].file;
+      // Worker fetch URLs resolve relative to assets/js/neural-worker.js, not
+      // the document. OPFS remains preferred; ../../ reaches the repository's
+      // same-origin models/ directory when worker-side OPFS is unavailable.
+      let sameOrigin = '../../' + rel;
+      try { if (ctx.location && ctx.location.href) sameOrigin = new URL('../../' + rel, ctx.location.href).href; } catch (e) { /* relative fallback below */ }
+      const bytes = await opfsBytes(rel) || await fetchBytes(sameOrigin) || await fetchBytes(rel);
+      if (!bytes) return null;
+      out[role] = bytes;
+    }
+    return out;
+  }
+
+  /**
    * Resolve a model's weights, OPFS first (a user-imported model persists
    * there with no repeat network cost) then a same-origin relative fetch
    * (the "local folder structure" the brief asks for). Returns `null` — never
@@ -1060,6 +1115,127 @@
    */
   const sessionCache = new Map();
 
+  /** Validate one session against an explicit graph boundary. @param {*} session ORT session. @param {{inputs:string[], outputs:string[]}} io graph contract. @returns {{ok:boolean, reason?:string, missingInputs:string[], missingOutputs:string[], extraInputs:string[]}} result. */
+  function validateGraphContract(session, io) {
+    return validateSessionContract(session, { io });
+  }
+
+  /**
+   * Build the official DeepFilterNet3 encoder/decoder session group. Every
+   * graph must land on the same execution provider; a mixed GPU/WASM pipeline
+   * would force large intermediate tensors across providers and is rejected.
+   * @param {*} ort - ONNX Runtime namespace.
+   * @param {Object<string, Uint8Array>} artifacts - bytes keyed by graph role.
+   * @param {DeviceCaps} caps - provider capabilities.
+   * @returns {Promise<{sessions:Object, provider:OrtProvider, fp16:boolean}>} ready group.
+   */
+  async function createOfficialDfn3Group(ort, artifacts, caps) {
+    const graphs = MODELS.deepfilternet3.officialPipeline.graphs;
+    const sessions = {};
+    let provider = null, fp16 = false;
+    try {
+      for (const role of ['encoder', 'erbDecoder', 'dfDecoder']) {
+        if (!(artifacts && artifacts[role])) throw new Error('model-group-incomplete: ' + role);
+        const made = await createSession(ort, artifacts[role], caps);
+        const contract = validateGraphContract(made.session, graphs[role]);
+        if (!contract.ok) {
+          if (made.session && typeof made.session.release === 'function') await made.session.release();
+          throw new Error(contract.reason);
+        }
+        if (provider && made.provider !== provider) {
+          if (made.session && typeof made.session.release === 'function') await made.session.release();
+          throw new Error('model-provider-mismatch: ' + provider + ' / ' + made.provider);
+        }
+        provider = made.provider; fp16 = fp16 || made.fp16; sessions[role] = made.session;
+      }
+      return { sessions, provider, fp16, ort };
+    } catch (err) {
+      for (const session of Object.values(sessions)) {
+        try { if (session && typeof session.release === 'function') await session.release(); } catch (e) { /* preserve root failure */ }
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Validate the graph boundary exposed by an ORT session. Model filenames are
+   * deployment details, not proof that the graph behind them is compatible:
+   * upstream exports frequently add recurrent-state tensors, rename outputs or
+   * bake in a different front end. Rejecting that mismatch here prevents a
+   * wrong model from reaching the audio path.
+   * @param {*} session - an initialized ONNX Runtime session.
+   * @param {ModelDefinition} def - the frozen model definition.
+   * @returns {{ok: boolean, reason?: string, missingInputs?: string[],
+   *   missingOutputs?: string[], extraInputs?: string[]}} validation result.
+   */
+  function validateSessionContract(session, def) {
+    const expected = (def && def.io) || { inputs: [], outputs: [] };
+    const inputs = session && Array.isArray(session.inputNames) ? session.inputNames : [];
+    const outputs = session && Array.isArray(session.outputNames) ? session.outputNames : [];
+    const missingInputs = expected.inputs.filter((name) => !inputs.includes(name));
+    const missingOutputs = expected.outputs.filter((name) => !outputs.includes(name));
+    // Extra required inputs are especially dangerous: they usually mean this
+    // is a stateful export whose hidden state the current adapter does not yet
+    // carry across chunks. Outputs may safely contain additional diagnostics.
+    const extraInputs = inputs.filter((name) => !expected.inputs.includes(name));
+    if (!inputs.length || !outputs.length || missingInputs.length || missingOutputs.length || extraInputs.length) {
+      const details = [];
+      if (!inputs.length) details.push('no input metadata');
+      if (!outputs.length) details.push('no output metadata');
+      if (missingInputs.length) details.push('missing inputs ' + missingInputs.join(','));
+      if (missingOutputs.length) details.push('missing outputs ' + missingOutputs.join(','));
+      if (extraInputs.length) details.push('unsupported inputs ' + extraInputs.join(','));
+      return { ok: false, reason: 'model-contract-mismatch: ' + details.join('; '), missingInputs, missingOutputs, extraInputs };
+    }
+    return { ok: true, missingInputs, missingOutputs, extraInputs };
+  }
+
+  /** Cached official DeepFilterNet3 group, including a negative lookup. @type {?Object} */
+  let officialDfn3Cache = null;
+
+  /** Release all sessions in one official graph group. @param {?Object} group group to release. @returns {Promise<void>} */
+  async function releaseOfficialDfn3Group(group) {
+    for (const session of Object.values((group && group.sessions) || {})) {
+      try { if (session && typeof session.release === 'function') await session.release(); } catch (e) { /* best effort */ }
+    }
+  }
+
+  /** Whether one failed provider is eligible for a single in-job WASM retry. @param {?Object} group active group. @param {string} reason failure reason. @returns {boolean} retry decision. */
+  function shouldRetryOfficialOnWasm(group, reason) {
+    return !!(group && group.provider && group.provider !== 'wasm'
+      && (reason === 'oom' || reason === 'device-lost' || reason === 'timeout'));
+  }
+
+  /** Recreate the official group with accelerators disabled. @returns {Promise<Object>} WASM-only group. */
+  async function recreateOfficialDfn3OnWasm() {
+    const previous = officialDfn3Cache;
+    officialDfn3Cache = null;
+    await releaseOfficialDfn3Group(previous);
+    const artifacts = await loadOfficialDfn3Artifacts();
+    if (!artifacts) return (officialDfn3Cache = { unavailable: true, reason: 'weights-not-found' });
+    const ort = await loadOrt();
+    const made = await createOfficialDfn3Group(ort, artifacts, {
+      webgpu: { available: false, fp16: false }, webnn: { available: false }, mobile: isMobileUA(),
+    });
+    return (officialDfn3Cache = Object.assign({ unavailable: false, def: MODELS.deepfilternet3 }, made));
+  }
+
+  /** Load and create the official three-session group. @returns {Promise<Object>} ready group or unavailable result. */
+  async function getOfficialDfn3Group() {
+    if (officialDfn3Cache) return officialDfn3Cache;
+    try {
+      const artifacts = await loadOfficialDfn3Artifacts();
+      if (!artifacts) return (officialDfn3Cache = { unavailable: true, reason: 'weights-not-found' });
+      const caps = { webgpu: await probeWebGpu(), webnn: await probeWebNN(), mobile: isMobileUA() };
+      const ort = await loadOrt();
+      const made = await createOfficialDfn3Group(ort, artifacts, caps);
+      officialDfn3Cache = Object.assign({ unavailable: false, def: MODELS.deepfilternet3 }, made);
+    } catch (err) {
+      officialDfn3Cache = { unavailable: true, reason: 'init-failed: ' + ((err && err.message) || String(err)) };
+    }
+    return officialDfn3Cache;
+  }
+
   /**
    * Get the session for a model, building it on first use: probe the device,
    * find weights, load the runtime, create the session — with every failure
@@ -1080,7 +1256,15 @@
       } else {
         const ort = await loadOrt();
         const created = await createSession(ort, weights.bytes, caps);
-        result = Object.assign({ unavailable: false, def: weights.def, source: weights.source, file: weights.file, variant: weights.variant }, created);
+        const contract = validateSessionContract(created.session, weights.def);
+        if (!contract.ok) {
+          // Release provider-owned buffers immediately where ORT supports it;
+          // a rejected multi-hundred-megabyte graph must not remain resident.
+          try { if (created.session && typeof created.session.release === 'function') await created.session.release(); } catch (e) { /* rejection already decided */ }
+          result = { unavailable: true, reason: contract.reason };
+        } else {
+          result = Object.assign({ unavailable: false, def: weights.def, source: weights.source, file: weights.file, variant: weights.variant }, created);
+        }
       }
     } catch (err) {
       result = { unavailable: true, reason: 'init-failed: ' + (err && err.message || String(err)) };
@@ -1090,6 +1274,156 @@
   }
 
   /* -------------------------------------------------------- DeepFilterNet3 */
+
+  /**
+   * Reject malformed or dangerous neural PCM before it reaches the DSP graph.
+   * @param {Float32Array} source - dry signal.
+   * @param {Float32Array} output - model result.
+   * @returns {{ok:boolean, reason?:string, peak?:number}} verdict.
+   */
+  function validateNeuralAudio(source, output) {
+    if (!(output instanceof Float32Array) || output.length !== source.length) return { ok: false, reason: 'unexpected-output-shape' };
+    let sourcePeak = 0, peak = 0, sum = 0, sourceSquares = 0, outputSquares = 0;
+    for (let i = 0; i < output.length; i++) {
+      const x = source[i] || 0, y = output[i];
+      if (!Number.isFinite(y)) return { ok: false, reason: 'non-finite-output' };
+      sourcePeak = Math.max(sourcePeak, Math.abs(x)); peak = Math.max(peak, Math.abs(y));
+      sourceSquares += x * x; outputSquares += y * y; sum += y;
+    }
+    const ceiling = Math.max(1.5, sourcePeak * 4);
+    if (peak > ceiling) return { ok: false, reason: 'unsafe-output-peak', peak };
+    if (output.length && Math.abs(sum / output.length) > Math.max(0.1, sourcePeak * 0.5)) return { ok: false, reason: 'unsafe-output-dc', peak };
+    const sourceRms = output.length ? Math.sqrt(sourceSquares / output.length) : 0;
+    const outputRms = output.length ? Math.sqrt(outputSquares / output.length) : 0;
+    if (outputRms > Math.max(0.25, sourceRms * 4)) return { ok: false, reason: 'unsafe-output-rms', peak };
+    return { ok: true, peak };
+  }
+
+  /**
+   * Port of libDF's `erb_norm` + `unit_norm` feature state. DeepFilterNet3 was
+   * trained on exponentially normalized dB ERB energies and complex bins, not
+   * raw log power/STFT values.
+   * @param {Float32Array} re - frame-major STFT real values.
+   * @param {Float32Array} im - frame-major STFT imaginary values.
+   * @param {number} T - real frame count.
+   * @param {number} Talign - padded model frame count.
+   * @param {number} nBins - STFT bins per frame.
+   * @param {Object} fb - ERB filterbank edges.
+   * @param {number} erbBands - number of ERB bands.
+   * @param {number} dfBins - linear complex bins.
+   * @returns {{featErb: Float32Array, featSpec: Float32Array}} normalized features.
+   */
+  function normalizeDfn3Features(re, im, T, Talign, nBins, fb, erbBands, dfBins) {
+    const alpha = 0.99; // round(exp(-(480/48000)/1s), 3), official get_norm_alpha()
+    const erbState = new Float32Array(erbBands);
+    const unitState = new Float32Array(dfBins);
+    for (let b = 0; b < erbBands; b++) erbState[b] = -60 + (-30 * b / Math.max(1, erbBands - 1));
+    for (let b = 0; b < dfBins; b++) unitState[b] = 0.001 + (-0.0009 * b / Math.max(1, dfBins - 1));
+    const featErb = new Float32Array(Talign * erbBands);
+    const featSpec = new Float32Array(2 * Talign * dfBins);
+    for (let f = 0; f < T; f++) {
+      for (let band = 0; band < erbBands; band++) {
+        let power = 0, count = 0;
+        for (let b = fb.edges[band]; b < fb.edges[band + 1]; b++) {
+          const r = re[f * nBins + b], i = im[f * nBins + b]; power += r * r + i * i; count++;
+        }
+        const db = 10 * Math.log10(Math.max(power / Math.max(1, count), 1e-10));
+        erbState[band] = db * (1 - alpha) + erbState[band] * alpha;
+        featErb[f * erbBands + band] = (db - erbState[band]) / 40;
+      }
+      for (let b = 0; b < dfBins; b++) {
+        const r = re[f * nBins + b], i = im[f * nBins + b];
+        unitState[b] = Math.hypot(r, i) * (1 - alpha) + unitState[b] * alpha;
+        const scale = 1 / Math.sqrt(Math.max(unitState[b], 1e-12));
+        featSpec[f * dfBins + b] = r * scale;
+        featSpec[(Talign + f) * dfBins + b] = i * scale;
+      }
+    }
+    return { featErb, featSpec };
+  }
+
+  /**
+   * Run the official encoder → ERB decoder + DF decoder graph and apply both
+   * outputs to the host STFT.
+   * @param {Float32Array} signal - mono 48 kHz samples.
+   * @param {Object} group - ready result from {@link getOfficialDfn3Group}.
+   * @returns {Promise<Object>} neural result.
+   */
+  async function denoiseOfficialDfn3(signal, group) {
+    try {
+      const ort = group.ort || await loadOrt();
+      const dsp = MODELS.deepfilternet3.dsp;
+      const { nfft, hop, erbBands, dfBins, dfOrder, dfLookahead } = dsp;
+      const win = vorbisWindow(nfft);
+      // libDF's streaming analyser starts with one zero hop in its analysis
+      // memory. DeepFilterNet's delay-compensated offline path also appends a
+      // full FFT window so synthesis and the order-5 filter's lookahead are
+      // flushed before the compensated output is cropped.
+      const framedSignal = new Float32Array(signal.length + hop + nfft);
+      framedSignal.set(signal, hop);
+      const st = stft(framedSignal, nfft, hop, win);
+      const { re, im, frames: T, nBins } = st;
+      const Talign = alignT(T);
+      const fb = buildErbFilterbank(nBins, erbBands, dsp.sr, nfft);
+      // libDF multiplies its forward FFT by wnorm = 1/nfft for a 50%-overlap
+      // Vorbis window. Our general STFT keeps the unscaled spectrum for exact
+      // reconstruction, so only the model-facing feature copy is normalized.
+      const modelRe = Float32Array.from(re, (v) => v / nfft);
+      const modelIm = Float32Array.from(im, (v) => v / nfft);
+      const { featErb, featSpec } = normalizeDfn3Features(modelRe, modelIm, T, Talign, nBins, fb, erbBands, dfBins);
+      const enc = await withTimeout(group.sessions.encoder.run({
+        feat_erb: new ort.Tensor('float32', featErb, [1, 1, Talign, erbBands]),
+        feat_spec: new ort.Tensor('float32', featSpec, [1, 2, Talign, dfBins]),
+      }), INFERENCE_TIMEOUT_MS, 'deepfilternet3-encoder');
+      const required = ['e0', 'e1', 'e2', 'e3', 'emb', 'c0'];
+      if (required.some((name) => !enc[name])) throw new Error('unexpected-output-shape');
+      const decoded = await Promise.all([
+        withTimeout(group.sessions.erbDecoder.run({ emb: enc.emb, e3: enc.e3, e2: enc.e2, e1: enc.e1, e0: enc.e0 }), INFERENCE_TIMEOUT_MS, 'deepfilternet3-erb-decoder'),
+        withTimeout(group.sessions.dfDecoder.run({ emb: enc.emb, c0: enc.c0 }), INFERENCE_TIMEOUT_MS, 'deepfilternet3-df-decoder'),
+      ]);
+      const mask = decoded[0].m && decoded[0].m.data;
+      const coefs = decoded[1].coefs && decoded[1].coefs.data;
+      if (!mask || mask.length < T * erbBands || !coefs || coefs.length < T * dfBins * dfOrder * 2) {
+        throw new Error('unexpected-output-shape');
+      }
+      const outRe = Float32Array.from(re), outIm = Float32Array.from(im);
+      // ERB gain mask first, over the complete spectrum.
+      for (let f = 0; f < T; f++) for (let band = 0; band < erbBands; band++) {
+        const gain = Math.max(0, Math.min(1.5, mask[f * erbBands + band]));
+        for (let b = fb.edges[band]; b < fb.edges[band + 1]; b++) {
+          outRe[f * nBins + b] *= gain; outIm[f * nBins + b] *= gain;
+        }
+      }
+      // Complex order-5 deep filter on the first 96 bins. The coefficient
+      // axis is [real0,imag0,…real4,imag4]; lookahead=2 centres its context.
+      for (let f = 0; f < T; f++) {
+        for (let b = 0; b < dfBins; b++) {
+          let yr = 0, yi = 0;
+          const cbase = (f * dfBins + b) * dfOrder * 2;
+          for (let k = 0; k < dfOrder; k++) {
+            const sf = f + k - dfLookahead;
+            if (sf < 0 || sf >= T) continue;
+            const xr = re[sf * nBins + b], xi = im[sf * nBins + b];
+            const cr = coefs[cbase + k * 2], ci = coefs[cbase + k * 2 + 1];
+            yr += xr * cr - xi * ci; yi += xr * ci + xi * cr;
+          }
+          const idx = f * nBins + b;
+          // DeepFilterNet3 replaces the low-bin masked spectrum with the DF
+          // result. The decoder's auxiliary scalar output is not a blend
+          // factor in the upstream DfNet forward path.
+          outRe[idx] = yr;
+          outIm[idx] = yi;
+        }
+      }
+      const framedOutput = istft(outRe, outIm, T, nfft, hop, win, framedSignal.length);
+      const output = framedOutput.slice(hop, hop + signal.length);
+      const safety = validateNeuralAudio(signal, output);
+      if (!safety.ok) return { applied: false, reason: safety.reason, peak: safety.peak };
+      return { applied: true, output, provider: group.provider, fp16: group.fp16, pipeline: 'official' };
+    } catch (err) {
+      return { applied: false, reason: resolveInferenceFailure('deepfilternet3-official', err) };
+    }
+  }
 
   /**
    * Denoise `signal` (mono, resampled by the caller to the model's own
@@ -1102,6 +1436,30 @@
    *   reason from {@link RSNeuralWorker.resolveInferenceFailure}.
    */
   async function denoiseDFN3(signal) {
+    // Public calls are intentionally bounded. Production Stage 0 sends short,
+    // contextual chunks; refusing oversized direct messages prevents a single
+    // allocation from multiplying into large STFT/features/output tensors.
+    if (!(signal instanceof Float32Array) || !signal.length) return { applied: false, reason: 'empty-signal' };
+    if (signal.length > 480000) return { applied: false, reason: 'input-too-large' };
+    const official = await getOfficialDfn3Group();
+    if (!official.unavailable) {
+      const first = await denoiseOfficialDfn3(signal, official);
+      if (!shouldRetryOfficialOnWasm(official, first.reason)) return first;
+      try {
+        const wasm = await recreateOfficialDfn3OnWasm();
+        if (wasm.unavailable) return first;
+        const retried = await denoiseOfficialDfn3(signal, wasm);
+        if (retried.applied) retried.fallbackFrom = official.provider;
+        return retried;
+      } catch (err) {
+        return { applied: false, reason: resolveInferenceFailure('deepfilternet3-official', err) };
+      }
+    }
+    // Only the absence of the official group permits the legacy monolithic
+    // adapter. An installed group that failed to initialise must report its
+    // real runtime/contract error instead of being disguised as legacy
+    // `weights-not-found`.
+    if (official.reason !== 'weights-not-found') return { applied: false, reason: official.reason };
     const sess = await getSession('deepfilternet3');
     if (sess.unavailable) return { applied: false, reason: sess.reason };
     try {
@@ -1161,6 +1519,8 @@
         }
       }
       const output = istft(outRe, outIm, T, nfft, hop, win, signal.length);
+      const safety = validateNeuralAudio(signal, output);
+      if (!safety.ok) return { applied: false, reason: safety.reason, peak: safety.peak };
       return { applied: true, output, provider: sess.provider, fp16: sess.fp16 };
     } catch (err) {
       return { applied: false, reason: resolveInferenceFailure('deepfilternet3', err) };
@@ -1316,10 +1676,12 @@
     const mobile = isMobileUA();
     const models = {};
     for (const key of Object.keys(MODELS)) {
-      const sess = await getSession(key);
+      const sess = key === 'deepfilternet3' ? await getOfficialDfn3Group() : await getSession(key);
       models[key] = sess.unavailable
         ? { available: false, reason: sess.reason }
-        : { available: true, provider: sess.provider, fp16: sess.fp16, source: sess.source, variant: sess.variant };
+        : { available: true, provider: sess.provider, fp16: sess.fp16,
+          source: sess.source || (key === 'deepfilternet3' ? 'official-group' : undefined),
+          variant: sess.variant || (key === 'deepfilternet3' ? 'official' : undefined) };
     }
     return {
       webgpu: { available: webgpu.available, fp16: webgpu.fp16 },
@@ -1375,7 +1737,12 @@
      * @returns {Promise<Object>} `{cleared: true}` — the count is not useful
      *   across the thread boundary, and the caller only needs the ack.
      */
-    reset: async () => { sessionCache.clear(); return { cleared: true }; },
+    reset: async () => {
+      sessionCache.clear();
+      await releaseOfficialDfn3Group(officialDfn3Cache);
+      officialDfn3Cache = null;
+      return { cleared: true };
+    },
   };
 
   /**
@@ -1410,11 +1777,12 @@
    */
   ctx.RSNeuralWorker = {
     MODELS, alignT, padRowsTo, trimRowsTo, buildErbFilterbank, stft, istft, fftAny,
-    vorbisWindow, hannWindow, probeWebGpu, probeWebNN, isMobileUA, createSession, loadOrt,
-    variantOrder, selectVariant, loadWeights, opfsBytes, fetchBytes, getSession, sessionCache,
-    providerOrder,
+    vorbisWindow, hannWindow, probeWebGpu, probeWebNN, isMobileUA, createSession, ortCandidates, loadOrt,
+    variantOrder, selectVariant, loadWeights, loadOfficialDfn3Artifacts, opfsBytes, fetchBytes, getSession, sessionCache,
+    validateSessionContract, validateGraphContract, createOfficialDfn3Group, getOfficialDfn3Group, providerOrder,
+    releaseOfficialDfn3Group, shouldRetryOfficialOnWasm, recreateOfficialDfn3OnWasm,
     withTimeout, classifyInferenceError, resolveInferenceFailure, INFERENCE_TIMEOUT_MS,
-    denoiseDFN3, separateBSR, superresCurve, probe,
+    normalizeDfn3Features, validateNeuralAudio, denoiseDFN3, denoiseOfficialDfn3, separateBSR, superresCurve, probe,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = ctx.RSNeuralWorker;
 })(typeof self !== 'undefined' ? self : (typeof globalThis !== 'undefined' ? globalThis : this));

@@ -217,6 +217,7 @@
       if (!slot) return;
       pending.delete(reqId);
       global.clearTimeout(slot.timer);
+      if (slot.cleanup) slot.cleanup();
       settle(slot.resolve, error ? { applied: false, reason: error } : result);
     });
     worker.addEventListener('error', () => {
@@ -224,9 +225,11 @@
       // every outstanding call cleanly rather than hanging them forever
       for (const [id, slot] of pending) {
         global.clearTimeout(slot.timer);
+        if (slot.cleanup) slot.cleanup();
         settle(slot.resolve, { applied: false, reason: 'worker-error' });
         pending.delete(id);
       }
+      worker = null;
     });
     return worker;
   }
@@ -241,25 +244,43 @@
    * @param {Transferable[]} [transfer] - buffers to hand over rather than copy;
    *   must contain the `ArrayBuffer`s of the signals in `payload`, or the
    *   worker receives a detached view.
+   * @param {AbortSignal} [signal] - terminates an in-flight ORT worker call.
    * @returns {Promise<NeuralResult>} the worker's result, or
-   *   `{applied:false, reason}` for `'worker-unavailable'`, `'timeout'` or
-   *   `'post-failed: …'`.
+   *   `{applied:false, reason}` for `'worker-unavailable'`, `'timeout'`,
+   *   `'aborted'`, `'worker-restarted'` or `'post-failed: …'`.
    */
-  function call(type, payload, transfer) {
+  function call(type, payload, transfer, signal) {
     return new Promise((resolve) => {
+      if (signal && signal.aborted) { resolve({ applied: false, reason: 'aborted' }); return; }
       const w = ensureWorker();
       if (!w) { resolve({ applied: false, reason: 'worker-unavailable' }); return; }
       const reqId = ++reqSeq;
+      const cleanup = signal ? () => signal.removeEventListener('abort', onAbort) : null;
       const timer = global.setTimeout(() => {
+        const slot = pending.get(reqId);
         pending.delete(reqId);
+        if (slot && slot.cleanup) slot.cleanup();
         settle(resolve, { applied: false, reason: 'timeout' });
       }, CALL_TIMEOUT_MS);
-      pending.set(reqId, { resolve, timer });
+      function onAbort() {
+        if (!pending.has(reqId)) return;
+        try { if (worker) worker.terminate(); } catch (e) { /* termination remains best effort */ }
+        worker = null;
+        for (const [id, slot] of pending) {
+          global.clearTimeout(slot.timer);
+          if (slot.cleanup) slot.cleanup();
+          settle(slot.resolve, { applied: false, reason: id === reqId ? 'aborted' : 'worker-restarted' });
+          pending.delete(id);
+        }
+      }
+      pending.set(reqId, { resolve, timer, cleanup });
+      if (signal) signal.addEventListener('abort', onAbort, { once: true });
       try {
         w.postMessage(Object.assign({ type, reqId }, payload), transfer || []);
       } catch (err) {
         pending.delete(reqId);
         global.clearTimeout(timer);
+        if (cleanup) cleanup();
         resolve({ applied: false, reason: 'post-failed: ' + (err && err.message) });
       }
     });
@@ -295,6 +316,56 @@
   });
 
   /**
+   * Official multi-graph variants. Unlike `MODEL_FILES` these are indivisible:
+   * every artifact must verify before the variant can be activated.
+   * @type {Object<string, Object<string, string[]>>}
+   */
+  const MODEL_GROUPS = Object.freeze({
+    deepfilternet3: Object.freeze({
+      official: Object.freeze(['enc.onnx', 'erb_dec.onnx', 'df_dec.onnx']),
+    }),
+  });
+
+  /**
+   * Integrity metadata supplied by a deployment's versioned model manifest.
+   * It intentionally starts empty: accepting a made-up hash would be worse
+   * than having no model. Production deployments install entries through
+   * {@link RSNeural.setModelManifest} before offering the download.
+   * @type {Object<string, Object<string, {file: string, bytes: number, sha256: string}>>}
+   */
+  let modelManifest = Object.create(null);
+
+  /** Convert an ArrayBuffer to lowercase hexadecimal. @param {ArrayBuffer} ab bytes. @returns {string} hex. */
+  function hexOf(ab) { return Array.from(new Uint8Array(ab), (b) => b.toString(16).padStart(2, '0')).join(''); }
+
+  /**
+   * Hash bytes with the browser's native SHA-256 implementation.
+   * @param {Uint8Array} bytes - complete artifact bytes.
+   * @returns {Promise<string>} lowercase SHA-256.
+   */
+  async function sha256(bytes) {
+    const subtle = global.crypto && global.crypto.subtle;
+    if (!subtle || typeof subtle.digest !== 'function') throw new Error('SHA-256 unavailable');
+    return hexOf(await subtle.digest('SHA-256', bytes));
+  }
+
+  /**
+   * Validate one artifact against manifest metadata.
+   * @param {Uint8Array} bytes - artifact bytes.
+   * @param {{file: string, bytes: number, sha256: string}} spec - trusted manifest entry.
+   * @returns {Promise<{bytes: number, sha256: string}>} verified facts.
+   */
+  async function verifyArtifact(bytes, spec) {
+    if (!spec || !/^[0-9a-f]{64}$/i.test(spec.sha256 || '')) throw new Error('model manifest has no valid SHA-256');
+    if (Number(spec.bytes) > 0 && bytes.length !== Number(spec.bytes)) {
+      throw new Error('model size mismatch: ' + bytes.length + ' of ' + spec.bytes + ' bytes');
+    }
+    const actual = await sha256(bytes);
+    if (actual !== String(spec.sha256).toLowerCase()) throw new Error('model SHA-256 mismatch');
+    return { bytes: bytes.length, sha256: actual };
+  }
+
+  /**
    * Variant preference, smallest-first: a phone gets INT4 when the channel
    * publishes it and INT8 otherwise, a desktop takes INT8 (the prompt's
    * "standard use" quantisation) and never falls back to fp32 on its own — a
@@ -313,7 +384,7 @@
    * prove the whole path without touching the internet.
    * @type {string}
    */
-  const DEFAULT_MODEL_BASE = 'https://cdn.jsdelivr.net/gh/AndrexTheDev/Remaster-Suite@models';
+  const DEFAULT_MODEL_BASE = 'models';
 
   /**
    * Where weights are looked for, in order. `'models'` is a relative base and
@@ -322,7 +393,7 @@
    * standard path. Replaced wholesale by {@link RSNeural.setModelSource}.
    * @type {string[]}
    */
-  let modelSources = [DEFAULT_MODEL_BASE, 'models'];
+  let modelSources = [DEFAULT_MODEL_BASE];
 
   /**
    * A deployment can point the channel somewhere else without editing this
@@ -338,6 +409,42 @@
     const content = meta && meta.getAttribute('content');
     if (content && content.trim()) modelSources = [content.trim()];
   })();
+
+  /**
+   * Fetch and activate the first valid versioned manifest from the configured
+   * sources. A model channel is usable only when this succeeds: this prevents
+   * the UI from offering a download merely because a URL string exists.
+   * @param {(string|string[])} [source] - optional source(s), otherwise the
+   *   configured model channel is tried in order.
+   * @returns {Promise<{ready: boolean, source?: string, entries?: number, reason?: string}>}
+   *   manifest status; never rejects.
+   */
+  async function loadModelManifest(source) {
+    const sources = source === undefined ? modelSources
+      : (Array.isArray(source) ? source : [source]);
+    const errors = [];
+    for (const base of sources.filter((x) => typeof x === 'string' && x)) {
+      const url = String(base).replace(/\/+$/, '') + '/manifest.json';
+      try {
+        const res = await global.fetch(url, { cache: 'no-store', credentials: 'omit' });
+        if (!res || !res.ok) throw new Error('HTTP ' + (res ? res.status : 'no response'));
+        const manifest = await res.json();
+        if (!manifest || manifest.schema !== 1 || !manifest.models) throw new Error('unsupported manifest schema');
+        const entries = API.setModelManifest(manifest);
+        if (!entries) throw new Error('manifest has no compatible artifacts');
+        return { ready: true, source: url, entries };
+      } catch (err) {
+        errors.push(url + ': ' + ((err && err.message) || String(err)));
+      }
+    }
+    modelManifest = Object.create(null);
+    return { ready: false, reason: errors[0] || 'no manifest source configured' };
+  }
+
+  /** Whether at least one trusted artifact is active. @returns {boolean} manifest state. */
+  function hasModelManifest() {
+    return Object.keys(modelManifest).some((key) => Object.keys(modelManifest[key] || {}).length > 0);
+  }
 
   /**
    * Resolve `<base>/<model>/<file>`. A base that already ends in a slash is
@@ -395,6 +502,8 @@
    * @type {Map<string, Promise<ModelStatus>>}
    */
   const modelInflight = new Map();
+  /** Monotonic suffix for private staging files used by atomic installs. */
+  let modelInstallSeq = 0;
 
   /**
    * Fan one progress step out to every listener and to the caller's own
@@ -445,17 +554,152 @@
    * @param {string} variant - variant key, for the progress events.
    * @param {ModelStore} store - the model store.
    * @param {function(ModelProgress): void} emit - progress sink.
-   * @returns {Promise<{bytes: number}>} the size that landed in OPFS.
+   * @param {{file: string, bytes: number, sha256: string}|null} spec - trusted integrity metadata.
+   * @returns {Promise<{bytes: number, sha256?: string}>} verified artifact facts.
    * @throws {Error} the HTTP status, the short read, or the body sanity
    *   failure — the caller records it and tries the next source.
    */
-  async function downloadToStore(url, key, file, variant, store, emit) {
-    const res = await global.fetch(url, { cache: 'no-store', credentials: 'omit' });
+  /**
+   * Persist the provenance of a verified installation beside its ONNX file.
+   * @param {ModelStore} store - model store.
+   * @param {string} key - model key.
+   * @param {string} file - active artifact filename.
+   * @param {string} variant - weight variant.
+   * @param {?Object} spec - trusted manifest entry.
+   * @param {{bytes: number, sha256?: string}} artifact - verified facts.
+   * @returns {Promise<?Object>} persisted metadata, or null without a manifest.
+   */
+  async function writeInstallMetadata(store, key, file, variant, spec, artifact) {
+    if (!spec) return null;
+    const metadata = {
+      schema: 1,
+      model: key,
+      variant,
+      file,
+      bytes: artifact.bytes,
+      sha256: artifact.sha256,
+      version: spec.version || '',
+      license: spec.license || '',
+      upstream: spec.upstream || '',
+      upstreamCommit: spec.upstreamCommit || '',
+      ortMin: spec.ortMin || '',
+      ortMaxTested: spec.ortMaxTested || '',
+      installedAt: new Date().toISOString(),
+    };
+    const bytes = new TextEncoder().encode(JSON.stringify(metadata));
+    const writer = await store.createWriter(key, file + '.metadata.json');
+    try {
+      await writer.write(bytes);
+      await writer.close();
+      return metadata;
+    } catch (err) {
+      await writer.abort();
+      throw err;
+    }
+  }
+
+  /** Parse persisted installation metadata. @param {?Uint8Array} bytes encoded JSON. @returns {?Object} metadata. */
+  function parseInstallMetadata(bytes) {
+    if (!bytes || !bytes.length) return null;
+    try {
+      const parsed = JSON.parse(new TextDecoder().decode(bytes));
+      return parsed && parsed.schema === 1 ? parsed : null;
+    } catch (err) { return null; }
+  }
+
+  /**
+   * Stream an artifact into a private staging file, verify it and promote it.
+   * @param {string} url - artifact URL.
+   * @param {string} key - model key.
+   * @param {string} file - active filename.
+   * @param {string} variant - weight variant.
+   * @param {ModelStore} store - persistent model store.
+   * @param {function(ModelProgress): void} emit - progress sink.
+   * @param {?Object} spec - trusted integrity manifest entry.
+   * @returns {Promise<{bytes: number, sha256?: string}>} installed artifact facts.
+   */
+  /** Throw a standard abort error at transaction boundaries. @param {AbortSignal} [signal] cancellation signal. @returns {void} */
+  function throwIfAborted(signal) {
+    if (!signal || !signal.aborted) return;
+    const err = new Error('Model installation aborted');
+    err.name = 'AbortError';
+    throw err;
+  }
+
+  /** Fetch one group member into memory and verify it before publication. @param {string} url URL. @param {string} key model. @param {string} variant variant. @param {Object} spec integrity entry. @param {function(ModelProgress): void} emit progress. @param {AbortSignal} [signal] cancellation. @returns {Promise<Uint8Array>} verified bytes. */
+  async function fetchVerifiedArtifact(url, key, variant, spec, emit, signal) {
+    throwIfAborted(signal);
+    const res = await global.fetch(url, { cache: 'no-store', credentials: 'omit', signal });
+    if (!res || !res.ok) throw new Error('HTTP ' + (res ? res.status : 'no response') + ' · ' + url);
+    const total = Number((res.headers && res.headers.get && res.headers.get('content-length')) || 0) || 0;
+    const parts = []; let loaded = 0;
+    if (res.body && typeof res.body.getReader === 'function') {
+      const reader = res.body.getReader();
+      for (;;) {
+        throwIfAborted(signal);
+        const step = await reader.read(); if (step.done) break;
+        throwIfAborted(signal);
+        const part = step.value instanceof Uint8Array ? step.value : new Uint8Array(step.value);
+        parts.push(part.slice()); loaded += part.length;
+        emit({ model: key, variant, phase: 'download', loaded, total, ratio: total ? Math.min(.999, loaded / total) : .5, url });
+      }
+    } else { const part = new Uint8Array(await res.arrayBuffer()); parts.push(part); loaded = part.length; }
+    const bytes = new Uint8Array(loaded); let off = 0;
+    for (const part of parts) { bytes.set(part, off); off += part.length; }
+    throwIfAborted(signal);
+    await verifyArtifact(bytes, spec);
+    throwIfAborted(signal);
+    return bytes;
+  }
+
+  /** Write or replace one complete model-store file. @param {ModelStore} store store. @param {string} key model. @param {string} file file. @param {Uint8Array} bytes bytes. @returns {Promise<void>} completion. */
+  async function writeModelFile(store, key, file, bytes) {
+    const writer = await store.createWriter(key, file);
+    try { await writer.write(bytes.slice()); await writer.close(); } catch (err) { await writer.abort(); throw err; }
+  }
+
+  /** Download, verify and transactionally publish every artifact in a group. @param {string} base source base. @param {string} key model. @param {string} variant variant. @param {Object} spec manifest group. @param {ModelStore} store store. @param {function(ModelProgress): void} emit progress. @param {AbortSignal} [signal] cancellation. @returns {Promise<Object>} group facts. */
+  async function installModelGroup(base, key, variant, spec, store, emit, signal) {
+    const downloaded = [];
+    for (const artifact of spec.artifacts) {
+      const url = modelUrl(base, key, artifact.file);
+      downloaded.push({ artifact, bytes: await fetchVerifiedArtifact(url, key, variant, artifact, emit, signal), url });
+    }
+    throwIfAborted(signal);
+    const backups = new Map();
+    for (const item of downloaded) backups.set(item.artifact.file, await store.read(key, item.artifact.file));
+    const published = [];
+    try {
+      for (const item of downloaded) {
+        throwIfAborted(signal);
+        await writeModelFile(store, key, item.artifact.file, item.bytes);
+        published.push(item.artifact.file);
+      }
+      throwIfAborted(signal);
+    } catch (err) {
+      for (const file of published) {
+        const old = backups.get(file);
+        if (old) await writeModelFile(store, key, file, old); else await store.remove(key, file);
+      }
+      throw err;
+    }
+    return { bytes: downloaded.reduce((n, item) => n + item.bytes.length, 0), artifacts: downloaded.map((item) => ({ file: item.artifact.file, bytes: item.bytes.length, sha256: item.artifact.sha256 })) };
+  }
+
+  /** Stream, verify and atomically promote one legacy single-file variant. @param {string} url URL. @param {string} key model. @param {string} file file. @param {string} variant variant. @param {ModelStore} store store. @param {function(ModelProgress): void} emit progress. @param {?Object} spec integrity entry. @param {AbortSignal} [signal] cancellation. @returns {Promise<Object>} artifact facts. */
+  async function downloadToStore(url, key, file, variant, store, emit, spec, signal) {
+    throwIfAborted(signal);
+    const res = await global.fetch(url, { cache: 'no-store', credentials: 'omit', signal });
     if (!res || !res.ok) throw new Error('HTTP ' + (res ? res.status : 'no response') + ' · ' + url);
     const type = (res.headers && typeof res.headers.get === 'function' && res.headers.get('content-type')) || '';
     if (/text\/html/i.test(type)) throw new Error('answered with HTML, not a model · ' + url);
     const total = Number((res.headers && typeof res.headers.get === 'function' && res.headers.get('content-length')) || 0) || 0;
-    const writer = await store.createWriter(key, file);
+    // Never stream into the active filename. An update may already have a
+    // working version there; replacing it before hash validation would turn a
+    // failed update into an outage. The verified staging file is promoted in
+    // one final writer close below.
+    const stagingFile = file + '.installing-' + (++modelInstallSeq);
+    const writer = await store.createWriter(key, stagingFile);
     let loaded = 0;
     let head = null;
     /** Write one chunk and report it. @param {Uint8Array} chunk - bytes. @returns {Promise<void>} */
@@ -475,23 +719,44 @@
       if (res.body && typeof res.body.getReader === 'function') {
         const reader = res.body.getReader();
         for (;;) {
+          throwIfAborted(signal);
           const step = await reader.read();
           if (step.done) break;
+          throwIfAborted(signal);
           await put(step.value instanceof Uint8Array ? step.value : new Uint8Array(step.value));
         }
       } else {
         const all = new Uint8Array(await res.arrayBuffer());
         for (let off = 0; off < all.length; off += 262144) await put(all.subarray(off, off + 262144));
       }
+      throwIfAborted(signal);
       if (!loaded) throw new Error('empty response · ' + url);
       // an HTML error page served with a 200 is the classic CDN failure; ONNX
       // is protobuf and never starts with '<'
       if (head && head[0] === 0x3c) throw new Error('the body is HTML, not a model · ' + url);
       if (total && loaded !== total) throw new Error('short read: ' + loaded + ' of ' + total + ' bytes · ' + url);
       await writer.close();
-      return { bytes: loaded };
+      const staged = await store.read(key, stagingFile);
+      if (!staged) throw new Error('staged model disappeared before verification');
+      const verified = spec ? await verifyArtifact(staged, spec) : { bytes: staged.length };
+      throwIfAborted(signal);
+
+      // Promotion is deliberately last. The store's writer publishes on
+      // close, so the previous active model remains readable throughout the
+      // download and verification and is replaced only by verified bytes.
+      const finalWriter = await store.createWriter(key, file);
+      try {
+        await finalWriter.write(staged);
+        await finalWriter.close();
+      } catch (err) {
+        await finalWriter.abort();
+        throw err;
+      }
+      await store.remove(key, stagingFile);
+      return verified;
     } catch (err) {
       await writer.abort();
+      try { await store.remove(key, stagingFile); } catch (e) { /* preserve original failure */ }
       throw err;
     }
   }
@@ -505,35 +770,77 @@
    */
   async function runEnsureModel(key, opts) {
     const files = MODEL_FILES[key];
+    const groups = MODEL_GROUPS[key] || {};
     if (!files) return { ready: false, key, reason: 'unknown-model: ' + key };
+    if (opts.signal && opts.signal.aborted) return { ready: false, key, reason: 'aborted' };
     const store = modelStore();
     if (!store) return { ready: false, key, reason: 'no-store' };
-    const variants = opts.variant ? [opts.variant] : preferredVariants(!!opts.mobile);
-    const missing = variants.filter((v) => !files[v]);
+    const manifestVariants = modelManifest[key] || {};
+    const automatic = manifestVariants.official ? ['official'] : preferredVariants(!!opts.mobile);
+    const variants = opts.variant ? [opts.variant] : automatic;
+    const missing = variants.filter((v) => !files[v] && !groups[v]);
     if (missing.length === variants.length) return { ready: false, key, reason: 'unknown-variant: ' + variants.join(',') };
 
     // 1 · the cache: a file that is already there costs no network at all
     for (const variant of variants) {
+      if (groups[variant]) {
+        const spec = manifestVariants[variant];
+        if (!spec || !spec.artifacts) continue;
+        const states = await Promise.all(spec.artifacts.map((a) => store.stat(key, a.file)));
+        if (states.every((st) => st.exists && st.size > 0)) {
+          let valid = true;
+          for (const artifact of spec.artifacts) {
+            try { await verifyArtifact(await store.read(key, artifact.file), artifact); } catch (err) { valid = false; break; }
+          }
+          if (valid) return { ready: true, key, source: 'opfs', variant, bytes: states.reduce((n, st) => n + st.size, 0), verified: true, artifacts: spec.artifacts };
+        }
+        continue;
+      }
       if (!files[variant]) continue;
       const st = await store.stat(key, files[variant]);
       if (st.exists && st.size > 0) {
-        emitModelProgress({ model: key, variant, phase: 'done', loaded: st.size, total: st.size, ratio: 1 }, opts.onProgress);
-        return { ready: true, key, source: 'opfs', variant, path: st.path, bytes: st.size };
+        const spec = modelManifest[key] && modelManifest[key][variant];
+        try {
+          let integrity = null;
+          if (spec) integrity = await verifyArtifact(await store.read(key, files[variant]), spec);
+          emitModelProgress({ model: key, variant, phase: 'done', loaded: st.size, total: st.size, ratio: 1 }, opts.onProgress);
+          const metadata = parseInstallMetadata(await store.read(key, files[variant] + '.metadata.json'));
+          return { ready: true, key, source: 'opfs', variant, path: st.path, bytes: st.size,
+            sha256: integrity && integrity.sha256, verified: !!integrity, metadata };
+        } catch (err) {
+          // Keep the previous active file in place while attempting the
+          // update. It may be a valid older version under the prior manifest;
+          // atomic promotion below replaces it only after the new bytes pass.
+        }
       }
     }
 
     // 2 · the network: each source × each variant, first usable answer wins
     const errors = [];
     for (const variant of variants) {
-      if (!files[variant]) continue;
+      if (!files[variant] && !groups[variant]) continue;
       for (const base of modelSources) {
-        const url = modelUrl(base, key, files[variant]);
+        const url = files[variant] ? modelUrl(base, key, files[variant]) : String(base).replace(/\/+$/, '') + '/' + key;
         try {
-          const { bytes } = await downloadToStore(url, key, files[variant], variant, store, (p) => emitModelProgress(p, opts.onProgress));
+          if (groups[variant]) {
+            const spec = manifestVariants[variant];
+            const group = await installModelGroup(base, key, variant, spec, store, (p) => emitModelProgress(p, opts.onProgress), opts.signal);
+            await resetWorkerSessions();
+            emitModelProgress({ model: key, variant, phase: 'done', loaded: group.bytes, total: group.bytes, ratio: 1, url }, opts.onProgress);
+            return { ready: true, key, source: 'network', variant, bytes: group.bytes, verified: true, artifacts: group.artifacts, url };
+          }
+          const spec = modelManifest[key] && modelManifest[key][variant];
+          const artifact = await downloadToStore(url, key, files[variant], variant, store, (p) => emitModelProgress(p, opts.onProgress), spec || null, opts.signal);
+          const metadata = await writeInstallMetadata(store, key, files[variant], variant, spec || null, artifact);
           await resetWorkerSessions();
-          emitModelProgress({ model: key, variant, phase: 'done', loaded: bytes, total: bytes, ratio: 1, url }, opts.onProgress);
-          return { ready: true, key, source: 'network', variant, path: store.path(key, files[variant]), bytes, url };
+          emitModelProgress({ model: key, variant, phase: 'done', loaded: artifact.bytes, total: artifact.bytes, ratio: 1, url }, opts.onProgress);
+          return { ready: true, key, source: 'network', variant, path: store.path(key, files[variant]), bytes: artifact.bytes, url,
+            sha256: artifact.sha256, verified: !!artifact.sha256, metadata };
         } catch (err) {
+          if ((err && err.name) === 'AbortError' || (opts.signal && opts.signal.aborted)) {
+            emitModelProgress({ model: key, variant, phase: 'aborted', loaded: 0, total: 0, ratio: 0 }, opts.onProgress);
+            return { ready: false, key, reason: 'aborted' };
+          }
           errors.push(String((err && err.message) || err));
         }
       }
@@ -557,6 +864,7 @@
    *   Defaults to what `navigator` says.
    * @param {function(ModelProgress): void} [opts.onProgress] - per-chunk
    *   progress, in addition to the global listeners.
+   * @param {AbortSignal} [opts.signal] - cancels fetch, verification, or promotion.
    * @returns {Promise<ModelStatus>} the outcome.
    */
   function ensureModel(key, opts) {
@@ -564,12 +872,15 @@
     const o = opts || {};
     const mobile = typeof o.mobile === 'boolean' ? o.mobile : isMobileNavigator();
     const cacheKey = k + ':' + (o.variant || (mobile ? 'mobile' : 'desktop'));
-    const running = modelInflight.get(cacheKey);
+    // A cancellable caller owns its request. Sharing that promise would let
+    // one subscriber's signal abort another subscriber's installation.
+    const running = o.signal ? null : modelInflight.get(cacheKey);
     if (running) return running;
     const p = runEnsureModel(k, Object.assign({}, o, { mobile }))
-      .catch((err) => ({ ready: false, key: k, reason: 'download-failed: ' + (err && err.message || String(err)) }))
-      .finally(() => { modelInflight.delete(cacheKey); });
-    modelInflight.set(cacheKey, p);
+      .catch((err) => ({ ready: false, key: k, reason: (err && err.name) === 'AbortError'
+        ? 'aborted' : 'download-failed: ' + (err && err.message || String(err)) }))
+      .finally(() => { if (!o.signal) modelInflight.delete(cacheKey); });
+    if (!o.signal) modelInflight.set(cacheKey, p);
     return p;
   }
 
@@ -597,12 +908,64 @@
     const store = modelStore();
     const variants = {};
     let cached = false;
+    let totalBytes = 0;
     for (const variant of Object.keys(files)) {
       const st = store ? await store.stat(k, files[variant]) : { exists: false, size: 0, path: MODELS_DIR + '/' + k + '/' + files[variant] };
-      variants[variant] = { cached: !!st.exists, size: st.size || 0, path: st.path };
-      if (st.exists) cached = true;
+      const metadata = st.exists && store ? parseInstallMetadata(await store.read(k, files[variant] + '.metadata.json')) : null;
+      const offered = modelManifest[k] && modelManifest[k][variant];
+      const updateAvailable = !!(st.exists && offered && (!metadata || metadata.sha256 !== offered.sha256));
+      variants[variant] = { cached: !!st.exists, size: st.size || 0, path: st.path, metadata, updateAvailable };
+      if (st.exists) { cached = true; totalBytes += st.size || 0; }
     }
-    return { key: k, cached, variants };
+    for (const [variant, groupFiles] of Object.entries(MODEL_GROUPS[k] || {})) {
+      const states = store ? await Promise.all(groupFiles.map((file) => store.stat(k, file))) : [];
+      const complete = states.length === groupFiles.length && states.every((st) => st.exists && st.size > 0);
+      const size = complete ? states.reduce((n, st) => n + st.size, 0) : 0;
+      variants[variant] = {
+        cached: complete,
+        size,
+        path: MODELS_DIR + '/' + k + '/',
+        artifacts: groupFiles.map((file, i) => ({ file, cached: !!(states[i] && states[i].exists), size: (states[i] && states[i].size) || 0 })),
+        updateAvailable: false,
+      };
+      if (complete) { cached = true; totalBytes += size; }
+    }
+    return { key: k, cached, totalBytes, variants };
+  }
+
+  /**
+   * Remove one installed variant and its provenance sidecar.
+   * @param {string} key - model key.
+   * @param {string} variant - registered variant key.
+   * @returns {Promise<{removed: boolean, reason?: string}>} removal result.
+   */
+  async function removeModel(key, variant) {
+    const files = MODEL_FILES[key];
+    if (!files) return { removed: false, reason: 'unknown-model: ' + key };
+    const file = files[variant];
+    if (!file) return { removed: false, reason: 'unknown-variant: ' + variant };
+    const store = modelStore();
+    if (!store) return { removed: false, reason: 'no-store' };
+    const before = await store.stat(key, file);
+    await store.remove(key, file);
+    await store.remove(key, file + '.metadata.json');
+    await resetWorkerSessions();
+    return { removed: !!before.exists };
+  }
+
+  /**
+   * Summarize all installed model weights without network access.
+   * @returns {Promise<{totalBytes: number, models: Object}>} per-model reports.
+   */
+  async function modelStorageStatus() {
+    const models = {};
+    let totalBytes = 0;
+    for (const key of Object.keys(MODEL_FILES)) {
+      const status = await modelStatus(key);
+      models[key] = status;
+      totalBytes += status.totalBytes;
+    }
+    return { totalBytes, models };
   }
 
   /* ====================================================================== *
@@ -617,6 +980,24 @@
    * @type {number}
    */
   const STAGE0_RATE = 48000;
+  /** Adaptive Stage-0 chunk duration retained across streamed spans in this page. @type {number} */
+  let adaptiveChunkSeconds = 1;
+
+  /**
+   * Choose the next bounded chunk duration from measured real-time factor.
+   * Hysteresis prevents oscillation around real time; changes are gradual so
+   * memory and seam count cannot jump wildly after one noisy measurement.
+   * @param {number} current - current chunk duration in seconds.
+   * @param {number} realTimeFactor - processing seconds / audio seconds.
+   * @returns {number} next duration, clamped to 0.25…2 seconds.
+   */
+  function recommendChunkSeconds(current, realTimeFactor) {
+    const cur = Math.max(0.25, Math.min(2, Number(current) || 1));
+    if (!Number.isFinite(realTimeFactor) || realTimeFactor <= 0) return cur;
+    if (realTimeFactor > 1.25) return Math.max(0.25, cur / 2);
+    if (realTimeFactor < 0.35) return Math.min(2, cur * 1.5);
+    return cur;
+  }
 
   /**
    * A monotonic-enough clock for the stage's own duration report. `Date.now`
@@ -731,12 +1112,14 @@
    * @param {Object} [opts] - the stage's options.
    * @param {number} [opts.sampleRate=48000] - the source's rate in Hz.
    * @param {('denoise'|'separate')} [opts.mode='denoise'] - which model.
-   * @param {number} [opts.chunkSeconds=1] - nominal chunk length.
+   * @param {number} [opts.chunkSeconds=1] - nominal chunk length; explicit values disable adaptation.
+   * @param {boolean} [opts.adaptive=false] - reuse measured throughput across streamed spans.
    * @param {number} [opts.contextSeconds=0.25] - audio on each side of a
    *   chunk's kept region, so the model sees past the seam.
    * @param {number} [opts.crossfadeSeconds=0.25] - seam crossfade length.
    * @param {string[]} [opts.stems] - for `'separate'`: the stems to sum.
    * @param {function(number): void} [opts.onProgress] - 0…1 per finished chunk.
+   * @param {AbortSignal} [opts.signal] - cancels before or between inference chunks.
    * @param {function(Float32Array): Promise<NeuralResult>} [opts.process] -
    *   the per-chunk processor; defaults to `denoise()` / `separate()`. A host
    *   that runs its own model runtime supplies this.
@@ -749,6 +1132,7 @@
     const t0 = nowMs();
     const mode = o.mode === 'separate' ? 'separate' : 'denoise';
     const emptyStats = { chunks: 0, frames: 0, underflows: 0, overflows: 0, ring: false, ms: 0, mode };
+    if (o.signal && o.signal.aborted) return { applied: false, reason: 'aborted', stats: emptyStats };
     if (!Array.isArray(channels) || !channels.length || !channels[0] || !channels[0].length) {
       return { applied: false, reason: 'empty-signal', stats: emptyStats };
     }
@@ -763,7 +1147,9 @@
     if (len < 2048) return { applied: false, reason: 'signal-too-short', stats: emptyStats };
 
     // 2 · the chunk plan: kept region, plus context for the model on both sides
-    const chunkFrames = Math.max(2048, Math.round((o.chunkSeconds || 1) * rate));
+    const chosenChunkSeconds = Number(o.chunkSeconds) > 0 ? Number(o.chunkSeconds)
+      : (o.adaptive ? adaptiveChunkSeconds : 1);
+    const chunkFrames = Math.max(2048, Math.round(chosenChunkSeconds * rate));
     const contextFrames = Math.max(0, Math.round((o.contextSeconds === undefined ? 0.25 : o.contextSeconds) * rate));
     const xfadeFrames = Math.max(0, Math.min(chunkFrames, Math.round((o.crossfadeSeconds === undefined ? 0.25 : o.crossfadeSeconds) * rate)));
     const plan = [];
@@ -788,7 +1174,9 @@
     //     a host (or a test) that replaces RSNeural.denoise is what runs.
     const run = typeof o.process === 'function'
       ? o.process
-      : (mode === 'separate' ? (sig) => API.separate(sig) : (sig) => API.denoise(sig));
+      : (mode === 'separate'
+        ? (sig) => API.separate(sig, { signal: o.signal })
+        : (sig) => API.denoise(sig, { signal: o.signal }));
     /**
      * Process one planned chunk into a block of `frames` per channel.
      * @param {{start:number,end:number,inStart:number,inEnd:number}} p - the plan.
@@ -824,6 +1212,12 @@
     let framesDone = 0;
     let chunksDone = 0;
     for (let k = 0; k < plan.length; k++) {
+      if (o.signal && o.signal.aborted) {
+        ring.close();
+        return { applied: false, reason: 'aborted', stats: Object.assign(ring.stats(), {
+          chunks: chunksDone, frames: framesDone, ms: nowMs() - t0, mode,
+        }) };
+      }
       const p = plan[k];
       const got = await produce(p);
       if (got.error) {
@@ -879,12 +1273,17 @@
       }
     }
     ring.close();
+    const elapsedMs = nowMs() - t0;
+    const realTimeFactor = elapsedMs / Math.max(1, len / rate * 1000);
+    const nextChunkSeconds = recommendChunkSeconds(chosenChunkSeconds, realTimeFactor);
+    if (o.adaptive && !(Number(o.chunkSeconds) > 0)) adaptiveChunkSeconds = nextChunkSeconds;
     return {
       applied: true,
       channels: outChannels,
       rate,
       stats: Object.assign(ring.stats(), {
-        chunks: chunksDone, frames: framesDone, ms: nowMs() - t0, mode, sourceRate,
+        chunks: chunksDone, frames: framesDone, ms: elapsedMs, mode, sourceRate,
+        chunkSeconds: chosenChunkSeconds, nextChunkSeconds, realTimeFactor,
       }),
     };
   }
@@ -902,11 +1301,14 @@
    * @property {function(Float32Array[], Object=): Promise<Object>} denoiseChannels
    * @property {function(string=, Object=): Promise<ModelStatus>} ensureModel
    * @property {function(string=): Promise<Object>} modelStatus
+   * @property {function(string, string): Promise<Object>} removeModel
+   * @property {function(): Promise<Object>} modelStorageStatus
    * @property {function(function(ModelProgress): void): function(): void} onModelProgress
    * @property {function((string|string[]|null)): string[]} setModelSource
    * @property {function(): string[]} getModelSource
    * @property {function(): boolean} canLoadModels
    * @property {Object} MODEL_FILES
+   * @property {Object} MODEL_GROUPS
    * @property {string} modelDir
    */
 
@@ -939,7 +1341,12 @@
      */
     dispose() {
       if (worker) { try { worker.terminate(); } catch (e) { /* ignore */ } worker = null; }
-      for (const [id, slot] of pending) { global.clearTimeout(slot.timer); slot.resolve({ applied: false, reason: 'disposed' }); pending.delete(id); }
+      for (const [id, slot] of pending) {
+        global.clearTimeout(slot.timer);
+        if (slot.cleanup) slot.cleanup();
+        slot.resolve({ applied: false, reason: 'disposed' });
+        pending.delete(id);
+      }
     },
 
     /**
@@ -960,24 +1367,28 @@
      * copy is transferred, so the caller's buffer is never detached by the
      * hand-off — a caller that still wants to A/B against its own signal can.
      * @param {Float32Array} signal - mono samples, −1…1; any length.
+     * @param {Object} [opts] - call options.
+     * @param {AbortSignal} [opts.signal] - aborts a running worker inference.
      * @returns {Promise<NeuralResult>} `{applied:true, output}` with an equally
      *   long `Float32Array`, or a fallback result.
      */
-    async denoise(signal) {
+    async denoise(signal, opts) {
       const copy = Float32Array.from(signal);
-      return call('denoise', { signal: copy }, [copy.buffer]);
+      return call('denoise', { signal: copy }, [copy.buffer], opts && opts.signal);
     },
 
     /**
      * Split one mono channel into stems with BS-RoFormer. As with `denoise()`,
      * the samples are copied before they are transferred away.
      * @param {Float32Array} signal - mono samples, −1…1; any length.
+     * @param {Object} [opts] - call options.
+     * @param {AbortSignal} [opts.signal] - aborts a running worker inference.
      * @returns {Promise<NeuralResult>} `{applied:true, stems}` — one equal-length
      *   `Float32Array` per stem — or a fallback result.
      */
-    async separate(signal) {
+    async separate(signal, opts) {
       const copy = Float32Array.from(signal);
-      return call('separate', { signal: copy }, [copy.buffer]);
+      return call('separate', { signal: copy }, [copy.buffer], opts && opts.signal);
     },
 
     /**
@@ -1012,6 +1423,9 @@
     /** The rate Stage 0 works in (`48000`), for callers that need to plan. */
     stage0Rate: STAGE0_RATE,
 
+    /** Throughput-to-chunk policy, exported for diagnostics and deterministic tests. */
+    recommendChunkSeconds,
+
     /**
      * The windowed-sinc resampler Stage 0 uses on the way in — exported so a
      * caller can prepare material at the model's rate itself.
@@ -1036,6 +1450,8 @@
      * @returns {Promise<Object>} the cache report.
      */
     modelStatus,
+    removeModel,
+    modelStorageStatus,
 
     /**
      * Subscribe to model-download progress (both directions: this module's own
@@ -1049,6 +1465,76 @@
       modelListeners.add(cb);
       return () => modelListeners.delete(cb);
     },
+
+    /**
+     * Install the trusted, versioned model manifest used for size and SHA-256
+     * verification. Unknown models/variants and entries whose filename does
+     * not match this build are ignored, so a manifest cannot silently reroute
+     * a known adapter to another graph.
+     * @param {Object} manifest - `{models:{key:{variants:{variant:{file,bytes,sha256}}}}}`.
+     * @returns {number} accepted artifact entries.
+     */
+    setModelManifest(manifest) {
+      const next = Object.create(null);
+      let accepted = 0;
+      const models = manifest && manifest.models;
+      for (const key of Object.keys(models || {})) {
+        if (!MODEL_FILES[key]) continue;
+        const variants = models[key] && models[key].variants;
+        for (const variant of Object.keys(variants || {})) {
+          const spec = variants[variant];
+          const expectedFile = MODEL_FILES[key] && MODEL_FILES[key][variant];
+          const expectedGroup = MODEL_GROUPS[key] && MODEL_GROUPS[key][variant];
+          if (!spec) continue;
+          const modelInfo = models[key] || {};
+          const provenance = {
+            version: String(spec.version || modelInfo.version || manifest.version || ''),
+            license: String(spec.license || modelInfo.license || ''),
+            upstream: String(spec.upstream || modelInfo.upstream || ''),
+            upstreamCommit: String(spec.upstreamCommit || modelInfo.upstreamCommit || ''),
+            ortMin: String(spec.ortMin || modelInfo.ortMin || ''),
+            ortMaxTested: String(spec.ortMaxTested || modelInfo.ortMaxTested || ''),
+          };
+          if (expectedGroup) {
+            const artifacts = Array.isArray(spec.artifacts) ? spec.artifacts : [];
+            const byFile = new Map(artifacts.map((item) => [item && item.file, item]));
+            const valid = artifacts.length === expectedGroup.length && expectedGroup.every((file) => {
+              const item = byFile.get(file);
+              return item && Number(item.bytes) > 0 && /^[0-9a-f]{64}$/i.test(item.sha256 || '');
+            });
+            if (!valid) continue;
+            if (!next[key]) next[key] = Object.create(null);
+            next[key][variant] = Object.freeze(Object.assign({}, provenance, {
+              artifacts: Object.freeze(expectedGroup.map((file) => Object.freeze({
+                file, bytes: Number(byFile.get(file).bytes), sha256: byFile.get(file).sha256.toLowerCase(),
+              }))),
+            }));
+            accepted += expectedGroup.length;
+            continue;
+          }
+          if (!expectedFile || spec.file !== expectedFile || !(Number(spec.bytes) > 0) || !/^[0-9a-f]{64}$/i.test(spec.sha256 || '')) continue;
+          if (!next[key]) next[key] = Object.create(null);
+          next[key][variant] = Object.freeze(Object.assign({}, provenance, {
+            file: spec.file, bytes: Number(spec.bytes), sha256: spec.sha256.toLowerCase(),
+          }));
+          accepted++;
+        }
+      }
+      modelManifest = next;
+      return accepted;
+    },
+
+    /** Return a defensive copy of the active integrity manifest. @returns {Object} manifest entries. */
+    getModelManifest() {
+      const out = {};
+      for (const key of Object.keys(modelManifest)) out[key] = Object.assign({}, modelManifest[key]);
+      return out;
+    },
+
+    /** Load and validate `manifest.json` from a model channel. */
+    loadModelManifest,
+    /** Whether a compatible trusted manifest is active. */
+    hasModelManifest,
 
     /**
      * Where weights are fetched from. Accepts one base URL, a list of them (in
@@ -1078,10 +1564,12 @@
      * decide whether "no model installed" is a dead end or an offer.
      * @returns {boolean} `true` when a download could be attempted.
      */
-    canLoadModels() { return modelSources.length > 0 && !!modelStore(); },
+    canLoadModels() { return modelSources.length > 0 && !!modelStore() && hasModelManifest(); },
 
     /** The weight file names per model and variant (read-only). */
     MODEL_FILES,
+    /** Official atomically installed multi-file variants (read-only). */
+    MODEL_GROUPS,
     /** The OPFS directory the loader writes into (`'models'`). */
     modelDir: MODELS_DIR,
   };

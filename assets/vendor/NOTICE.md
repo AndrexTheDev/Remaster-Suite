@@ -21,6 +21,15 @@ can also fetch them from free CDNs (unpkg / cdnjs / jsDelivr) on request.
 * Unmodified. The library is used as-is; any modification of LAME/lamejs sources must be
   released back under the LGPL. Full source of the port: https://github.com/zhuker/lamejs
 
+## ONNX Runtime Web — `onnxruntime-web/`
+
+* Version: 1.20.1, unmodified files from npm `onnxruntime-web@1.20.1`.
+* Licence: MIT (see `onnxruntime-web/LICENSE`).
+* Bundled lazy runtime: `ort.webgpu.min.js` plus the SIMD/threaded JSEP `.mjs` and `.wasm` sidecars.
+* Used for: local DeepFilterNet3 WebGPU inference with WASM-SIMD fallback.
+* SHA-256 values are pinned by `tests/neural.test.js`; CDN URLs remain rescue mirrors only.
+* Source: https://github.com/microsoft/onnxruntime/tree/v1.20.1/js/web
+
 ## FFmpeg.wasm — optional, never bundled
 
 * `@ffmpeg/ffmpeg` 0.11.6 + `@ffmpeg/core` 0.11.0 (single-threaded core, no cross-origin
