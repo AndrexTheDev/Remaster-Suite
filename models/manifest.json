@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "version": "2026.10.18",
+  "models": {
+    "deepfilternet3": {
+      "version": "DeepFilterNet3@d375b2d",
+      "license": "MIT OR Apache-2.0",
+      "upstream": "https://github.com/Rikorose/DeepFilterNet",
+      "upstreamCommit": "d375b2d8309e0935d165700c91da9de862a99c31",
+      "ortMin": "1.20.1",
+      "ortMaxTested": "1.20.1",
+      "variants": {
+        "official": {
+          "artifacts": [
+            {
+              "file": "enc.onnx",
+              "bytes": 1954042,
+              "sha256": "7c5399d3da8a50ebef1c1a0ae421b33376aa5e45d0e92df16da7e83c9c131916"
+            },
+            {
+              "file": "erb_dec.onnx",
+              "bytes": 3292397,
+              "sha256": "ab669a1d10afe20911728b33053a452071042317a90581092b325da7b2f9d895"
+            },
+            {
+              "file": "df_dec.onnx",
+              "bytes": 3340803,
+              "sha256": "23114ce3b0f6464b763ee62f7bb8aab6b2a129a21eabd5bcfe59413db05f278a"
+            }
+          ]
+        },
+        "fp16": {
+          "derivedFrom": "official",
+          "format": "float16-weights-float32-io",
+          "artifacts": [
+            {
+              "file": "enc.fp16.onnx",
+              "bytes": 995713,
+              "sha256": "0c0bb87add7babab0e58ca328e9c3b62fc2ae5519581d8ec2a61da9d2f76e9ee"
+            },
+            {
+              "file": "erb_dec.fp16.onnx",
+              "bytes": 1658839,
+              "sha256": "07bd80116d613e18005036fae6473c06e07fa2ae060369b035f63f1583d99c1b"
+            },
+            {
+              "file": "df_dec.fp16.onnx",
+              "bytes": 1684407,
+              "sha256": "6be308fb158cf2b518ca94291a62bea672c06fa37d78b16f183529b3350313ef"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

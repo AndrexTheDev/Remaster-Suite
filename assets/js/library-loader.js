@@ -57,6 +57,7 @@
    * @typedef {Object} LocalCopies
    * @property {string} jszip - `assets/vendor/jszip.min.js`
    * @property {string} lame - `assets/vendor/lame.min.js`
+   * @property {string} ort - worker-relative bundled ONNX Runtime Web entry.
    */
 
   /** Free CDNs, in the order they are tried. */
@@ -80,11 +81,8 @@
     // the `.webgpu` build is the one UMD bundle that carries *both* the
     // WebGPU and the WASM/SIMD execution providers, so one load covers the
     // "prefer WebGPU, fall back to WASM" requirement without a second
-    // network round trip when the fallback fires. There is no bundled local
-    // copy — the unpacked package is ~140 MB, two orders of magnitude over
-    // every other dependency this project ships, so it is CDN-only and
-    // loaded lazily, exactly like ffmpeg: never fetched unless a neural
-    // feature is actually invoked, so the zero-network default is unchanged.
+    // network round trip when the fallback fires. The exact runtime entry and
+    // its JSEP WASM sidecars are bundled below; CDNs remain rescue mirrors.
     ort: [
       'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.webgpu.min.js',
       'https://unpkg.com/onnxruntime-web@1.20.1/dist/ort.webgpu.min.js',
@@ -96,6 +94,9 @@
   const LOCAL = {
     jszip: 'assets/vendor/jszip.min.js',
     lame: 'assets/vendor/lame.min.js',
+    // `ortUrls()` is consumed inside assets/js/neural-worker.js, therefore
+    // this path is relative to that worker rather than to index.html.
+    ort: '../vendor/onnxruntime-web/ort.webgpu.min.js',
   };
 
   /**
@@ -317,7 +318,7 @@
      * splice its candidate list without mutating this module's constant.
      * @returns {string[]} the candidate URLs, in try order.
      */
-    ortUrls() { return CDN.ort.slice(); },
+    ortUrls() { return [LOCAL.ort].concat(CDN.ort); },
 
     /**
      * Absolutise a bundled path against the current document URL, because a

@@ -78,7 +78,8 @@ function peak(channels) {
 /** A deterministic "model": scales its input, so any deviation from that
  *  scale is the pipeline's own doing and not a plausible denoiser's. */
 function gainProcess(gain) {
-  return async (sig) => ({ applied: true, output: Float32Array.from(sig, (v) => v * gain) });
+  return async (sig) => ({ applied: true, output: Float32Array.from(sig, (v) => v * gain),
+    provider: 'wasm', variant: 'fp16', pipeline: 'official' });
 }
 
 /* ====================================================================== *
@@ -233,12 +234,23 @@ async function testStageChunking() {
   ok(res.channels[0].length === len, 'the output has exactly the input length', res.channels[0].length + ' frames');
   ok(channelDiff([src], res.channels) === 0, 'an identity model comes back sample-exact across every seam',
     'max |Δ| 0');
-  ok(res.rate === SR, 'the stage reports its output rate', res.rate);
+  ok(res.rate === SR && res.stats.provider === 'wasm' && res.stats.variant === 'fp16' && res.stats.pipeline === 'official',
+    'the stage reports its output rate and actual runtime provenance',
+    res.rate + ' Hz · ' + res.stats.variant + ' · ' + res.stats.provider);
   ok(res.stats.chunks >= 3 && res.stats.underflows === 0 && res.stats.overflows === 0,
     'chunks were processed with no ring underrun or overflow',
     res.stats.chunks + ' chunks, ' + res.stats.underflows + ' under, ' + res.stats.overflows + ' over');
   ok(res.stats.pushed === res.stats.popped && res.stats.pushed > 0,
     'the ring saw the same frames go in and come out', res.stats.pushed + ' frames');
+  ok(RSNeural.recommendChunkSeconds(1, 2) === 0.5,
+    'a slower-than-real-time warm-up halves the next chunk duration');
+  ok(RSNeural.recommendChunkSeconds(1, 0.2) === 1.5,
+    'a fast warm-up grows the next chunk gradually');
+  ok(RSNeural.recommendChunkSeconds(1, 0.8) === 1,
+    'hysteresis keeps a stable device from oscillating chunk size');
+  ok(RSNeural.recommendChunkSeconds(0.25, 9) === 0.25
+    && RSNeural.recommendChunkSeconds(2, 0.01) === 2,
+    'adaptive chunks remain inside the 0.25–2 second memory/seam bounds');
 
   // a gain is the simplest model that could not survive a broken seam: a lost
   // or doubled frame shows up immediately, a bad crossfade shows up as an
@@ -246,6 +258,13 @@ async function testStageChunking() {
   const half = await RSNeural.denoiseChannels([src], { sampleRate: SR, process: gainProcess(0.5) });
   ok(maxAbsDiff(half.channels[0], src.map((v) => v * 0.5)) === 0,
     'a uniform gain comes out uniform — no dip at the crossfades');
+
+  const stereo = await RSNeural.denoiseChannels([src, Float32Array.from(src)], {
+    sampleRate: SR, process: gainProcess(0.75),
+  });
+  ok(stereo.applied && stereo.channels.length === 2
+    && maxAbsDiff(stereo.channels[0], stereo.channels[1]) === 0,
+    'identical stereo channels remain sample-identical through every neural chunk and seam');
 
   const lengths = [4096, SR, SR + 1, SR * 2];
   let lengthOk = true;
@@ -326,6 +345,25 @@ async function testStageFallbacks() {
   const empty = await RSNeural.denoiseChannels([], {});
   ok(empty.applied === false && empty.reason === 'empty-signal', 'an empty request is refused');
 
+  const alreadyAborted = new AbortController();
+  alreadyAborted.abort();
+  const aborted = await RSNeural.denoiseChannels([src], { signal: alreadyAborted.signal, process: gainProcess(1) });
+  ok(aborted.applied === false && aborted.reason === 'aborted' && aborted.stats.chunks === 0,
+    'an already-aborted Stage 0 request performs no inference');
+
+  const betweenChunks = new AbortController();
+  let calls = 0;
+  const interrupted = await RSNeural.denoiseChannels([tone(SR * 3, 440, SR)], {
+    signal: betweenChunks.signal,
+    process: async (input) => {
+      calls++;
+      if (calls === 1) betweenChunks.abort();
+      return { applied: true, output: Float32Array.from(input) };
+    },
+  });
+  ok(interrupted.applied === false && interrupted.reason === 'aborted' && calls === 1,
+    'cancellation between chunks stops further neural inference', calls + ' call');
+
   const savedRing = global.RSRingBuffer;
   let noRing;
   try {
@@ -353,6 +391,16 @@ async function testStageFallbacks() {
  * ====================================================================== */
 
 async function testEngineRender() {
+  section('stage0 · adaptive post-neural DSP de-hiss dose');
+  ok(Engine.adaptiveDehissScale({ musicDb: -10, floorDb: -30 }, { musicDb: -10, floorDb: -30 }) === 1,
+    'no measured SNR improvement keeps the complete DSP repair');
+  const nineDb = Engine.adaptiveDehissScale({ musicDb: -10, floorDb: -30 }, { musicDb: -10, floorDb: -39 });
+  ok(nineDb > 0.34 && nineDb < 0.36, '9 dB neural improvement leaves roughly a one-third de-hiss safety net', nineDb.toFixed(3));
+  ok(Engine.adaptiveDehissScale({ musicDb: -10, floorDb: -30 }, { musicDb: -10, floorDb: -80 }) === 0.15,
+    'very large improvement cannot remove the bounded DSP safety net');
+  ok(Engine.adaptiveDehissScale(null, null) === 1,
+    'missing post-analysis fails safe to the full DSP dose');
+
   section('stage0 · Engine.render() runs the stage before the graph');
 
   const e = new Engine();
@@ -393,8 +441,10 @@ async function testEngineChunked() {
     chunkSeconds: 1,
     stage0: { process: gainProcess(0.5) },
   });
-  ok(half.stage0.applied === true && half.stage0.spans >= 1, 'the stage ran on the spans',
-    half.stage0.spans + ' span(s), ' + half.stage0.chunks + ' chunk(s)');
+  ok(half.stage0.applied === true && half.stage0.spans >= 1 && half.stage0.variant === 'fp16'
+    && half.stage0.provider === 'wasm' && half.stage0.pipeline === 'official',
+    'the stage ran on the spans and retained one runtime provenance',
+    half.stage0.spans + ' span(s), ' + half.stage0.chunks + ' chunk(s) · ' + half.stage0.variant);
   ok(half.stage0.underflows === 0 && half.stage0.overflows === 0, 'with no ring underrun at a span boundary');
   ok(channelDiff(half.channels, [dry.channels[0].map((v) => v * 0.5)]) < 1e-6,
     'the streamed render is the stage\'s audio through the same chain',

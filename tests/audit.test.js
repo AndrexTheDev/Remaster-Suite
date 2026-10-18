@@ -97,14 +97,16 @@ section('audit · repository hygiene');
     .filter((f) => /https?:\/\//.test(stripData(read(f))));
   ok(remoteInOthers.length === 0, 'no remote URL outside the two modules that own a channel', remoteInOthers.join(', '));
 
-  // …and the model manager's own URL is the project's model channel, not some
-  // third-party service the loader happens to reach: one host, the project's
-  // own repository, and a path that says `@models`
-  // comments may (and do) show example URLs; only code counts
+  // The former hard-coded `@models` jsDelivr branch never existed. The safe
+  // default is now the deployment's same-origin `models/` directory; a remote
+  // channel must be chosen explicitly through config/meta and must publish a
+  // compatible manifest before the UI offers any download.
+  // Comments may (and do) show example URLs; only code counts.
   const codeOnly = (src) => stripData(src).replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
-  const modelUrls = (codeOnly(read('assets/js/neural-controller.js')).match(/https?:\/\/[^"'`\s)]+/g) || []);
-  ok(modelUrls.length === 1 && /^https:\/\/cdn\.jsdelivr\.net\/gh\/AndrexTheDev\/Remaster-Suite@models$/.test(modelUrls[0]),
-    'the model channel is one URL, on the project\'s own jsDelivr path', modelUrls.join(', ') || 'none');
+  const neuralCode = codeOnly(read('assets/js/neural-controller.js'));
+  const modelUrls = (neuralCode.match(/https?:\/\/[^"'`\s)]+/g) || []);
+  ok(modelUrls.length === 0 && /DEFAULT_MODEL_BASE\s*=\s*['"]models['"]/.test(neuralCode),
+    'the model channel defaults to same-origin models/ with no dead remote URL', modelUrls.join(', ') || 'same-origin');
 
 
   const loader = read('assets/js/library-loader.js');

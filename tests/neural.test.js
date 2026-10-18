@@ -205,6 +205,9 @@ async function testProbeAndFallback() {
       ok(false, name + '() must never reject', String((err && err.message) || err));
     }
   }
+  const oversized = await RSNeuralWorker.denoiseDFN3(new Float32Array(480001));
+  ok(oversized.applied === false && oversized.reason === 'input-too-large',
+    'direct denoiser calls are bounded before STFT tensors are allocated');
 
   section('neural · neural-controller.js (main-thread wrapper) — no Worker global under Node, same clean contract');
   const ctrlCalls = [
@@ -394,6 +397,23 @@ async function testMobileAndWebNN() {
   const reasonGeneric = RSNeuralWorker.resolveInferenceFailure('fake-model-generic', new Error('unexpected-output-shape'));
   ok(reasonGeneric === 'inference-error: unexpected-output-shape', 'a non-hardware error keeps the existing descriptive reason text', reasonGeneric);
   ok(RSNeuralWorker.sessionCache.has('fake-model-generic') === true, 'a non-hardware error leaves the cached session in place — nothing wrong with the device itself');
+
+  section('neural · in-job accelerator failure retries exactly where WASM can help');
+  for (const reason of ['oom', 'device-lost', 'timeout']) {
+    ok(RSNeuralWorker.shouldRetryOfficialOnWasm({ provider: 'webgpu' }, reason),
+      reason + ' on WebGPU is eligible for one WASM retry');
+  }
+  ok(!RSNeuralWorker.shouldRetryOfficialOnWasm({ provider: 'wasm' }, 'oom'),
+    'a WASM failure is never recursively retried');
+  ok(!RSNeuralWorker.shouldRetryOfficialOnWasm({ provider: 'webgpu' }, 'inference-error: unexpected-output-shape'),
+    'a graph or shape defect is not hidden by provider fallback');
+  let releases = 0;
+  await RSNeuralWorker.releaseOfficialDfn3Group({ sessions: {
+    encoder: { release: async () => { releases++; } },
+    erbDecoder: { release: async () => { releases++; } },
+    dfDecoder: { release: async () => { releases++; } },
+  } });
+  ok(releases === 3, 'provider fallback releases every accelerator-owned graph session before WASM recreation', releases);
 }
 
 /* ====================================================================== *
@@ -413,8 +433,9 @@ async function testHardwareFallbackNotification() {
       const result = FakeWorker.nextResult(msg);
       setTimeout(() => { for (const cb of (this.listeners.message || [])) cb({ data: { reqId: msg.reqId, result } }); }, 0);
     }
-    terminate() {}
+    terminate() { FakeWorker.terminated++; }
   }
+  FakeWorker.terminated = 0;
   FakeWorker.nextResult = () => ({ applied: false, reason: 'weights-not-found' });
 
   const realWorker = global.Worker;
@@ -439,6 +460,18 @@ async function testHardwareFallbackNotification() {
     FakeWorker.nextResult = () => ({ applied: false, reason: 'timeout' });
     await RSNeural.denoise(new Float32Array(10));
     ok(seen.join(',') === 'oom,device-lost,timeout', 'device-lost and timeout also fire the notification, in call order', seen.join(','));
+
+    const ac = new AbortController();
+    FakeWorker.nextResult = () => ({ applied: true, output: new Float32Array(10) });
+    const cancelled = RSNeural.denoise(new Float32Array(10), { signal: ac.signal });
+    const collateral = RSNeural.denoise(new Float32Array(10));
+    ac.abort();
+    const [cancelledResult, collateralResult] = await Promise.all([cancelled, collateral]);
+    ok(cancelledResult.reason === 'aborted' && collateralResult.reason === 'worker-restarted',
+      'aborting active ORT terminates its worker and settles every affected caller explicitly');
+    ok(FakeWorker.terminated >= 1, 'active inference cancellation actually terminates the ORT worker', FakeWorker.terminated);
+    const fresh = await RSNeural.denoise(new Float32Array(10));
+    ok(fresh.applied === true, 'the next neural request starts a fresh worker after cancellation');
 
     unsubscribe();
     FakeWorker.nextResult = () => ({ applied: false, reason: 'oom' });
@@ -654,7 +687,7 @@ function fakeFetch(routes) {
     if (!r) {
       return { ok: false, status: 404, headers: { get: () => null } };
     }
-    const bytes = r.bytes;
+    const bytes = r.bytes || new Uint8Array(Buffer.from(JSON.stringify(r.json || {})));
     let off = 0;
     return {
       ok: true,
@@ -680,6 +713,7 @@ function fakeFetch(routes) {
         },
       },
       async arrayBuffer() { return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength); },
+      async json() { return r.json !== undefined ? r.json : JSON.parse(Buffer.from(bytes).toString('utf8')); },
     };
   };
   fn.calls = calls;
@@ -705,12 +739,240 @@ async function withGlobals(replacement, fn) {
   }
 }
 
+async function testModelContracts() {
+  section('neural · real-session model contracts are validated before inference');
+  const dfn = RSNeuralWorker.MODELS.deepfilternet3;
+  const valid = RSNeuralWorker.validateSessionContract({
+    inputNames: ['feat_erb', 'feat_spec'],
+    outputNames: ['erb_mask', 'df_coefs'],
+  }, dfn);
+  ok(valid.ok === true, 'the frozen DeepFilterNet graph contract is accepted');
+
+  const stateful = RSNeuralWorker.validateSessionContract({
+    inputNames: ['feat_erb', 'feat_spec', 'hidden_state'],
+    outputNames: ['erb_mask', 'df_coefs'],
+  }, dfn);
+  ok(stateful.ok === false && stateful.extraInputs.includes('hidden_state'),
+    'an export with an unsupported recurrent-state input is rejected before session.run', stateful.reason);
+
+  const renamed = RSNeuralWorker.validateSessionContract({
+    inputNames: ['features_erb', 'feat_spec'],
+    outputNames: ['mask', 'df_coefs'],
+  }, dfn);
+  ok(renamed.ok === false && renamed.missingInputs.includes('feat_erb') && renamed.missingOutputs.includes('erb_mask'),
+    'renamed inputs and outputs produce a precise model-contract-mismatch', renamed.reason);
+
+  const noMetadata = RSNeuralWorker.validateSessionContract({}, dfn);
+  ok(noMetadata.ok === false && /no input metadata/.test(noMetadata.reason) && /no output metadata/.test(noMetadata.reason),
+    'a runtime session without metadata is not guessed compatible', noMetadata.reason);
+
+  for (const key of ['deepfilternet3', 'bsroformer', 'audiosr']) {
+    const io = RSNeuralWorker.MODELS[key].io;
+    ok(io && io.inputs.length > 0 && io.outputs.length > 0,
+      key + ' publishes an explicit input/output contract');
+  }
+
+  const fs = require('fs');
+  const lock = JSON.parse(fs.readFileSync(path.join(ROOT, 'models', 'sources', 'deepfilternet3.json'), 'utf8'));
+  const shippedManifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'models', 'manifest.json'), 'utf8'));
+  const musicFixture = JSON.parse(fs.readFileSync(path.join(ROOT, 'tests', 'fixtures', 'wailing-wailers.json'), 'utf8'));
+  const musicBytes = fs.readFileSync(path.join(ROOT, musicFixture.file));
+  const pipeline = dfn.officialPipeline;
+  ok(lock.upstreamCommit === 'd375b2d8309e0935d165700c91da9de862a99c31' && /MIT/.test(lock.license),
+    'the official upstream commit and redistributable license are frozen');
+  const musicHash = require('crypto').createHash('sha256').update(musicBytes).digest('hex');
+  ok(musicBytes.length === musicFixture.bytes && musicHash === musicFixture.sha256,
+    'the uploaded Wailing Wailers real-music fixture is byte-for-byte locked', musicHash);
+  ok(musicBytes.subarray(0, 3).toString('ascii') === 'ID3',
+    'the real-music fixture has an MP3/ID3 container rather than a renamed test payload');
+  ok(musicFixture.decoded.sampleRate === 48000 && musicFixture.decoded.channels === 2
+    && musicFixture.decoded.durationSeconds > 180,
+    'the real-music fixture contract records a full stereo song at the model rate');
+  ok(musicFixture.baseline.hissTiltStepDb > 5 && musicFixture.baseline.crackleIndex > 0.2
+    && musicFixture.baseline.clipEvidence < 0.001,
+    'the song baseline captures multiple restoration problems without inventing clipping evidence');
+  ok(shippedManifest.schema === 1 && shippedManifest.models.deepfilternet3.variants.official.artifacts.length === 3,
+    'the same-origin production manifest publishes the official three-graph variant');
+  const runtimeDir = path.join(ROOT, 'assets', 'vendor', 'onnxruntime-web');
+  const runtimePins = {
+    'ort.webgpu.min.js': '8443389bf14b34582ea40c590b5007bb652d6ac07dd76829a5bd82d2372e6895',
+    'ort-wasm-simd-threaded.jsep.mjs': '2fb14505d39926e4c544de8c57fe59a2f2bc74caba6f71890be9afecc5046758',
+    'ort-wasm-simd-threaded.jsep.wasm': '185b0861a6cd6cbdfb057289338090436483cc59e10a7bc83bd167b15531a51b',
+  };
+  for (const [file, hash] of Object.entries(runtimePins)) {
+    const actual = require('crypto').createHash('sha256').update(fs.readFileSync(path.join(runtimeDir, file))).digest('hex');
+    ok(actual === hash, 'bundled ONNX Runtime 1.20.1 artifact is pinned: ' + file);
+  }
+  ok(RSNeuralWorker.ortCandidates()[0] === '../vendor/onnxruntime-web/ort.webgpu.min.js',
+    'the worker tries the bundled runtime before any CDN rescue mirror');
+  ok(lock.graphs.length === 3 && Object.keys(pipeline.graphs).length === 3,
+    'DeepFilterNet3 is honestly represented as a three-graph pipeline, not a fictitious monolith');
+  for (const graph of lock.graphs) {
+    const declared = pipeline.graphs[graph.role];
+    ok(declared && declared.file === graph.file && declared.inputs.join(',') === graph.inputs.join(',') && declared.outputs.join(',') === graph.outputs.join(','),
+      graph.role + ' graph boundary agrees between the source lock and worker');
+    ok(graph.bytes > 1000000 && /^[0-9a-f]{64}$/.test(graph.sha256),
+      graph.role + ' has a pinned size and SHA-256');
+    const shipped = fs.readFileSync(path.join(ROOT, 'models', 'deepfilternet3', graph.file));
+    const actualHash = require('crypto').createHash('sha256').update(shipped).digest('hex');
+    const manifestArtifact = shippedManifest.models.deepfilternet3.variants.official.artifacts.find((a) => a.file === graph.file);
+    ok(shipped.length === graph.bytes && actualHash === graph.sha256,
+      graph.role + ' shipped bytes match the frozen upstream size and hash');
+    ok(manifestArtifact && manifestArtifact.bytes === graph.bytes && manifestArtifact.sha256 === graph.sha256,
+      graph.role + ' production manifest matches the source lock');
+  }
+  const groupManifest = { schema: 1, models: { deepfilternet3: {
+    version: lock.version, license: lock.license, upstreamCommit: lock.upstreamCommit,
+    variants: { official: { artifacts: lock.graphs.map(({ file, bytes, sha256 }) => ({ file, bytes, sha256 })) } },
+  } } };
+  ok(RSNeural.MODEL_GROUPS.deepfilternet3.official.length === 3,
+    'the controller registers the official variant as one indivisible artifact group');
+  ok(RSNeural.setModelManifest(groupManifest) === 3,
+    'a complete official three-graph manifest is accepted as three verified artifacts');
+  const installedGroup = RSNeural.getModelManifest().deepfilternet3.official;
+  ok(installedGroup.artifacts.length === 3 && installedGroup.upstreamCommit === lock.upstreamCommit,
+    'the active manifest retains all group hashes and provenance');
+  groupManifest.models.deepfilternet3.variants.official.artifacts.pop();
+  ok(RSNeural.setModelManifest(groupManifest) === 0,
+    'an incomplete graph group is rejected instead of installing a partial model');
+  RSNeural.setModelManifest({});
+
+  const graphContracts = pipeline.graphs;
+  const sessions = [graphContracts.encoder, graphContracts.erbDecoder, graphContracts.dfDecoder].map((io) => ({
+    inputNames: io.inputs.slice(), outputNames: io.outputs.slice(), released: false,
+    async release() { this.released = true; },
+  }));
+  let createIndex = 0;
+  const fakeOrt = { InferenceSession: { create: async () => sessions[createIndex++] } };
+  const made = await RSNeuralWorker.createOfficialDfn3Group(fakeOrt,
+    { encoder: new Uint8Array([1]), erbDecoder: new Uint8Array([2]), dfDecoder: new Uint8Array([3]) },
+    { webgpu: { available: false, fp16: false }, webnn: { available: false }, mobile: false });
+  ok(made.provider === 'wasm' && Object.keys(made.sessions).length === 3,
+    'the official graph group creates three contract-checked sessions on one provider');
+
+  createIndex = 0;
+  const badSessions = sessions.map((s, i) => i === 1 ? Object.assign({}, s, { inputNames: ['wrong'] }) : s);
+  const badOrt = { InferenceSession: { create: async () => badSessions[createIndex++] } };
+  let groupError = '';
+  try {
+    await RSNeuralWorker.createOfficialDfn3Group(badOrt,
+      { encoder: new Uint8Array([1]), erbDecoder: new Uint8Array([2]), dfDecoder: new Uint8Array([3]) },
+      { webgpu: { available: false, fp16: false }, webnn: { available: false }, mobile: false });
+  } catch (err) { groupError = err.message; }
+  ok(/model-contract-mismatch/.test(groupError),
+    'one incompatible decoder rejects and tears down the complete session group', groupError);
+
+  const drySafety = new Float32Array([0.1, -0.2, 0.3]);
+  ok(RSNeuralWorker.validateNeuralAudio(drySafety, Float32Array.from(drySafety)).ok,
+    'finite, length-exact neural PCM passes the output safety gate');
+  ok(RSNeuralWorker.validateNeuralAudio(drySafety, new Float32Array(2)).reason === 'unexpected-output-shape',
+    'a short neural output is rejected');
+  ok(RSNeuralWorker.validateNeuralAudio(drySafety, new Float32Array([0, NaN, 0])).reason === 'non-finite-output',
+    'NaN neural PCM is rejected');
+  ok(RSNeuralWorker.validateNeuralAudio(drySafety, new Float32Array([0, 9, 0])).reason === 'unsafe-output-peak',
+    'a neural noise bomb is rejected before DSP');
+  ok(RSNeuralWorker.validateNeuralAudio(new Float32Array(64), new Float32Array(64).fill(0.2)).reason === 'unsafe-output-dc',
+    'invented DC on silence is rejected');
+  const quiet = new Float32Array(64).fill(0.02);
+  const loudAlternating = Float32Array.from({ length: 64 }, (_, i) => i & 1 ? -0.5 : 0.5);
+  ok(RSNeuralWorker.validateNeuralAudio(quiet, loudAlternating).reason === 'unsafe-output-rms',
+    'distributed neural gain bombs are rejected even when peak and DC remain legal');
+
+  const normRe = new Float32Array(481).fill(1), normIm = new Float32Array(481);
+  const normFb = RSNeuralWorker.buildErbFilterbank(481, 32, 48000, 960, 1);
+  const norm = RSNeuralWorker.normalizeDfn3Features(normRe, normIm, 1, 4, 481, normFb, 32, 96);
+  ok(Math.abs(norm.featErb[0] - 1.485) < 1e-4,
+    'ERB features use official −60 dB initial state, 0.99 EMA and /40 scaling', norm.featErb[0].toFixed(6));
+  ok(Math.abs(norm.featSpec[0] - (1 / Math.sqrt(0.01099))) < 1e-4,
+    'complex features use official 0.001 initial state and unit normalization', norm.featSpec[0].toFixed(6));
+  ok(norm.featErb.subarray(32).every((v) => v === 0) && norm.featSpec.subarray(96, 4 * 96).every((v) => v === 0),
+    'aligned padding remains zero after stateful normalization');
+  const featureHash = require('crypto').createHash('sha256')
+    .update(Buffer.from(norm.featErb.buffer)).update(Buffer.from(norm.featSpec.buffer)).digest('hex');
+  ok(featureHash === '6d77caa560b7ee8be5fed7020d132615263a7f0b6a7b0d0fc016fca6814c52df',
+    'the normalized feature tensor has a frozen golden hash', featureHash);
+
+  const signal = new Float32Array(48000);
+  for (let i = 0; i < signal.length; i++) signal[i] = 0.2 * Math.sin(2 * Math.PI * 440 * i / 48000);
+  // Official delay compensation prepends the analyser's zero hop and appends
+  // one FFT window to flush synthesis and DF lookahead.
+  const framedSignal = new Float32Array(signal.length + 480 + 960);
+  framedSignal.set(signal, 480);
+  const T = RSNeuralWorker.alignT(RSNeuralWorker.stft(framedSignal, 960, 480, RSNeuralWorker.vorbisWindow(960)).frames);
+  const mask = new Float32Array(T * 32).fill(1);
+  const coefs = new Float32Array(T * 96 * 10);
+  for (let f = 0; f < T; f++) for (let b = 0; b < 96; b++) coefs[(f * 96 + b) * 10 + 4] = 1;
+  const tensor = (data) => ({ data });
+  const inferenceGroup = {
+    provider: 'wasm', fp16: false,
+    ort: { Tensor: class { constructor(type, data, dims) { this.type = type; this.data = data; this.dims = dims; } } },
+    sessions: {
+      encoder: { run: async () => ({ e0: tensor([]), e1: tensor([]), e2: tensor([]), e3: tensor([]), emb: tensor([]), c0: tensor([]) }) },
+      erbDecoder: { run: async (feeds) => { ok(!!feeds.emb && !!feeds.e0 && !!feeds.e3, 'encoder tensors are routed directly into the ERB decoder'); return { m: tensor(mask) }; } },
+      dfDecoder: { run: async (feeds) => { ok(!!feeds.emb && !!feeds.c0, 'encoder tensors are routed directly into the DF decoder'); return { coefs: tensor(coefs), '235': tensor(new Float32Array(T).fill(1)) }; } },
+    },
+  };
+  const rendered = await RSNeuralWorker.denoiseOfficialDfn3(signal, inferenceGroup);
+  ok(rendered.applied && rendered.pipeline === 'official' && rendered.output.length === signal.length,
+    'the official encoder/dual-decoder path renders a length-exact signal');
+  let maxDiff = 0;
+  for (let i = 1920; i < signal.length - 1920; i++) maxDiff = Math.max(maxDiff, Math.abs(rendered.output[i] - signal[i]));
+  ok(maxDiff < 1e-4, 'identity ERB mask and centred order-5 DF coefficients reconstruct the input', maxDiff.toExponential(2));
+}
+
+async function testRealOrtGroup() {
+  section('neural · real ONNX Runtime/WASM smoke test over the shipped graphs');
+  const fs = require('fs');
+  const ort = require('onnxruntime-web');
+  ort.env.wasm.numThreads = 1;
+  const dir = path.join(ROOT, 'models', 'deepfilternet3');
+  const opts = { executionProviders: ['wasm'] };
+  const enc = await ort.InferenceSession.create(fs.readFileSync(path.join(dir, 'enc.onnx')), opts);
+  const erb = await ort.InferenceSession.create(fs.readFileSync(path.join(dir, 'erb_dec.onnx')), opts);
+  const df = await ort.InferenceSession.create(fs.readFileSync(path.join(dir, 'df_dec.onnx')), opts);
+  try {
+    const T = 4;
+    const encoded = await enc.run({
+      feat_erb: new ort.Tensor('float32', new Float32Array(T * 32), [1, 1, T, 32]),
+      feat_spec: new ort.Tensor('float32', new Float32Array(2 * T * 96), [1, 2, T, 96]),
+    });
+    const masked = await erb.run({ emb: encoded.emb, e3: encoded.e3, e2: encoded.e2, e1: encoded.e1, e0: encoded.e0 });
+    const filtered = await df.run({ emb: encoded.emb, c0: encoded.c0 });
+    ok(masked.m.dims.join(',') === '1,1,4,32', 'real WASM ERB decoder returns [1,1,T,32]', masked.m.dims.join('×'));
+    ok(filtered.coefs.dims.join(',') === '1,4,96,10', 'real WASM DF decoder returns order-5 complex coefficients', filtered.coefs.dims.join('×'));
+    ok(filtered['235'].dims.join(',') === '1,4,1', 'real WASM DF decoder returns its auxiliary scalar output', filtered['235'].dims.join('×'));
+    ok(Array.from(masked.m.data).every(Number.isFinite) && Array.from(filtered.coefs.data).every(Number.isFinite),
+      'real model outputs are finite');
+
+    const audio = new Float32Array(12000);
+    for (let i = 0; i < audio.length; i++) audio[i] = 0.15 * Math.sin(2 * Math.PI * 440 * i / 48000) + 0.01 * Math.sin(2 * Math.PI * 7000 * i / 48000);
+    const rendered = await RSNeuralWorker.denoiseOfficialDfn3(audio, {
+      ort, provider: 'wasm', fp16: false, sessions: { encoder: enc, erbDecoder: erb, dfDecoder: df },
+    });
+    ok(rendered.applied === true && rendered.pipeline === 'official',
+      'real shipped WASM graphs complete the full PCM inference path', JSON.stringify(rendered.output ? { pipeline: rendered.pipeline } : rendered));
+    const realOutput = rendered.output || new Float32Array(0);
+    ok(realOutput.length === audio.length && Array.from(realOutput).every(Number.isFinite),
+      'real WASM inference returns finite, length-exact audio');
+    let delta = 0, peak = 0;
+    for (let i = 0; i < realOutput.length; i++) { delta += Math.abs(realOutput[i] - audio[i]); peak = Math.max(peak, Math.abs(realOutput[i])); }
+    ok(realOutput.length === audio.length && delta > 0.01 && peak <= 1.5, 'real model output is applied and remains inside the safety ceiling', 'Δ ' + delta.toFixed(3) + ' · peak ' + peak.toFixed(3));
+    const pcmHash = require('crypto').createHash('sha256')
+      .update(Buffer.from(realOutput.buffer, realOutput.byteOffset, realOutput.byteLength)).digest('hex');
+    ok(pcmHash === '0f397d29300de35c18f156ee9b14e82e5a106072616760b8dfd069e68d19801a', 'real model PCM has a frozen golden SHA-256', pcmHash);
+  } finally {
+    await enc.release(); await erb.release(); await df.release();
+  }
+}
+
 async function testModelManager() {
   section('neural · the weight-file registry agrees with the worker (one file name, three modules)');
 
   ok(RSNeural.modelDir === 'models', 'the loader stores under `models/` in OPFS', RSNeural.modelDir);
-  ok(RSNeural.MODEL_FILES.deepfilternet3.int8 === RSNeuralWorker.MODELS.deepfilternet3.files.int8,
-    'the INT8 file name the loader downloads is the one the worker looks for',
+  ok(RSNeural.MODEL_FILES.deepfilternet3.int8 === RSNeuralWorker.MODELS.deepfilternet3.files.int8
+    && RSNeural.MODEL_FILES.bsroformer.fp16 === RSNeuralWorker.MODELS.bsroformer.files.fp16
+    && RSNeural.MODEL_FILES.audiosr.fp16 === RSNeuralWorker.MODELS.audiosr.files.fp16,
+    'every neural adapter uses the same published filenames in loader and worker',
     RSNeural.MODEL_FILES.deepfilternet3.int8);
   ok(RSNeural.MODEL_FILES.deepfilternet3.int4 === RSNeuralWorker.MODELS.deepfilternet3.files.int4,
     'and so is the INT4 name', RSNeural.MODEL_FILES.deepfilternet3.int4);
@@ -743,6 +1005,8 @@ async function testModelManager() {
     ok(!!stored && stored.length === modelBytes.length, 'the bytes really landed in the store', stored ? String(stored.length) : 'nothing');
     ok(!!stored && stored[0] === modelBytes[0] && stored[stored.length - 1] === modelBytes[modelBytes.length - 1],
       'and they are the downloaded bytes, first and last');
+    ok(Array.from(store.files.keys()).every((name) => !/\.installing-/.test(name)),
+      'successful promotion removes its private staging artifact');
     const dl = events.filter((e) => e.phase === 'download');
     ok(dl.length >= 4, 'progress was reported per chunk, not once at the end', dl.length + ' download events');
     ok(dl.every((e, i) => i === 0 || e.loaded >= dl[i - 1].loaded), 'the byte count never runs backwards');
@@ -794,7 +1058,175 @@ async function testModelManager() {
     ok(res.ready === true && res.variant === 'int4', 'an explicitly requested variant is the one that is fetched', res.variant || res.reason);
   }
 
-  section('neural · a failed download leaves nothing behind and never rejects');
+  section('neural · atomic three-graph installation');
+  {
+    const names = ['enc.onnx', 'erb_dec.onnx', 'df_dec.onnx'];
+    const artifacts = names.map((file, i) => {
+      const bytes = new Uint8Array(1024 + i).fill(20 + i); bytes[0] = 8;
+      return { file, bytes, sha256: require('crypto').createHash('sha256').update(bytes).digest('hex'), payload: bytes };
+    });
+    RSNeural.setModelManifest({ schema: 1, models: { deepfilternet3: { variants: { official: { artifacts: artifacts.map(({ file, bytes, sha256 }) => ({ file, bytes: bytes.length, sha256 })) } } } } });
+    const store = fakeModelStore(), routes = {};
+    for (const a of artifacts) routes['https://group.test/deepfilternet3/' + a.file] = { bytes: a.payload };
+    const result = await withGlobals({ RSOPFS: { models: store }, fetch: fakeFetch(routes), navigator: { userAgent: 'desktop' } }, async () => {
+      RSNeural.setModelSource(['https://group.test']);
+      return RSNeural.ensureModel('deepfilternet3');
+    });
+    ok(result.ready && result.variant === 'official' && result.artifacts.length === 3
+      && result.metadata && result.metadata.sha256.split('+').length === 3,
+      'all three verified graphs publish with one persisted group provenance record');
+    ok(artifacts.every((a) => store.files.has('deepfilternet3/' + a.file))
+      && store.files.has('deepfilternet3/.group-official.metadata.json'),
+      'the complete graph group and its metadata are present after promotion');
+    const cached = await withGlobals({ RSOPFS: { models: store }, fetch: fakeFetch({}), navigator: { userAgent: 'desktop' } },
+      () => RSNeural.ensureModel('deepfilternet3'));
+    const removed = await withGlobals({ RSOPFS: { models: store } }, () => RSNeural.removeModel('deepfilternet3', 'official'));
+    ok(cached.ready && cached.source === 'opfs' && cached.verified && cached.metadata
+      && removed.removed && artifacts.every((a) => !store.files.has('deepfilternet3/' + a.file))
+      && !store.files.has('deepfilternet3/.group-official.metadata.json'),
+      'the group reopens offline and removal deletes every graph plus provenance');
+    RSNeural.setModelManifest({});
+  }
+
+  section('neural · manifest discovery gates the download offer');
+
+  {
+    RSNeural.setModelManifest({});
+    const store = fakeModelStore();
+    const hash = require('crypto').createHash('sha256').update(modelBytes).digest('hex');
+    const manifest = { schema: 1, models: { deepfilternet3: { variants: { int8: {
+      file: 'deepfilternet3_int8.onnx', bytes: modelBytes.length, sha256: hash,
+    } } } } };
+    const fetchFn = fakeFetch({ 'https://bad.test/manifest.json': { json: { schema: 99 } }, 'https://good.test/manifest.json': { json: manifest } });
+    const loaded = await withGlobals({ RSOPFS: { models: store }, fetch: fetchFn }, async () => {
+      RSNeural.setModelSource(['https://bad.test', 'https://good.test']);
+      ok(RSNeural.canLoadModels() === false, 'a URL alone does not make the neural download available');
+      return RSNeural.loadModelManifest();
+    });
+    ok(loaded.ready && loaded.entries === 1 && loaded.source === 'https://good.test/manifest.json',
+      'manifest discovery skips an incompatible channel and activates the first valid one', JSON.stringify(loaded));
+    await withGlobals({ RSOPFS: { models: store } }, async () => {
+      ok(RSNeural.canLoadModels() === true, 'a valid manifest plus model store enables downloading');
+    });
+    ok(fetchFn.calls.length === 2, 'manifest sources are tried in configured order', fetchFn.calls.join(' → '));
+    const failed = await withGlobals({ fetch: fakeFetch({}) }, () => RSNeural.loadModelManifest('https://missing.test'));
+    ok(!failed.ready && RSNeural.hasModelManifest() === false,
+      'a failed refresh clears stale trust instead of retaining an old manifest', failed.reason);
+  }
+
+  section('neural · manifest integrity — size and SHA-256 gate both network and cache');
+
+  {
+    const hash = require('crypto').createHash('sha256').update(modelBytes).digest('hex');
+    const accepted = RSNeural.setModelManifest({ models: { deepfilternet3: { variants: { int8: {
+      file: 'deepfilternet3_int8.onnx', bytes: modelBytes.length, sha256: hash,
+      version: 'dfn3-test-1', license: 'MIT', upstream: 'https://example.test/dfn',
+      upstreamCommit: 'abc123', ortMin: '1.20.1', ortMaxTested: '1.20.1',
+    } } } } });
+    ok(accepted === 1, 'a valid, filename-pinned manifest entry is accepted');
+    const store = fakeModelStore();
+    const fetchFn = fakeFetch({
+      'https://cdn.test/models/deepfilternet3/deepfilternet3_int8.onnx': { bytes: modelBytes, chunk: 65536 },
+    });
+    const first = await withGlobals({ RSOPFS: { models: store }, fetch: fetchFn, navigator: { userAgent: 'desktop' } }, async () => {
+      RSNeural.setModelSource(['https://cdn.test/models']);
+      return RSNeural.ensureModel('deepfilternet3');
+    });
+    ok(first.ready && first.verified === true && first.sha256 === hash,
+      'a downloaded artifact is activated only after its SHA-256 matches', first.sha256);
+    ok(first.metadata && first.metadata.version === 'dfn3-test-1' && first.metadata.license === 'MIT' && first.metadata.upstreamCommit === 'abc123',
+      'the verified install persists version, license and upstream provenance', JSON.stringify(first.metadata));
+    const persistedMetaBytes = store.files.get('deepfilternet3/deepfilternet3_int8.onnx.metadata.json');
+    const persistedMeta = persistedMetaBytes ? JSON.parse(Buffer.from(persistedMetaBytes).toString('utf8')) : null;
+    ok(persistedMeta && persistedMeta.sha256 === hash && persistedMeta.ortMin === '1.20.1',
+      'the OPFS sidecar records integrity and runtime compatibility');
+    const cached = await withGlobals({ RSOPFS: { models: store }, fetch: fakeFetch({}), navigator: { userAgent: 'desktop' } },
+      () => RSNeural.ensureModel('deepfilternet3'));
+    ok(cached.ready && cached.source === 'opfs' && cached.verified === true,
+      'a later cache hit is revalidated against the same manifest');
+    ok(cached.metadata && cached.metadata.version === 'dfn3-test-1',
+      'cache status restores persisted model provenance without network access');
+
+    const corrupt = modelBytes.slice(); corrupt[100] ^= 0xff;
+    const badStore = fakeModelStore();
+    const badFetch = fakeFetch({
+      'https://cdn.test/models/deepfilternet3/deepfilternet3_int8.onnx': { bytes: corrupt },
+    });
+    const bad = await withGlobals({ RSOPFS: { models: badStore }, fetch: badFetch, navigator: { userAgent: 'desktop' } }, async () => {
+      RSNeural.setModelSource(['https://cdn.test/models']);
+      return RSNeural.ensureModel('deepfilternet3');
+    });
+    ok(!bad.ready && /SHA-256 mismatch/.test(bad.reason), 'a same-size corrupted model is rejected by hash', bad.reason);
+    ok(badStore.files.size === 0, 'a hash-rejected artifact is removed from OPFS');
+
+    const updateStore = fakeModelStore();
+    const previous = new Uint8Array([8, 1, 2, 3, 4]);
+    updateStore.files.set('deepfilternet3/deepfilternet3_int8.onnx', previous.slice());
+    const failedUpdate = await withGlobals({ RSOPFS: { models: updateStore }, fetch: badFetch, navigator: { userAgent: 'desktop' } }, async () => {
+      RSNeural.setModelSource(['https://cdn.test/models']);
+      return RSNeural.ensureModel('deepfilternet3');
+    });
+    const stillActive = updateStore.files.get('deepfilternet3/deepfilternet3_int8.onnx');
+    ok(!failedUpdate.ready && stillActive && Array.from(stillActive).join(',') === Array.from(previous).join(','),
+      'a failed update leaves the previous active model byte-for-byte intact');
+    ok(Array.from(updateStore.files.keys()).every((name) => !/\.installing-/.test(name)),
+      'failed updates leave no staging artifact behind');
+
+    const rejectedEntries = RSNeural.setModelManifest({ models: {
+      deepfilternet3: { variants: {
+        int8: { file: 'renamed.onnx', bytes: 1, sha256: '0'.repeat(64) },
+        int4: { file: 'deepfilternet3_int4.onnx', bytes: 1024, sha256: '3'.repeat(64), qualityGate: {
+          passed: true, reference: 'fp16', referenceSha256: '4'.repeat(64),
+          fixtureSha256: '5e05962c42d4f18c466c9f7259da6c5fa42c89b09cc95e0f8286bc427f3c3bfe',
+          metrics: { relativeRms: 0.02, maxAbsoluteError: 0.01, safetyPassed: true },
+        } },
+      } },
+      bsroformer: { version: 'test', upstream: 'https://example.test/bsr', variants: {
+        fp16: { file: 'bs_roformer_4stem_rhythm_fp16.onnx', bytes: 1024, sha256: '1'.repeat(64) },
+        int4: { file: 'bs_roformer.int4.onnx', bytes: 1024, sha256: '6'.repeat(64) },
+      } },
+      audiosr: { version: 'test', license: 'MIT', upstream: 'https://example.test/audiosr', variants: { fp16: {
+        file: 'audiosr_lite.fp16.onnx', bytes: 129 * 1024 * 1024, sha256: '2'.repeat(64),
+      } } },
+    } });
+    const rejectionReasons = RSNeural.getModelManifestRejections().map((item) => item.reason).sort();
+    ok(rejectedEntries === 0 && rejectionReasons.join(',') === 'filename-mismatch,missing-license,missing-quality-gate,quality-gate-failed,size-budget',
+      'manifests distinguish absent and numerically failed INT4 quality gates from other policy failures',
+      rejectionReasons.join(', '));
+    RSNeural.setModelManifest({});
+  }
+
+  section('neural · a failed or cancelled download leaves nothing behind and never rejects');
+
+  {
+    const store = fakeModelStore();
+    const fetchFn = fakeFetch({
+      'https://cdn.test/models/deepfilternet3/deepfilternet3_int8.onnx': { bytes: modelBytes },
+    });
+    const ac = new AbortController(); ac.abort();
+    const res = await withGlobals({ RSOPFS: { models: store }, fetch: fetchFn, navigator: { userAgent: 'desktop' } }, async () => {
+      RSNeural.setModelSource(['https://cdn.test/models']);
+      return RSNeural.ensureModel('deepfilternet3', { variant: 'int8', signal: ac.signal });
+    });
+    ok(!res.ready && res.reason === 'aborted' && fetchFn.calls.length === 0,
+      'a pre-aborted model install performs no network request');
+  }
+
+  {
+    const store = fakeModelStore();
+    const fetchFn = fakeFetch({
+      'https://cdn.test/models/deepfilternet3/deepfilternet3_int8.onnx': { bytes: modelBytes, chunk: 32768 },
+    });
+    const ac = new AbortController();
+    const res = await withGlobals({ RSOPFS: { models: store }, fetch: fetchFn, navigator: { userAgent: 'desktop' } }, async () => {
+      RSNeural.setModelSource(['https://cdn.test/models']);
+      return RSNeural.ensureModel('deepfilternet3', { variant: 'int8', signal: ac.signal,
+        onProgress: (p) => { if (p.phase === 'download' && p.loaded > 0) ac.abort(); } });
+    });
+    ok(!res.ready && res.reason === 'aborted', 'cancelling a streaming model download reports aborted, not download-failed');
+    ok(store.files.size === 0 && store.writes.length === 1 && store.writes[0].aborted,
+      'a cancelled download aborts and removes its private staging file');
+  }
 
   {
     const store = fakeModelStore();
@@ -874,6 +1306,40 @@ async function testModelManager() {
     ok(res.variants.int8.cached === false, 'and reports the variant that is not there as not there');
   }
 
+  section('neural · cache management, storage totals and update detection');
+  {
+    const store = fakeModelStore();
+    const file = 'deepfilternet3_int8.onnx';
+    const installed = new Uint8Array(2048).fill(7);
+    const oldHash = require('crypto').createHash('sha256').update(installed).digest('hex');
+    store.files.set('deepfilternet3/' + file, installed);
+    store.files.set('deepfilternet3/' + file + '.metadata.json', new Uint8Array(Buffer.from(JSON.stringify({
+      schema: 1, model: 'deepfilternet3', variant: 'int8', file, bytes: installed.length, sha256: oldHash, version: '1.0.0', license: 'MIT',
+    }))));
+    RSNeural.setModelManifest({ schema: 1, models: { deepfilternet3: { variants: { int8: {
+      file, bytes: 2048, sha256: 'a'.repeat(64), version: '2.0.0', license: 'MIT',
+    } } } } });
+    await withGlobals({ RSOPFS: { models: store } }, async () => {
+      const status = await RSNeural.modelStatus('deepfilternet3');
+      ok(status.totalBytes === 2048 && status.variants.int8.updateAvailable === true,
+        'status totals weight bytes and detects a manifest hash update', JSON.stringify(status.variants.int8));
+      const all = await RSNeural.modelStorageStatus();
+      ok(all.totalBytes === 2048 && all.models.deepfilternet3.cached,
+        'the global storage report totals every installed model');
+      const removed = await RSNeural.removeModel('deepfilternet3', 'int8');
+      ok(removed.removed === true && !store.files.has('deepfilternet3/' + file),
+        'removing one variant deletes its weight');
+      ok(!store.files.has('deepfilternet3/' + file + '.metadata.json'),
+        'removing one variant also deletes its provenance sidecar');
+      const again = await RSNeural.removeModel('deepfilternet3', 'int8');
+      ok(again.removed === false, 'removing an already absent variant is idempotent');
+    });
+    const unknown = await RSNeural.removeModel('deepfilternet3', 'nope');
+    ok(unknown.removed === false && /unknown-variant/.test(unknown.reason),
+      'an unknown variant is rejected without touching storage');
+    RSNeural.setModelManifest({});
+  }
+
   {
     const res = await withGlobals({ navigator: { userAgent: 'Mozilla/5.0 (X11; Linux x86_64)' } }, async () => {
       delete global.RSOPFS;
@@ -895,6 +1361,8 @@ async function main() {
   testStftRoundTrip();
   await testProbeAndFallback();
   await testMobileAndWebNN();
+  await testModelContracts();
+  await testRealOrtGroup();
   await testModelManager();
   await testHardwareFallbackNotification();
   testWorklet();

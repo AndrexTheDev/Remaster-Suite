@@ -229,6 +229,10 @@ code { font-family: var(--mono); }
 .ctl { display: flex; flex-direction: column; gap: 6px; min-width: 230px; }
 .ctl-row { display: flex; align-items: center; gap: 12px; }
 .ctl-hint { font-size: .74rem; color: var(--ink-mute); max-width: 34ch; }
+.neural-model-info { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; max-width: 34ch; }
+.neural-model-info[hidden] { display: none; }
+.neural-model-remove { padding: 0; border: 0; background: none; color: var(--red); font: inherit; font-size: .72rem; text-decoration: underline; cursor: pointer; }
+.neural-model-remove:disabled { opacity: .5; cursor: not-allowed; }
 .model-progress { display: grid; gap: 4px; margin-top: 8px; width: 100%; max-width: 34ch; }
 /* `display: grid` above would otherwise beat the UA sheet's [hidden] rule —
    the row must really be gone until a download needs it */

@@ -1,0 +1,66 @@
+name: Neural pipeline
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'arena/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: neural-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    name: Contracts, Stage 0 and static gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package.json
+      - run: npm install --ignore-scripts
+      - run: npm run test:neural
+      - run: npm run test:stage0
+      - run: npm run validate:docs
+      - run: npm run analyze:code
+      - name: Reject whitespace errors
+        run: git diff --check
+
+  official-reference:
+    name: Official Python/libDF parity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: scripts/requirements-libdf-reference.txt
+      - run: npm install --ignore-scripts
+      - run: python -m pip install -r scripts/requirements-libdf-reference.txt
+      - run: python scripts/compare-libdf-reference.py
+      - run: python scripts/compare-official-dfn3-forward.py
+
+  chromium-wasm:
+    name: Chromium WASM, music and mobile profiles
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package.json
+      - run: npm install --ignore-scripts
+      - run: npm run test:neural-browser

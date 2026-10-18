@@ -180,6 +180,10 @@
           <span data-i18n="ctl.neural">KI-Höhenrekonstruktion</span>
         </label>
         <span class="ctl-hint" id="neuralStatus">Kein Modell gefunden — reine DSP-Kette aktiv</span>
+        <div class="neural-model-info" id="neuralModelInfo" hidden>
+          <span class="ctl-hint" id="neuralModelMeta"></span>
+          <button type="button" class="btn-link neural-model-remove" id="neuralModelRemove" data-i18n="ctl.neuralRemove">Modell löschen</button>
+        </div>
         <div class="model-progress" id="modelProgress" hidden>
           <div class="model-progress-head">
             <span class="model-progress-text" id="modelProgressText">Modell wird geladen …</span>

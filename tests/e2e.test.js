@@ -424,7 +424,9 @@ async function run() {
     const audioEntry = Object.keys(zip.files).filter((n) => /\.wav$/.test(n));
     ok(audioEntry.length === 10, 'the ZIP holds all ten files', String(audioEntry.length));
     const readme = await zip.file('README.txt').async('string');
-    ok((readme.match(/^  profile  :/gm) || []).length === 10, 'the readme documents all ten');
+    ok((readme.match(/^  profile  :/gm) || []).length === 10
+      && (readme.match(/^  neural   : not applied/gm) || []).length === 10,
+    'the readme documents all ten and reports neural execution honestly');
     ok(/79KsqtJJdhKFJ9woxnYgtf3nq7HxQveafWBCtC3mxWi8/.test(readme), 'the readme carries the tip addresses');
 
     const total = audioEntry.reduce((n, n2) => n + zip.files[n2]._data.uncompressedSize, 0);

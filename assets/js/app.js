@@ -134,11 +134,6 @@
    *   short of 100 % so it never feels like a blunt instrument.
    * @property {number} magicNeuralAmount - 0.65: a deliberately light trust
    *   amount for the optional neural coupling, applied only by Magic Fix.
-   * @property {number} aiDenoiseDehissScale - 0.35: how much of the DSP
-   *   de-hisser's depth is left when the neural stage has already removed the
-   *   noise floor. The expander would otherwise work on what is left of a
-   *   floor that is no longer there, and pull the programme's own top end down
-   *   with it — the neural stage is the repair, the DSP stage is the safety net.
    */
 
   /** @type {AppConfig} */
@@ -170,7 +165,6 @@
     // optional neural coupling (see State.neuralAmount below).
     magicPower: 0.85,
     magicNeuralAmount: 0.65,
-    aiDenoiseDehissScale: 0.35,
   };
 
   /* -------------------------------------------------------------------- state */
@@ -378,6 +372,8 @@
    * @type {?{key: ?string, models: ?string[], provider: ?string}}
    */
   let neuralStatus = null;
+  /** Last cache report, retained so language changes repaint model metadata. */
+  let neuralModelStatus = null;
 
   /** Paint the neural status line in the current language.
    * @returns {void} */
@@ -405,8 +401,35 @@
     paintNeuralStatus();
   }
 
+  /** Paint installed model provenance and management controls. @param {?Object} status cache report. @returns {void} */
+  function paintNeuralModelInfo(status) {
+    neuralModelStatus = status;
+    const box = $('#neuralModelInfo'), text = $('#neuralModelMeta'), remove = $('#neuralModelRemove');
+    if (!box || !text || !remove) return;
+    const variants = status && status.variants;
+    const name = variants && Object.keys(variants).find((key) => variants[key] && variants[key].cached);
+    if (!name) { box.hidden = true; text.textContent = ''; return; }
+    const item = variants[name], meta = item.metadata || {};
+    text.textContent = t('ctl.neuralMeta', {
+      variant: name.toUpperCase(), size: ((item.size || 0) / 1e6).toFixed(1),
+      version: meta.version || '—', license: meta.license || '—',
+    }) + (item.updateAvailable ? ' · ' + t('ctl.neuralUpdate') : '');
+    remove.disabled = State._neuralLoading;
+    box.hidden = false;
+  }
+
+  /** Map structured manifest rejections to an end-user status. @param {Object[]} items rejection entries. @returns {?string} i18n key. */
+  function manifestRejectionStatusKey(items) {
+    const reasons = new Set((items || []).map((item) => item && item.reason));
+    if (reasons.has('missing-license')) return 'ctl.neuralRejectedLicense';
+    if (reasons.has('size-budget')) return 'ctl.neuralRejectedSize';
+    if (reasons.has('missing-provenance')) return 'ctl.neuralRejectedProvenance';
+    if (reasons.has('missing-quality-gate') || reasons.has('quality-gate-failed')) return 'ctl.neuralRejectedQuality';
+    if (reasons.size) return 'ctl.neuralRejectedIntegrity';
+    return null;
+  }
+
   /**
-   *
    * Probe the optional neural pipeline once at boot: does WebGPU (or at
    * least WASM-SIMD) work here, and is any model's weights file actually
    * installed (OPFS or a local `models/<name>/` folder)? The checkbox stays
@@ -421,6 +444,17 @@
     const toggle = $('#neuralToggle');
     if (!toggle) return;
     if (!Neural || typeof Neural.probe !== 'function') { toggle.disabled = true; setNeuralStatus('ctl.neuralUnavailable'); return; }
+    // A configured URL is not evidence that a usable model exists. Resolve the
+    // signed-by-hash channel description first; only a compatible manifest may
+    // turn the empty state into a download offer.
+    let rejectionKey = null;
+    if (typeof Neural.loadModelManifest === 'function') {
+      try {
+        await Neural.loadModelManifest();
+        rejectionKey = manifestRejectionStatusKey(Neural.getModelManifestRejections
+          ? Neural.getModelManifestRejections() : []);
+      } catch (e) { /* clean unavailable state below */ }
+    }
     let probe;
     try { probe = await Neural.probe(); } catch (e) { toggle.disabled = true; setNeuralStatus('ctl.neuralUnavailable'); return; }
     const models = (probe && probe.models) || {};
@@ -447,6 +481,7 @@
     State.neuralDownloadable = !anyModel && !!(Neural.canLoadModels && Neural.canLoadModels());
     let cached = null;
     try { cached = Neural.modelStatus ? await Neural.modelStatus('deepfilternet3') : null; } catch (e) { cached = null; }
+    paintNeuralModelInfo(cached);
     toggle.disabled = !(State.neuralAvailable || State.neuralDownloadable);
     toggle.checked = false;
     if (State.neuralAvailable) {
@@ -466,6 +501,8 @@
       setNeuralStatus('ctl.neuralInstalledNoRuntime');
     } else if (State.neuralDownloadable) {
       setNeuralStatus('ctl.neuralDownloadable');
+    } else if (rejectionKey) {
+      setNeuralStatus(rejectionKey);
     } else {
       setNeuralStatus('ctl.neuralUnavailable');
     }
@@ -664,13 +701,9 @@
        * that was switched off (0) stays off. */
       if (params.tpCeil < 0) params.tpCeil -= Presets.codecMargin(State.format, State.mp3Rate);
       if (State.format === 'mp3') params.tpCeil = Math.min(-1.5, params.tpCeil);
-      /* When the neural stage runs in front of the chain, the noise floor it
-       * removes is no longer there for the de-hisser to find. Left at full
-       * depth the expander would chase the programme's own top end instead —
-       * the same mistake a second pass of any repair makes. The neural stage
-       * is the repair here; the DSP stage stays as the safety net at a third
-       * of its depth. */
-      if (State.aiDenoise) params.dehiss *= CONFIG.aiDenoiseDehissScale;
+      /* Stage 0 re-measures its actual output inside engine.js and scales the
+       * DSP de-hisser from the measured SNR improvement. Keep the full dose
+       * here so a missing/failed neural stage retains the complete DSP repair. */
       return params;
     },
     signature(card) {
@@ -2090,7 +2123,7 @@
    */
   function stage0For() {
     if (!(State.aiDenoise && State.neuralDenoise)) return null;
-    return { mode: 'denoise' };
+    return { mode: 'denoise', adaptive: true };
   }
 
   /**
@@ -2157,7 +2190,8 @@
     // the identical pure-DSP render whenever it is omitted, unavailable, or
     // fails for any reason (see the comment there).
     const neuralOpt = neuralOptFor();
-    const stage0Opt = stage0For();
+    const stage0Base = stage0For();
+    const stage0Opt = stage0Base ? Object.assign({}, stage0Base, { signal: o.signal }) : null;
     const name = Codecs.outputName(card.name, format === 'mp3' ? 'mp3' : 'wav');
 
     let result;
@@ -2425,6 +2459,10 @@
       lines.push('  out      : ' + ((c.result && c.result.name) || '—'));
       lines.push('  profile  : ' + presets + '  (power ' + Math.round(P.power(c) * 100) + ' %)');
       lines.push('  format   : ' + (c.result ? c.result.format.toUpperCase() + ' · ' + c.result.rate + ' Hz' : '—'));
+      const neural = c.result && c.result.stage0;
+      lines.push('  neural   : ' + (neural && neural.applied
+        ? [neural.pipeline || 'neural', neural.variant || 'unknown variant', neural.provider || 'unknown provider'].join(' · ')
+        : 'not applied' + (neural && neural.reason ? ' (' + neural.reason + ')' : '')));
       lines.push('  detected : ' + (a ? (a.diag.chain && a.diag.chain.length ? a.diag.chain.join('+') : a.diag.id) : '?')
         + (a ? ' [' + a.diag.issues.join(', ') + ']' : ''));
       lines.push('  quality  : ' + (a ? a.score : '?') + ' / 100 before');
@@ -2684,6 +2722,24 @@
       });
     }
 
+    const neuralRemove = $('#neuralModelRemove');
+    if (neuralRemove) {
+      neuralRemove.addEventListener('click', async () => {
+        if (State.busy || State._neuralLoading || !Neural || typeof Neural.removeModel !== 'function') return;
+        if (global.confirm && !global.confirm(t('ctl.neuralRemoveConfirm'))) return;
+        neuralRemove.disabled = true;
+        const status = Neural.modelStatus ? await Neural.modelStatus('deepfilternet3') : null;
+        const variants = status && status.variants;
+        const variant = variants && Object.keys(variants).find((key) => variants[key] && variants[key].cached);
+        if (variant) await Neural.removeModel('deepfilternet3', variant);
+        State.neuralEnabled = false; State.neuralAvailable = false; State.neuralDenoise = false;
+        State.aiDenoise = false; State._aiDenoiseWanted = false;
+        markAllStale();
+        UI.toast(t('ctl.neuralRemoved'), 'ok');
+        await initNeural();
+      });
+    }
+
     FAB.init();
     bindMagicFix();
     bindCarousel();
@@ -2703,9 +2759,8 @@
    *
    * What it does when a denoiser is actually installed: it arms **Stage 0** —
    * DeepFilterNet3 in front of the chain, see `Engine.render`'s `stage0`
-   * option — and backs the DSP de-hisser off to `aiDenoiseDehissScale`, so
-   * the neural stage does the denoising and the chain does not chase a noise
-   * floor that is no longer there. Without weights it does exactly what it
+   * option — then re-measures the result and leaves only the DSP de-hiss dose
+   * justified by the remaining noise floor. Without weights it does exactly what it
    * always did: the measurement-gated DSP stages at `magicPower`, plus the
    * optional neural air coupling at `magicNeuralAmount`. Both states are real
    *; neither is simulated when the model is missing.
@@ -2937,6 +2992,7 @@
     if (power) $('#powerVal').textContent = t('ui.percent', { v: power.value });
     if (global.RSLibs && global.RSLibs._paint) global.RSLibs._paint();
     paintNeuralStatus();
+    paintNeuralModelInfo(neuralModelStatus);
     paintDropzone();
     if (State.job) paintJob();
     refreshLibraryLabels();
