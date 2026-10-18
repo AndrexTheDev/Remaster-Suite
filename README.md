@@ -605,6 +605,9 @@ tests/
     png.js                       PNG decoder/encoder and pixel differ in ~200 lines of
                                  zlib — the screenshot regression rows, no dependency
     chromium.js                  launcher for the packaged headless Chromium
+.github/workflows/
+  neural-pipeline.yml            required PR/push gates: contracts + Stage 0 + docs/static,
+                                 official Python/libDF parity, and Chromium/WASM real-music/mobile E2E
 scripts/
   validate-docs.js               documentation validator: tests/ ↔ README.md ↔ package.json
                                  (suite count, per-suite check counts, the npm chain, every
