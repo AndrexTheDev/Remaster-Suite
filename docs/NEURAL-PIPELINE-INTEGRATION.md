@@ -353,7 +353,7 @@ Erfassen: Download, Sessionstart, Real-Time-Faktor, Peak-Heap, OPFS, GPU-Speiche
 
 ### P3 – weitere Funktionen
 
-- [ ] BS-RoFormer als separaten Stem-Workflow bauen.
+- [ ] BS-RoFormer als separaten Stem-Workflow bauen. Loader, Worker-/Stage-0-Separationspfad und lizenz-/größenpflichtiges Manifest-Gate sind implementiert; eine Veröffentlichung bleibt blockiert, weil der auffindbare Web-Export ca. 931 MB groß ist und die verbreiteten 4-Stem-Gewichte keine belastbare Redistributionslizenz besitzen. Das Browserbudget lehnt Gruppen über 256 MB ab, statt sie als installierbar anzuzeigen.
 - [ ] Eigenes kleines Neural-Air-Guide-Modell trainieren/exportieren.
 - [ ] Native/Server-Pro-Option ausschließlich als klar getrennten Modus evaluieren.
 

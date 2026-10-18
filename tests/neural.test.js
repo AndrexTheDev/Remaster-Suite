@@ -969,8 +969,10 @@ async function testModelManager() {
   section('neural · the weight-file registry agrees with the worker (one file name, three modules)');
 
   ok(RSNeural.modelDir === 'models', 'the loader stores under `models/` in OPFS', RSNeural.modelDir);
-  ok(RSNeural.MODEL_FILES.deepfilternet3.int8 === RSNeuralWorker.MODELS.deepfilternet3.files.int8,
-    'the INT8 file name the loader downloads is the one the worker looks for',
+  ok(RSNeural.MODEL_FILES.deepfilternet3.int8 === RSNeuralWorker.MODELS.deepfilternet3.files.int8
+    && RSNeural.MODEL_FILES.bsroformer.fp16 === RSNeuralWorker.MODELS.bsroformer.files.fp16
+    && RSNeural.MODEL_FILES.audiosr.fp16 === RSNeuralWorker.MODELS.audiosr.files.fp16,
+    'every neural adapter uses the same published filenames in loader and worker',
     RSNeural.MODEL_FILES.deepfilternet3.int8);
   ok(RSNeural.MODEL_FILES.deepfilternet3.int4 === RSNeuralWorker.MODELS.deepfilternet3.files.int4,
     'and so is the INT4 name', RSNeural.MODEL_FILES.deepfilternet3.int4);
@@ -1165,9 +1167,16 @@ async function testModelManager() {
     ok(Array.from(updateStore.files.keys()).every((name) => !/\.installing-/.test(name)),
       'failed updates leave no staging artifact behind');
 
-    ok(RSNeural.setModelManifest({ models: { deepfilternet3: { variants: { int8: {
-      file: 'renamed.onnx', bytes: 1, sha256: '0'.repeat(64),
-    } } } } }) === 0, 'a manifest cannot redirect a known variant to another filename');
+    ok(RSNeural.setModelManifest({ models: {
+      deepfilternet3: { variants: { int8: { file: 'renamed.onnx', bytes: 1, sha256: '0'.repeat(64) } } },
+      bsroformer: { version: 'test', upstream: 'https://example.test/bsr', variants: { fp16: {
+        file: 'bs_roformer_4stem_rhythm_fp16.onnx', bytes: 1024, sha256: '1'.repeat(64),
+      } } },
+      audiosr: { version: 'test', license: 'MIT', upstream: 'https://example.test/audiosr', variants: { fp16: {
+        file: 'audiosr_lite.fp16.onnx', bytes: 129 * 1024 * 1024, sha256: '2'.repeat(64),
+      } } },
+    } }) === 0,
+    'manifests cannot rename adapters, omit required weight licenses or exceed browser budgets');
     RSNeural.setModelManifest({});
   }
 

@@ -313,6 +313,18 @@
       fp32: 'deepfilter.onnx',
       fp16: 'deepfilter.fp16.onnx',
     }),
+    bsroformer: Object.freeze({
+      int8: 'bs_roformer.int8.onnx', int4: 'bs_roformer.int4.onnx',
+      fp16: 'bs_roformer_4stem_rhythm_fp16.onnx', fp32: 'bs_roformer.onnx',
+    }),
+    audiosr: Object.freeze({ fp16: 'audiosr_lite.fp16.onnx', fp32: 'audiosr_lite.onnx' }),
+  });
+
+  /** Browser delivery policy: large or legally unidentified models are not installable. */
+  const MODEL_POLICY = Object.freeze({
+    deepfilternet3: Object.freeze({ maxBytes: 32 * 1024 * 1024, requireLicense: false }),
+    bsroformer: Object.freeze({ maxBytes: 256 * 1024 * 1024, requireLicense: true }),
+    audiosr: Object.freeze({ maxBytes: 128 * 1024 * 1024, requireLicense: true }),
   });
 
   /**
@@ -1324,6 +1336,7 @@
    * @property {function(): boolean} canLoadModels
    * @property {Object} MODEL_FILES
    * @property {Object} MODEL_GROUPS
+   * @property {Object} MODEL_POLICY
    * @property {string} modelDir
    */
 
@@ -1510,10 +1523,13 @@
             ortMin: String(spec.ortMin || modelInfo.ortMin || ''),
             ortMaxTested: String(spec.ortMaxTested || modelInfo.ortMaxTested || ''),
           };
+          const policy = MODEL_POLICY[key] || { maxBytes: Infinity, requireLicense: true };
+          if (policy.requireLicense && (!provenance.license || !provenance.version || !provenance.upstream)) continue;
           if (expectedGroup) {
             const artifacts = Array.isArray(spec.artifacts) ? spec.artifacts : [];
             const byFile = new Map(artifacts.map((item) => [item && item.file, item]));
-            const valid = artifacts.length === expectedGroup.length && expectedGroup.every((file) => {
+            const totalBytes = artifacts.reduce((sum, item) => sum + Number((item && item.bytes) || 0), 0);
+            const valid = totalBytes <= policy.maxBytes && artifacts.length === expectedGroup.length && expectedGroup.every((file) => {
               const item = byFile.get(file);
               return item && Number(item.bytes) > 0 && /^[0-9a-f]{64}$/i.test(item.sha256 || '');
             });
@@ -1527,7 +1543,8 @@
             accepted += expectedGroup.length;
             continue;
           }
-          if (!expectedFile || spec.file !== expectedFile || !(Number(spec.bytes) > 0) || !/^[0-9a-f]{64}$/i.test(spec.sha256 || '')) continue;
+          if (!expectedFile || spec.file !== expectedFile || !(Number(spec.bytes) > 0)
+            || Number(spec.bytes) > policy.maxBytes || !/^[0-9a-f]{64}$/i.test(spec.sha256 || '')) continue;
           if (!next[key]) next[key] = Object.create(null);
           next[key][variant] = Object.freeze(Object.assign({}, provenance, {
             file: spec.file, bytes: Number(spec.bytes), sha256: spec.sha256.toLowerCase(),
@@ -1585,6 +1602,8 @@
     MODEL_FILES,
     /** Official atomically installed multi-file variants (read-only). */
     MODEL_GROUPS,
+    /** Per-model browser size and licensing publication policy (read-only). */
+    MODEL_POLICY,
     /** The OPFS directory the loader writes into (`'models'`). */
     modelDir: MODELS_DIR,
   };
