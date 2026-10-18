@@ -1167,7 +1167,7 @@ async function testModelManager() {
     ok(Array.from(updateStore.files.keys()).every((name) => !/\.installing-/.test(name)),
       'failed updates leave no staging artifact behind');
 
-    ok(RSNeural.setModelManifest({ models: {
+    const rejectedEntries = RSNeural.setModelManifest({ models: {
       deepfilternet3: { variants: { int8: { file: 'renamed.onnx', bytes: 1, sha256: '0'.repeat(64) } } },
       bsroformer: { version: 'test', upstream: 'https://example.test/bsr', variants: { fp16: {
         file: 'bs_roformer_4stem_rhythm_fp16.onnx', bytes: 1024, sha256: '1'.repeat(64),
@@ -1175,8 +1175,11 @@ async function testModelManager() {
       audiosr: { version: 'test', license: 'MIT', upstream: 'https://example.test/audiosr', variants: { fp16: {
         file: 'audiosr_lite.fp16.onnx', bytes: 129 * 1024 * 1024, sha256: '2'.repeat(64),
       } } },
-    } }) === 0,
-    'manifests cannot rename adapters, omit required weight licenses or exceed browser budgets');
+    } });
+    const rejectionReasons = RSNeural.getModelManifestRejections().map((item) => item.reason).sort();
+    ok(rejectedEntries === 0 && rejectionReasons.join(',') === 'filename-mismatch,missing-license,size-budget',
+      'manifests report why adapters, unlicensed weights and oversized browser models were rejected',
+      rejectionReasons.join(', '));
     RSNeural.setModelManifest({});
   }
 

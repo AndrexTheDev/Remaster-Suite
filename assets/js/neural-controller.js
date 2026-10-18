@@ -348,6 +348,9 @@
    */
   let modelManifest = Object.create(null);
 
+  /** Structured reasons from the most recent manifest import. @type {Array<{model:string,variant:string,reason:string}>} */
+  let manifestRejections = [];
+
   /** Convert an ArrayBuffer to lowercase hexadecimal. @param {ArrayBuffer} ab bytes. @returns {string} hex. */
   function hexOf(ab) { return Array.from(new Uint8Array(ab), (b) => b.toString(16).padStart(2, '0')).join(''); }
 
@@ -444,7 +447,10 @@
         const manifest = await res.json();
         if (!manifest || manifest.schema !== 1 || !manifest.models) throw new Error('unsupported manifest schema');
         const entries = API.setModelManifest(manifest);
-        if (!entries) throw new Error('manifest has no compatible artifacts');
+        if (!entries) {
+          const reasons = manifestRejections.map((item) => item.model + '/' + item.variant + ': ' + item.reason);
+          throw new Error('manifest has no compatible artifacts' + (reasons.length ? ' · ' + reasons.join('; ') : ''));
+        }
         return { ready: true, source: url, entries };
       } catch (err) {
         errors.push(url + ': ' + ((err && err.message) || String(err)));
@@ -1334,6 +1340,7 @@
    * @property {function((string|string[]|null)): string[]} setModelSource
    * @property {function(): string[]} getModelSource
    * @property {function(): boolean} canLoadModels
+   * @property {function(): Array<{model:string,variant:string,reason:string}>} getModelManifestRejections
    * @property {Object} MODEL_FILES
    * @property {Object} MODEL_GROUPS
    * @property {Object} MODEL_POLICY
@@ -1504,16 +1511,23 @@
      */
     setModelManifest(manifest) {
       const next = Object.create(null);
+      manifestRejections = [];
       let accepted = 0;
       const models = manifest && manifest.models;
       for (const key of Object.keys(models || {})) {
-        if (!MODEL_FILES[key]) continue;
+        if (!MODEL_FILES[key]) {
+          manifestRejections.push({ model: key, variant: '*', reason: 'unknown-model' });
+          continue;
+        }
         const variants = models[key] && models[key].variants;
         for (const variant of Object.keys(variants || {})) {
           const spec = variants[variant];
           const expectedFile = MODEL_FILES[key] && MODEL_FILES[key][variant];
           const expectedGroup = MODEL_GROUPS[key] && MODEL_GROUPS[key][variant];
-          if (!spec) continue;
+          if (!spec) {
+            manifestRejections.push({ model: key, variant, reason: 'invalid-entry' });
+            continue;
+          }
           const modelInfo = models[key] || {};
           const provenance = {
             version: String(spec.version || modelInfo.version || manifest.version || ''),
@@ -1524,7 +1538,14 @@
             ortMaxTested: String(spec.ortMaxTested || modelInfo.ortMaxTested || ''),
           };
           const policy = MODEL_POLICY[key] || { maxBytes: Infinity, requireLicense: true };
-          if (policy.requireLicense && (!provenance.license || !provenance.version || !provenance.upstream)) continue;
+          if (policy.requireLicense && !provenance.license) {
+            manifestRejections.push({ model: key, variant, reason: 'missing-license' });
+            continue;
+          }
+          if (policy.requireLicense && (!provenance.version || !provenance.upstream)) {
+            manifestRejections.push({ model: key, variant, reason: 'missing-provenance' });
+            continue;
+          }
           if (expectedGroup) {
             const artifacts = Array.isArray(spec.artifacts) ? spec.artifacts : [];
             const byFile = new Map(artifacts.map((item) => [item && item.file, item]));
@@ -1533,7 +1554,11 @@
               const item = byFile.get(file);
               return item && Number(item.bytes) > 0 && /^[0-9a-f]{64}$/i.test(item.sha256 || '');
             });
-            if (!valid) continue;
+            if (!valid) {
+              manifestRejections.push({ model: key, variant,
+                reason: totalBytes > policy.maxBytes ? 'size-budget' : 'incomplete-or-invalid-group' });
+              continue;
+            }
             if (!next[key]) next[key] = Object.create(null);
             next[key][variant] = Object.freeze(Object.assign({}, provenance, {
               artifacts: Object.freeze(expectedGroup.map((file) => Object.freeze({
@@ -1543,8 +1568,14 @@
             accepted += expectedGroup.length;
             continue;
           }
-          if (!expectedFile || spec.file !== expectedFile || !(Number(spec.bytes) > 0)
-            || Number(spec.bytes) > policy.maxBytes || !/^[0-9a-f]{64}$/i.test(spec.sha256 || '')) continue;
+          let rejection = '';
+          if (!expectedFile || spec.file !== expectedFile) rejection = 'filename-mismatch';
+          else if (!(Number(spec.bytes) > 0) || !/^[0-9a-f]{64}$/i.test(spec.sha256 || '')) rejection = 'invalid-integrity';
+          else if (Number(spec.bytes) > policy.maxBytes) rejection = 'size-budget';
+          if (rejection) {
+            manifestRejections.push({ model: key, variant, reason: rejection });
+            continue;
+          }
           if (!next[key]) next[key] = Object.create(null);
           next[key][variant] = Object.freeze(Object.assign({}, provenance, {
             file: spec.file, bytes: Number(spec.bytes), sha256: spec.sha256.toLowerCase(),
@@ -1562,6 +1593,9 @@
       for (const key of Object.keys(modelManifest)) out[key] = Object.assign({}, modelManifest[key]);
       return out;
     },
+
+    /** Return structured reasons from the last manifest import. @returns {Array<{model:string,variant:string,reason:string}>} rejection copy. */
+    getModelManifestRejections() { return manifestRejections.map((item) => Object.assign({}, item)); },
 
     /** Load and validate `manifest.json` from a model channel. */
     loadModelManifest,

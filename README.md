@@ -432,7 +432,8 @@ changes when it is off — this is additive-only, not a different mode.
   (stem separation) and AudioSR now use the same manifest-backed installer, but require explicit
   version, upstream provenance and a weight licence. Browser delivery is capped at 256 MB for separation
   and 128 MB for AudioSR; the known ~931-MB RoFormer export and unlicensed community checkpoints are
-  therefore deliberately not offered as installable models. With nothing installed and no store available, every call still reports
+  therefore deliberately not offered as installable models. Rejected channels expose structured reasons
+  through `RSNeural.getModelManifestRejections()` rather than failing as an unexplained missing model. With nothing installed and no store available, every call still reports
   `{applied: false, reason: 'weights-not-found'}` and the DSP chain runs exactly as it always has. On
   mobile the smallest variant a model publishes is preferred (int4, then int8), on the desktop int8
   first: quantised weights keep a phone's resident model under ≈80 MB of VRAM.
