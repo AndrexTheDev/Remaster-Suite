@@ -327,7 +327,7 @@ Erfassen: Download, Sessionstart, Real-Time-Faktor, Peak-Heap, OPFS, GPU-Speiche
 ### P0 – vor jeder öffentlichen Neural-Freigabe
 
 - [x] Reales DeepFilterNet-Artefakt und Lizenz festlegen.
-- [x] Reproduzierbares, versionsgepinntes Prüf-/Quantisierungsskript hinzufügen (`scripts/quantize-deepfilternet3.py`). Es schreibt Kandidaten grundsätzlich als nicht veröffentlichbar; das aktuelle dynamische QInt8-Verfahren erfasst in diesem Export nur je einen Nebenpfad in Encoder/DF-Decoder, spart keine Bytes und besteht daher das Veröffentlichungs-Gate ausdrücklich nicht.
+- [x] Reproduzierbares, versionsgepinntes Prüf-/Konvertierungsskript hinzufügen (`scripts/quantize-deepfilternet3.py`). Es schreibt Kandidaten grundsätzlich als nicht veröffentlichbar. Dynamisches QInt8 erfasst nur Nebenpfade und spart keine Bytes. Der reproduzierbare FP16-Kandidat reduziert die Graphgruppe von 8,59 auf 4,34 MB, besteht das deterministische Encoder-/Dual-Decoder-Paritätsgate (`scripts/compare-dfn3-candidate.py`: relatives RMS < 0,17 %, Maximum < 0,0028) und läuft mit sicherem längengenauem PCM auf der realen Musikfixture sowie Desktop-/Android-/iPhone-Profilen in Chromium/WASM (7/7). Vor der Veröffentlichung fehlt nur noch variantensichere Cache-/Manifest-Auswahl.
 - [x] Versioniertes Manifest mit SHA-256 einführen.
 - [x] Same-Origin-Modellverzeichnis veröffentlichen; toten `@models`-Default entfernen.
 - [x] Modellvertrag beim Sessionstart prüfen.

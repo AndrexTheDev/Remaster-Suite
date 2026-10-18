@@ -1,3 +1,5 @@
 # Pinned tooling for scripts/quantize-deepfilternet3.py
+numpy==1.26.4
 onnxruntime==1.20.1
 onnx==1.17.0
+onnxconverter-common==1.14.0

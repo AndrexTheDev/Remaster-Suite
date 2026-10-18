@@ -3,10 +3,21 @@
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
+const crypto = require('crypto');
 const beta = require('./chromium.js');
 const cdp = require('./cdp.js');
 const ROOT = path.join(__dirname, '..', '..');
 const PORT = 8187, DBG = 9237;
+const CANDIDATE = process.env.DFN3_CANDIDATE_DIR && path.resolve(process.env.DFN3_CANDIDATE_DIR);
+let candidateManifest = null;
+if (CANDIDATE) {
+  const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'models/manifest.json')));
+  manifest.models.deepfilternet3.variants.official.artifacts = ['enc.onnx', 'erb_dec.onnx', 'df_dec.onnx'].map((file) => {
+    const bytes = fs.readFileSync(path.join(CANDIDATE, file));
+    return { file, bytes: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') };
+  });
+  candidateManifest = Buffer.from(JSON.stringify(manifest));
+}
 let passed = 0, failed = 0;
 function ok(v, name, detail) { if (v) { passed++; console.log('  ✓ ' + name + (detail ? '  → ' + detail : '')); } else { failed++; console.log('  ✗ ' + name + (detail ? '  → ' + detail : '')); } }
 const mime = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.wasm': 'application/wasm', '.json': 'application/json', '.css': 'text/css' };
@@ -14,8 +25,15 @@ const requests = [];
 const server = http.createServer((req, res) => {
   requests.push(req.url);
   const rel = decodeURIComponent(req.url.split('?')[0]).replace(/^\/+/, '') || 'index.html';
-  const file = path.resolve(ROOT, rel);
-  if (!file.startsWith(ROOT + path.sep) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); res.end(); return; }
+  if (candidateManifest && rel === 'models/manifest.json') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': candidateManifest.length,
+      'Cross-Origin-Opener-Policy': 'same-origin', 'Cross-Origin-Embedder-Policy': 'require-corp', 'Cache-Control': 'no-store' });
+    res.end(candidateManifest); return;
+  }
+  const candidateMatch = CANDIDATE && /^models\/deepfilternet3\/([^/]+\.onnx)$/.exec(rel);
+  const file = candidateMatch ? path.join(CANDIDATE, candidateMatch[1]) : path.resolve(ROOT, rel);
+  const allowed = candidateMatch ? file.startsWith(CANDIDATE + path.sep) : file.startsWith(ROOT + path.sep);
+  if (!allowed || !fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); res.end(); return; }
   res.writeHead(200, { 'Content-Type': mime[path.extname(file)] || 'application/octet-stream', 'Content-Length': fs.statSync(file).size,
     'Cross-Origin-Opener-Policy': 'same-origin', 'Cross-Origin-Embedder-Policy': 'require-corp', 'Cross-Origin-Resource-Policy': 'same-origin', 'Cache-Control': 'no-store' });
   fs.createReadStream(file).pipe(res);
