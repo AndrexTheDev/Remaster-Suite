@@ -50,19 +50,20 @@ const server = http.createServer((req, res) => {
     await page.send('Runtime.enable');
     await new Promise((r) => setTimeout(r, 1000));
     const expression = `(async()=>{
+      const bootStart=performance.now();
       RSNeural.setModelSource(['models']);
       const manifest = await RSNeural.loadModelManifest();
       const installed = await RSNeural.ensureModel('deepfilternet3');
       const installedFallback = await RSNeural.ensureModel('deepfilternet3', { variant:'official' });
       const status = await RSNeural.modelStatus('deepfilternet3');
       const storage = await RSNeural.modelStorageStatus();
-      const probe = await RSNeural.probe();
+      const probe = await RSNeural.probe(); const initMs=performance.now()-bootStart;
       const root=await navigator.storage.getDirectory(); const md=await root.getDirectoryHandle('models'); const dd=await md.getDirectoryHandle('deepfilternet3'); const files=[]; for await(const [name] of dd.entries()) files.push(name);
       const x = new Float32Array(12000);
       for(let i=0;i<x.length;i++) x[i]=.15*Math.sin(2*Math.PI*440*i/48000)+.01*Math.sin(2*Math.PI*7000*i/48000);
-      const result = await RSNeural.denoise(x);
+      const inferStart=performance.now(); const result = await RSNeural.denoise(x); const inferMs=performance.now()-inferStart;
       let peak=0, finite=true; if(result.output) for(const v of result.output){ if(!Number.isFinite(v)) finite=false; peak=Math.max(peak,Math.abs(v)); }
-      return {isolated:crossOriginIsolated, manifest, installed:{ready:installed.ready,variant:installed.variant,verified:installed.verified,artifacts:installed.artifacts&&installed.artifacts.length}, installedFallback:{ready:installedFallback.ready,variant:installedFallback.variant}, cached:status.cached,storage,probe,files,result:{applied:result.applied,reason:result.reason,pipeline:result.pipeline,provider:result.provider,variant:result.variant,length:result.output&&result.output.length,finite,peak}};
+      return {isolated:crossOriginIsolated, manifest, installed:{ready:installed.ready,variant:installed.variant,verified:installed.verified,artifacts:installed.artifacts&&installed.artifacts.length}, installedFallback:{ready:installedFallback.ready,variant:installedFallback.variant}, cached:status.cached,storage,probe,files,metrics:{initMs,inferMs,rtf:inferMs/250,heap:performance.memory&&performance.memory.usedJSHeapSize||null},result:{applied:result.applied,reason:result.reason,pipeline:result.pipeline,provider:result.provider,variant:result.variant,length:result.output&&result.output.length,finite,peak}};
     })()`;
     const reply = await cdp.withDeadline(page.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }), 120000);
     const v = reply.result && reply.result.value;
@@ -71,17 +72,19 @@ const server = http.createServer((req, res) => {
       && v.installedFallback.ready && v.installedFallback.variant === 'official' && v.files.length === 6 && v.cached
       && v.storage.models.deepfilternet3.variants.fp16.cached && v.storage.models.deepfilternet3.variants.official.cached,
       'browser keeps verified FP16 and FP32 graph groups in separate OPFS slots', v && JSON.stringify({manifest:v.manifest,installed:v.installed,installedFallback:v.installedFallback,cached:v.cached,storage:v.storage,probe:v.probe,files:v.files}));
-    ok(v && v.result.applied && v.result.pipeline === 'official' && v.result.variant === 'fp16' && v.result.length === 12000 && v.result.finite && v.result.peak <= 1.5,
-      'real browser worker returns safe exact-length PCM', v && JSON.stringify({result:v.result, modelRequests:requests.filter(x=>x.includes('.onnx')||x.includes('neural-worker'))}));
+    ok(v && v.result.applied && v.result.pipeline === 'official' && v.result.variant === 'fp16' && v.result.length === 12000 && v.result.finite && v.result.peak <= 1.5
+      && Number.isFinite(v.metrics.initMs) && Number.isFinite(v.metrics.inferMs) && Number.isFinite(v.metrics.rtf),
+      'real browser worker returns safe exact-length PCM with finite performance telemetry', v && JSON.stringify({result:v.result,metrics:v.metrics,modelRequests:requests.filter(x=>x.includes('.onnx')||x.includes('neural-worker'))}));
 
     const songReply = await cdp.withDeadline(page.send('Runtime.evaluate', {
-      expression: `(async()=>{const ab=await(await fetch(${JSON.stringify("01 I'm Gonna Put It On - The Wailing Wailers - Bob Marley & The Wailers.mp3")})).arrayBuffer();const ac=new AudioContext({sampleRate:48000});const b=await ac.decodeAudioData(ab);const start=0;const x=new Float32Array(144000);for(let i=0;i<x.length;i++){let s=0;for(let c=0;c<b.numberOfChannels;c++)s+=b.getChannelData(c)[start+i]/b.numberOfChannels;x[i]=s;}const stage=await RSNeural.denoiseChannels([x],{sampleRate:48000});const out=stage.channels&&stage.channels[0];let peak=0,delta=0,finite=true;if(out)for(let i=0;i<out.length;i++){const y=out[i];finite=finite&&Number.isFinite(y);peak=Math.max(peak,Math.abs(y));delta+=Math.abs(y-x[i]);}await ac.close();return {sampleRate:b.sampleRate,channels:b.numberOfChannels,duration:b.duration,applied:stage.applied,reason:stage.reason,length:out&&out.length,finite,peak,delta,chunks:stage.stats&&stage.stats.chunks}})()`,
+      expression: `(async()=>{const ab=await(await fetch(${JSON.stringify("01 I'm Gonna Put It On - The Wailing Wailers - Bob Marley & The Wailers.mp3")})).arrayBuffer();const ac=new AudioContext({sampleRate:48000});const b=await ac.decodeAudioData(ab);const start=0;const x=new Float32Array(144000);for(let i=0;i<x.length;i++){let s=0;for(let c=0;c<b.numberOfChannels;c++)s+=b.getChannelData(c)[start+i]/b.numberOfChannels;x[i]=s;}const started=performance.now();const stage=await RSNeural.denoiseChannels([x],{sampleRate:48000});const elapsedMs=performance.now()-started;const out=stage.channels&&stage.channels[0];let peak=0,delta=0,finite=true;if(out)for(let i=0;i<out.length;i++){const y=out[i];finite=finite&&Number.isFinite(y);peak=Math.max(peak,Math.abs(y));delta+=Math.abs(y-x[i]);}await ac.close();return {sampleRate:b.sampleRate,channels:b.numberOfChannels,duration:b.duration,applied:stage.applied,reason:stage.reason,length:out&&out.length,finite,peak,delta,chunks:stage.stats&&stage.stats.chunks,elapsedMs,rtf:elapsedMs/3000,heap:performance.memory&&performance.memory.usedJSHeapSize||null}})()`,
       awaitPromise: true, returnByValue: true,
     }), 120000);
     const song = songReply.result && songReply.result.value;
     ok(song && song.sampleRate === 48000 && song.channels === 2 && song.duration > 180,
       'Chromium decodes the hash-pinned Wailing Wailers MP3 at its frozen contract', song && JSON.stringify(song));
-    ok(song && song.applied && song.length === 144000 && song.finite && song.peak <= 1.5 && song.delta > 0.01,
+    ok(song && song.applied && song.length === 144000 && song.finite && song.peak <= 1.5 && song.delta > 0.01
+      && Number.isFinite(song.elapsedMs) && Number.isFinite(song.rtf),
       'the real song segment passes official neural inference and the output safety gate', song && JSON.stringify(song));
 
     const mobileProfiles = [
@@ -100,11 +103,12 @@ const server = http.createServer((req, res) => {
       await page.send('Page.navigate', { url: `http://127.0.0.1:${PORT}/index.html?mobile=${profile.name}` });
       await new Promise((r) => setTimeout(r, 1000));
       const mobileReply = await cdp.withDeadline(page.send('Runtime.evaluate', {
-        expression: `(async()=>{const p=await RSNeural.probe();const x=new Float32Array(12000);for(let i=0;i<x.length;i++)x[i]=.1*Math.sin(2*Math.PI*330*i/48000);const r=await RSNeural.denoise(x);return {mobile:p.mobile,provider:p.models.deepfilternet3&&p.models.deepfilternet3.provider,applied:r.applied,reason:r.reason,length:r.output&&r.output.length,finite:!r.output||Array.from(r.output).every(Number.isFinite)}})()`,
+        expression: `(async()=>{const p0=performance.now();const p=await RSNeural.probe();const initMs=performance.now()-p0;const x=new Float32Array(12000);for(let i=0;i<x.length;i++)x[i]=.1*Math.sin(2*Math.PI*330*i/48000);const t0=performance.now();const r=await RSNeural.denoise(x);const inferMs=performance.now()-t0;return {mobile:p.mobile,provider:p.models.deepfilternet3&&p.models.deepfilternet3.provider,applied:r.applied,reason:r.reason,length:r.output&&r.output.length,finite:!r.output||Array.from(r.output).every(Number.isFinite),initMs,inferMs,rtf:inferMs/250,heap:performance.memory&&performance.memory.usedJSHeapSize||null}})()`,
         awaitPromise: true, returnByValue: true,
       }), 120000);
       const m = mobileReply.result && mobileReply.result.value;
-      ok(m && m.mobile && m.applied && m.length === 12000 && m.finite,
+      ok(m && m.mobile && m.applied && m.length === 12000 && m.finite
+        && Number.isFinite(m.initMs) && Number.isFinite(m.inferMs) && Number.isFinite(m.rtf),
         profile.name + ' mobile profile runs the complete official worker pipeline', m && JSON.stringify(m));
     }
   } catch (err) { failed++; console.error('  ✗ browser neural E2E → ' + (err.stack || err)); }

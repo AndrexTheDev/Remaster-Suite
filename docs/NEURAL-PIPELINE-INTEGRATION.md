@@ -345,7 +345,7 @@ Erfassen: Download, Sessionstart, Real-Time-Faktor, Peak-Heap, OPFS, GPU-Speiche
 
 ### P2 – Qualität und Geräteabdeckung
 
-- [ ] Realgeräte-Browsermatrix automatisieren. Chromium deckt Desktop sowie emulierte Android-/iPhone-Mobile-Profile mit echter ORT/WASM-Inferenz ab; physische Safari-/Android-Geräte, Thermik und Akku bleiben offen.
+- [ ] Realgeräte-Browsermatrix automatisieren. Chromium deckt Desktop sowie emulierte Android-/iPhone-Mobile-Profile mit echter ORT/WASM-Inferenz ab und protokolliert Initialisierung, Inferenzzeit, Real-Time-Faktor und verfügbaren JS-Heap; physische Safari-/Android-Geräte, Thermik und Akku bleiben offen.
 - [x] Reale Wailing-Wailers-MP3 als hash-gepinnte objektive Fixture mit Decode- und Problembaseline versionieren; Hörtest-Protokoll bleibt manuell.
 - [x] Adaptive Chunkgröße aus Warm-up-/Span-Telemetrie implementieren: 0,25–2 s, Hysterese, graduelle Änderung und expliziter Override.
 - [x] Identische Stereokanäle über Neural-Chunks und Crossfades samplegenau gekoppelt validieren; weitere Realmusik-Kohärenzmetriken bleiben Teil der Geräteprüfung.
