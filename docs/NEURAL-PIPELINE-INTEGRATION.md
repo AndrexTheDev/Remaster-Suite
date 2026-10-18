@@ -349,7 +349,7 @@ Erfassen: Download, Sessionstart, Real-Time-Faktor, Peak-Heap, OPFS, GPU-Speiche
 - [x] Reale Wailing-Wailers-MP3 als hash-gepinnte objektive Fixture mit Decode- und Problembaseline versionieren; Hörtest-Protokoll bleibt manuell.
 - [x] Adaptive Chunkgröße aus Warm-up-/Span-Telemetrie implementieren: 0,25–2 s, Hysterese, graduelle Änderung und expliziter Override.
 - [x] Identische Stereokanäle über Neural-Chunks und Crossfades samplegenau gekoppelt validieren; weitere Realmusik-Kohärenzmetriken bleiben Teil der Geräteprüfung.
-- [ ] INT4 nur bei bestandenem Qualitätsgate veröffentlichen.
+- [x] INT4 nur bei bestandenem Qualitätsgate veröffentlichen: Manifestaktivierung verlangt `qualityGate.passed`, Referenzvariante, Realmusik-Fixture und Metriken; ohne diesen Nachweis lautet die Ablehnung `missing-quality-gate` und kein Download wird angeboten.
 
 ### P3 – weitere Funktionen
 

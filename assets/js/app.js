@@ -424,6 +424,7 @@
     if (reasons.has('missing-license')) return 'ctl.neuralRejectedLicense';
     if (reasons.has('size-budget')) return 'ctl.neuralRejectedSize';
     if (reasons.has('missing-provenance')) return 'ctl.neuralRejectedProvenance';
+    if (reasons.has('missing-quality-gate')) return 'ctl.neuralRejectedQuality';
     if (reasons.size) return 'ctl.neuralRejectedIntegrity';
     return null;
   }

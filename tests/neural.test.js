@@ -1168,7 +1168,10 @@ async function testModelManager() {
       'failed updates leave no staging artifact behind');
 
     const rejectedEntries = RSNeural.setModelManifest({ models: {
-      deepfilternet3: { variants: { int8: { file: 'renamed.onnx', bytes: 1, sha256: '0'.repeat(64) } } },
+      deepfilternet3: { variants: {
+        int8: { file: 'renamed.onnx', bytes: 1, sha256: '0'.repeat(64) },
+        int4: { file: 'deepfilternet3_int4.onnx', bytes: 1024, sha256: '3'.repeat(64) },
+      } },
       bsroformer: { version: 'test', upstream: 'https://example.test/bsr', variants: { fp16: {
         file: 'bs_roformer_4stem_rhythm_fp16.onnx', bytes: 1024, sha256: '1'.repeat(64),
       } } },
@@ -1177,8 +1180,8 @@ async function testModelManager() {
       } } },
     } });
     const rejectionReasons = RSNeural.getModelManifestRejections().map((item) => item.reason).sort();
-    ok(rejectedEntries === 0 && rejectionReasons.join(',') === 'filename-mismatch,missing-license,size-budget',
-      'manifests report why adapters, unlicensed weights and oversized browser models were rejected',
+    ok(rejectedEntries === 0 && rejectionReasons.join(',') === 'filename-mismatch,missing-license,missing-quality-gate,size-budget',
+      'manifests report why adapters, unlicensed weights, unqualified INT4 and oversized models were rejected',
       rejectionReasons.join(', '));
     RSNeural.setModelManifest({});
   }

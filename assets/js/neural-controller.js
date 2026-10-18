@@ -1538,6 +1538,12 @@
             ortMaxTested: String(spec.ortMaxTested || modelInfo.ortMaxTested || ''),
           };
           const policy = MODEL_POLICY[key] || { maxBytes: Infinity, requireLicense: true };
+          const qualityGate = spec.qualityGate && typeof spec.qualityGate === 'object' ? spec.qualityGate : null;
+          if (variant === 'int4' && !(qualityGate && qualityGate.passed === true
+            && qualityGate.reference && qualityGate.fixture && qualityGate.metrics)) {
+            manifestRejections.push({ model: key, variant, reason: 'missing-quality-gate' });
+            continue;
+          }
           if (policy.requireLicense && !provenance.license) {
             manifestRejections.push({ model: key, variant, reason: 'missing-license' });
             continue;
@@ -1561,6 +1567,7 @@
             }
             if (!next[key]) next[key] = Object.create(null);
             next[key][variant] = Object.freeze(Object.assign({}, provenance, {
+              qualityGate: qualityGate ? Object.freeze(Object.assign({}, qualityGate)) : null,
               artifacts: Object.freeze(expectedGroup.map((file) => Object.freeze({
                 file, bytes: Number(byFile.get(file).bytes), sha256: byFile.get(file).sha256.toLowerCase(),
               }))),
@@ -1578,6 +1585,7 @@
           }
           if (!next[key]) next[key] = Object.create(null);
           next[key][variant] = Object.freeze(Object.assign({}, provenance, {
+            qualityGate: qualityGate ? Object.freeze(Object.assign({}, qualityGate)) : null,
             file: spec.file, bytes: Number(spec.bytes), sha256: spec.sha256.toLowerCase(),
           }));
           accepted++;
