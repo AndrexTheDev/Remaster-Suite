@@ -1072,14 +1072,19 @@ async function testModelManager() {
       RSNeural.setModelSource(['https://group.test']);
       return RSNeural.ensureModel('deepfilternet3');
     });
-    ok(result.ready && result.variant === 'official' && result.artifacts.length === 3,
-      'all three verified graphs publish as one official variant');
-    ok(artifacts.every((a) => store.files.has('deepfilternet3/' + a.file)),
-      'the complete graph group is present after promotion');
+    ok(result.ready && result.variant === 'official' && result.artifacts.length === 3
+      && result.metadata && result.metadata.sha256.split('+').length === 3,
+      'all three verified graphs publish with one persisted group provenance record');
+    ok(artifacts.every((a) => store.files.has('deepfilternet3/' + a.file))
+      && store.files.has('deepfilternet3/.group-official.metadata.json'),
+      'the complete graph group and its metadata are present after promotion');
     const cached = await withGlobals({ RSOPFS: { models: store }, fetch: fakeFetch({}), navigator: { userAgent: 'desktop' } },
       () => RSNeural.ensureModel('deepfilternet3'));
-    ok(cached.ready && cached.source === 'opfs' && cached.verified,
-      'the complete graph group validates from OPFS without network access');
+    const removed = await withGlobals({ RSOPFS: { models: store } }, () => RSNeural.removeModel('deepfilternet3', 'official'));
+    ok(cached.ready && cached.source === 'opfs' && cached.verified && cached.metadata
+      && removed.removed && artifacts.every((a) => !store.files.has('deepfilternet3/' + a.file))
+      && !store.files.has('deepfilternet3/.group-official.metadata.json'),
+      'the group reopens offline and removal deletes every graph plus provenance');
     RSNeural.setModelManifest({});
   }
 

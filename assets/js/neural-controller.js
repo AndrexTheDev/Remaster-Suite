@@ -607,6 +607,7 @@
       upstreamCommit: spec.upstreamCommit || '',
       ortMin: spec.ortMin || '',
       ortMaxTested: spec.ortMaxTested || '',
+      qualityGate: spec.qualityGate || null,
       installedAt: new Date().toISOString(),
     };
     const bytes = new TextEncoder().encode(JSON.stringify(metadata));
@@ -816,7 +817,11 @@
           for (const artifact of spec.artifacts) {
             try { await verifyArtifact(await store.read(key, artifact.file), artifact); } catch (err) { valid = false; break; }
           }
-          if (valid) return { ready: true, key, source: 'opfs', variant, bytes: states.reduce((n, st) => n + st.size, 0), verified: true, artifacts: spec.artifacts };
+          if (valid) {
+            const metadata = parseInstallMetadata(await store.read(key, '.group-' + variant + '.metadata.json'));
+            return { ready: true, key, source: 'opfs', variant, bytes: states.reduce((n, st) => n + st.size, 0),
+              verified: true, artifacts: spec.artifacts, metadata };
+          }
         }
         continue;
       }
@@ -849,9 +854,12 @@
           if (groups[variant]) {
             const spec = manifestVariants[variant];
             const group = await installModelGroup(base, key, variant, spec, store, (p) => emitModelProgress(p, opts.onProgress), opts.signal);
+            const metadata = await writeInstallMetadata(store, key, '.group-' + variant, variant, spec,
+              { bytes: group.bytes, sha256: group.artifacts.map((item) => item.sha256).join('+') });
             await resetWorkerSessions();
             emitModelProgress({ model: key, variant, phase: 'done', loaded: group.bytes, total: group.bytes, ratio: 1, url }, opts.onProgress);
-            return { ready: true, key, source: 'network', variant, bytes: group.bytes, verified: true, artifacts: group.artifacts, url };
+            return { ready: true, key, source: 'network', variant, bytes: group.bytes, verified: true,
+              artifacts: group.artifacts, metadata, url };
           }
           const spec = modelManifest[key] && modelManifest[key][variant];
           const artifact = await downloadToStore(url, key, files[variant], variant, store, (p) => emitModelProgress(p, opts.onProgress), spec || null, opts.signal);
@@ -945,12 +953,17 @@
       const states = store ? await Promise.all(groupFiles.map((file) => store.stat(k, file))) : [];
       const complete = states.length === groupFiles.length && states.every((st) => st.exists && st.size > 0);
       const size = complete ? states.reduce((n, st) => n + st.size, 0) : 0;
+      const metadata = complete && store
+        ? parseInstallMetadata(await store.read(k, '.group-' + variant + '.metadata.json')) : null;
+      const offered = modelManifest[k] && modelManifest[k][variant];
+      const offeredHash = offered && offered.artifacts && offered.artifacts.map((item) => item.sha256).join('+');
       variants[variant] = {
         cached: complete,
         size,
         path: MODELS_DIR + '/' + k + '/',
+        metadata,
         artifacts: groupFiles.map((file, i) => ({ file, cached: !!(states[i] && states[i].exists), size: (states[i] && states[i].size) || 0 })),
-        updateAvailable: false,
+        updateAvailable: !!(complete && offeredHash && (!metadata || metadata.sha256 !== offeredHash)),
       };
       if (complete) { cached = true; totalBytes += size; }
     }
@@ -966,10 +979,18 @@
   async function removeModel(key, variant) {
     const files = MODEL_FILES[key];
     if (!files) return { removed: false, reason: 'unknown-model: ' + key };
+    const group = MODEL_GROUPS[key] && MODEL_GROUPS[key][variant];
     const file = files[variant];
-    if (!file) return { removed: false, reason: 'unknown-variant: ' + variant };
+    if (!file && !group) return { removed: false, reason: 'unknown-variant: ' + variant };
     const store = modelStore();
     if (!store) return { removed: false, reason: 'no-store' };
+    if (group) {
+      const states = await Promise.all(group.map((name) => store.stat(key, name)));
+      for (const name of group) await store.remove(key, name);
+      await store.remove(key, '.group-' + variant + '.metadata.json');
+      await resetWorkerSessions();
+      return { removed: states.some((state) => state.exists) };
+    }
     const before = await store.stat(key, file);
     await store.remove(key, file);
     await store.remove(key, file + '.metadata.json');
@@ -1563,6 +1584,17 @@
               continue;
             }
           }
+          const normalizedQualityGate = qualityGate ? Object.freeze({
+            passed: qualityGate.passed === true,
+            reference: String(qualityGate.reference || ''),
+            referenceSha256: String(qualityGate.referenceSha256 || '').toLowerCase(),
+            fixtureSha256: String(qualityGate.fixtureSha256 || '').toLowerCase(),
+            metrics: qualityGate.metrics ? Object.freeze({
+              relativeRms: Number(qualityGate.metrics.relativeRms),
+              maxAbsoluteError: Number(qualityGate.metrics.maxAbsoluteError),
+              safetyPassed: qualityGate.metrics.safetyPassed === true,
+            }) : null,
+          }) : null;
           if (policy.requireLicense && !provenance.license) {
             manifestRejections.push({ model: key, variant, reason: 'missing-license' });
             continue;
@@ -1586,7 +1618,7 @@
             }
             if (!next[key]) next[key] = Object.create(null);
             next[key][variant] = Object.freeze(Object.assign({}, provenance, {
-              qualityGate: qualityGate ? Object.freeze(Object.assign({}, qualityGate)) : null,
+              qualityGate: normalizedQualityGate,
               artifacts: Object.freeze(expectedGroup.map((file) => Object.freeze({
                 file, bytes: Number(byFile.get(file).bytes), sha256: byFile.get(file).sha256.toLowerCase(),
               }))),
@@ -1604,7 +1636,7 @@
           }
           if (!next[key]) next[key] = Object.create(null);
           next[key][variant] = Object.freeze(Object.assign({}, provenance, {
-            qualityGate: qualityGate ? Object.freeze(Object.assign({}, qualityGate)) : null,
+            qualityGate: normalizedQualityGate,
             file: spec.file, bytes: Number(spec.bytes), sha256: spec.sha256.toLowerCase(),
           }));
           accepted++;

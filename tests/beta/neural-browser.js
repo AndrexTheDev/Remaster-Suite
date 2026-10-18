@@ -69,8 +69,11 @@ const server = http.createServer((req, res) => {
     const v = reply.result && reply.result.value;
     ok(v && v.isolated, 'browser is cross-origin isolated for threaded local WASM');
     ok(v && v.manifest.ready && v.installed.ready && v.installed.variant === 'fp16' && v.installed.verified && v.installed.artifacts === 3
-      && v.installedFallback.ready && v.installedFallback.variant === 'official' && v.files.length === 6 && v.cached
-      && v.storage.models.deepfilternet3.variants.fp16.cached && v.storage.models.deepfilternet3.variants.official.cached,
+      && v.installedFallback.ready && v.installedFallback.variant === 'official'
+      && v.files.filter(name=>name.endsWith('.onnx')).length === 6
+      && v.files.filter(name=>name.endsWith('.metadata.json')).length === 2 && v.cached
+      && v.storage.models.deepfilternet3.variants.fp16.cached && v.storage.models.deepfilternet3.variants.fp16.metadata
+      && v.storage.models.deepfilternet3.variants.official.cached && v.storage.models.deepfilternet3.variants.official.metadata,
       'browser keeps verified FP16 and FP32 graph groups in separate OPFS slots', v && JSON.stringify({manifest:v.manifest,installed:v.installed,installedFallback:v.installedFallback,cached:v.cached,storage:v.storage,probe:v.probe,files:v.files}));
     ok(v && v.result.applied && v.result.pipeline === 'official' && v.result.variant === 'fp16' && v.result.length === 12000 && v.result.finite && v.result.peak <= 1.5
       && Number.isFinite(v.metrics.initMs) && Number.isFinite(v.metrics.inferMs) && Number.isFinite(v.metrics.rtf),
