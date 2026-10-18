@@ -70,7 +70,8 @@ Aus `config.ini` des gewählten Exports:
 - [ ] Diese Goldens zusätzlich byteweise gegen den offiziellen Python/Rust-Pfad abgleichen.
 - [x] Reproduzierbare FP16/QInt8-Kandidatenläufe bereitstellen und ungeeignete Kandidaten nicht publizieren. Dynamisches QInt8 quantisiert nur Nebenpfade und bleibt gesperrt.
 - [x] Den 4,34-MB-FP16-Kandidaten durch ein deterministisches FP32-Graphparitätsgate führen; Masken und Koeffizienten bleiben deutlich innerhalb der festgelegten 0,5-%-/0,01-Grenzen.
-- [x] FP16 durch Chromium/WASM-PCM, die Realmusik-Fixture sowie emulierte Android-/iPhone-Profile qualifizieren (7/7); der Kandidat bleibt bis zur variantensicheren Cache-/Manifest-Publikation außerhalb des Produktionsmanifests.
+- [x] FP16 durch Chromium/WASM-PCM, die Realmusik-Fixture sowie emulierte Android-/iPhone-Profile qualifizieren (7/7).
+- [x] FP16 als eigene 4,34-MB-Artefaktgruppe mit separaten Dateinamen, Hashes, OPFS-Slots und FP32-Rollback im Produktionsmanifest veröffentlichen; Worker und Telemetrie melden die tatsächlich aktive Variante.
 - [ ] Einen tatsächlich kleineren INT8-Export erzeugen und gegen FP32 sowie die Realmusik-Fixture qualifizieren.
 
 Dieser Vertrag ersetzt die bisherige Annahme eines monolithischen DeepFilterNet3-Modells als

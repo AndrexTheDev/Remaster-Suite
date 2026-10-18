@@ -894,6 +894,10 @@
       },
       officialPipeline: {
         sourceLock: 'models/sources/deepfilternet3.json',
+        variants: {
+          fp16: { encoder: 'enc.fp16.onnx', erbDecoder: 'erb_dec.fp16.onnx', dfDecoder: 'df_dec.fp16.onnx' },
+          official: { encoder: 'enc.onnx', erbDecoder: 'erb_dec.onnx', dfDecoder: 'df_dec.onnx' },
+        },
         graphs: {
           encoder: { file: 'enc.onnx', inputs: ['feat_erb', 'feat_spec'], outputs: ['e0', 'e1', 'e2', 'e3', 'emb', 'c0', 'lsnr'] },
           erbDecoder: { file: 'erb_dec.onnx', inputs: ['emb', 'e3', 'e2', 'e1', 'e0'], outputs: ['m'] },
@@ -1052,20 +1056,24 @@
    *   or null unless every member is present.
    */
   async function loadOfficialDfn3Artifacts() {
-    const graphs = MODELS.deepfilternet3.officialPipeline.graphs;
-    const out = {};
-    for (const role of ['encoder', 'erbDecoder', 'dfDecoder']) {
-      const rel = MODELS.deepfilternet3.dir + '/' + graphs[role].file;
-      // Worker fetch URLs resolve relative to assets/js/neural-worker.js, not
-      // the document. OPFS remains preferred; ../../ reaches the repository's
-      // same-origin models/ directory when worker-side OPFS is unavailable.
-      let sameOrigin = '../../' + rel;
-      try { if (ctx.location && ctx.location.href) sameOrigin = new URL('../../' + rel, ctx.location.href).href; } catch (e) { /* relative fallback below */ }
-      const bytes = await opfsBytes(rel) || await fetchBytes(sameOrigin) || await fetchBytes(rel);
-      if (!bytes) return null;
-      out[role] = bytes;
+    const pipeline = MODELS.deepfilternet3.officialPipeline;
+    for (const [variant, files] of Object.entries(pipeline.variants)) {
+      const out = {};
+      let complete = true;
+      for (const role of ['encoder', 'erbDecoder', 'dfDecoder']) {
+        const rel = MODELS.deepfilternet3.dir + '/' + files[role];
+        // Worker fetch URLs resolve relative to assets/js/neural-worker.js, not
+        // the document. OPFS remains preferred; ../../ reaches the repository's
+        // same-origin models/ directory when worker-side OPFS is unavailable.
+        let sameOrigin = '../../' + rel;
+        try { if (ctx.location && ctx.location.href) sameOrigin = new URL('../../' + rel, ctx.location.href).href; } catch (e) { /* relative fallback below */ }
+        const bytes = await opfsBytes(rel) || await fetchBytes(sameOrigin) || await fetchBytes(rel);
+        if (!bytes) { complete = false; break; }
+        out[role] = bytes;
+      }
+      if (complete) return { artifacts: out, variant };
     }
-    return out;
+    return null;
   }
 
   /**
@@ -1211,25 +1219,25 @@
     const previous = officialDfn3Cache;
     officialDfn3Cache = null;
     await releaseOfficialDfn3Group(previous);
-    const artifacts = await loadOfficialDfn3Artifacts();
-    if (!artifacts) return (officialDfn3Cache = { unavailable: true, reason: 'weights-not-found' });
+    const loaded = await loadOfficialDfn3Artifacts();
+    if (!loaded) return (officialDfn3Cache = { unavailable: true, reason: 'weights-not-found' });
     const ort = await loadOrt();
-    const made = await createOfficialDfn3Group(ort, artifacts, {
+    const made = await createOfficialDfn3Group(ort, loaded.artifacts, {
       webgpu: { available: false, fp16: false }, webnn: { available: false }, mobile: isMobileUA(),
     });
-    return (officialDfn3Cache = Object.assign({ unavailable: false, def: MODELS.deepfilternet3 }, made));
+    return (officialDfn3Cache = Object.assign({ unavailable: false, def: MODELS.deepfilternet3, variant: loaded.variant }, made));
   }
 
   /** Load and create the official three-session group. @returns {Promise<Object>} ready group or unavailable result. */
   async function getOfficialDfn3Group() {
     if (officialDfn3Cache) return officialDfn3Cache;
     try {
-      const artifacts = await loadOfficialDfn3Artifacts();
-      if (!artifacts) return (officialDfn3Cache = { unavailable: true, reason: 'weights-not-found' });
+      const loaded = await loadOfficialDfn3Artifacts();
+      if (!loaded) return (officialDfn3Cache = { unavailable: true, reason: 'weights-not-found' });
       const caps = { webgpu: await probeWebGpu(), webnn: await probeWebNN(), mobile: isMobileUA() };
       const ort = await loadOrt();
-      const made = await createOfficialDfn3Group(ort, artifacts, caps);
-      officialDfn3Cache = Object.assign({ unavailable: false, def: MODELS.deepfilternet3 }, made);
+      const made = await createOfficialDfn3Group(ort, loaded.artifacts, caps);
+      officialDfn3Cache = Object.assign({ unavailable: false, def: MODELS.deepfilternet3, variant: loaded.variant }, made);
     } catch (err) {
       officialDfn3Cache = { unavailable: true, reason: 'init-failed: ' + ((err && err.message) || String(err)) };
     }
@@ -1419,7 +1427,8 @@
       const output = framedOutput.slice(hop, hop + signal.length);
       const safety = validateNeuralAudio(signal, output);
       if (!safety.ok) return { applied: false, reason: safety.reason, peak: safety.peak };
-      return { applied: true, output, provider: group.provider, fp16: group.fp16, pipeline: 'official' };
+      return { applied: true, output, provider: group.provider, fp16: group.fp16,
+        variant: group.variant || 'official', pipeline: 'official' };
     } catch (err) {
       return { applied: false, reason: resolveInferenceFailure('deepfilternet3-official', err) };
     }

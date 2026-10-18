@@ -19,24 +19,78 @@
       "file": "enc.onnx",
       "bytes": 1954042,
       "sha256": "7c5399d3da8a50ebef1c1a0ae421b33376aa5e45d0e92df16da7e83c9c131916",
-      "inputs": ["feat_erb", "feat_spec"],
-      "outputs": ["e0", "e1", "e2", "e3", "emb", "c0", "lsnr"]
+      "inputs": [
+        "feat_erb",
+        "feat_spec"
+      ],
+      "outputs": [
+        "e0",
+        "e1",
+        "e2",
+        "e3",
+        "emb",
+        "c0",
+        "lsnr"
+      ]
     },
     {
       "role": "erbDecoder",
       "file": "erb_dec.onnx",
       "bytes": 3292397,
       "sha256": "ab669a1d10afe20911728b33053a452071042317a90581092b325da7b2f9d895",
-      "inputs": ["emb", "e3", "e2", "e1", "e0"],
-      "outputs": ["m"]
+      "inputs": [
+        "emb",
+        "e3",
+        "e2",
+        "e1",
+        "e0"
+      ],
+      "outputs": [
+        "m"
+      ]
     },
     {
       "role": "dfDecoder",
       "file": "df_dec.onnx",
       "bytes": 3340803,
       "sha256": "23114ce3b0f6464b763ee62f7bb8aab6b2a129a21eabd5bcfe59413db05f278a",
-      "inputs": ["emb", "c0"],
-      "outputs": ["coefs", "235"]
+      "inputs": [
+        "emb",
+        "c0"
+      ],
+      "outputs": [
+        "coefs",
+        "235"
+      ]
     }
-  ]
+  ],
+  "derivedVariants": {
+    "fp16": {
+      "tool": "onnxconverter-common 1.14.0",
+      "onnx": "1.17.0",
+      "numpy": "1.26.4",
+      "keepIoTypes": true,
+      "qualityGate": "Chromium/WASM desktop + emulated Android/iPhone + Wailing Wailers",
+      "graphs": [
+        {
+          "role": "encoder",
+          "file": "enc.fp16.onnx",
+          "bytes": 995713,
+          "sha256": "0c0bb87add7babab0e58ca328e9c3b62fc2ae5519581d8ec2a61da9d2f76e9ee"
+        },
+        {
+          "role": "erbDecoder",
+          "file": "erb_dec.fp16.onnx",
+          "bytes": 1658839,
+          "sha256": "07bd80116d613e18005036fae6473c06e07fa2ae060369b035f63f1583d99c1b"
+        },
+        {
+          "role": "dfDecoder",
+          "file": "df_dec.fp16.onnx",
+          "bytes": 1684407,
+          "sha256": "6be308fb158cf2b518ca94291a62bea672c06fa37d78b16f183529b3350313ef"
+        }
+      ]
+    }
+  }
 }

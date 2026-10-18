@@ -417,7 +417,9 @@ changes when it is off — this is additive-only, not a different mode.
   three-graph ONNX export from the pinned upstream commit documented in
   [`docs/DEEPFILTERNET3-CONTRACT.md`](docs/DEEPFILTERNET3-CONTRACT.md). On first activation,
   `neural-controller.js` checks `/models/` in OPFS and otherwise installs the bundled same-origin
-  `enc.onnx`, `erb_dec.onnx` and `df_dec.onnx` as one hash-verified group. A deployment can instead use a
+  4.34-MB FP16 group (`enc.fp16.onnx`, `erb_dec.fp16.onnx`, `df_dec.fp16.onnx`). Its Float32 I/O keeps
+  the same graph contract on WASM while halving weight storage. The upstream FP32 files remain an
+  independently hashed, separately cached rollback group; neither variant can overwrite the other. A deployment can instead use a
   **configurable model channel** —
   `RSNeural.setModelSource(url | [urls])`, or `<meta name="rs-model-cdn" content="…">` in the page —
   whose safe default is the page-relative, same-origin `models/` folder. A deployment may explicitly

@@ -52,7 +52,8 @@ const server = http.createServer((req, res) => {
     const expression = `(async()=>{
       RSNeural.setModelSource(['models']);
       const manifest = await RSNeural.loadModelManifest();
-      const installed = await RSNeural.ensureModel('deepfilternet3', { variant:'official' });
+      const installed = await RSNeural.ensureModel('deepfilternet3');
+      const installedFallback = await RSNeural.ensureModel('deepfilternet3', { variant:'official' });
       const status = await RSNeural.modelStatus('deepfilternet3');
       const storage = await RSNeural.modelStorageStatus();
       const probe = await RSNeural.probe();
@@ -61,14 +62,16 @@ const server = http.createServer((req, res) => {
       for(let i=0;i<x.length;i++) x[i]=.15*Math.sin(2*Math.PI*440*i/48000)+.01*Math.sin(2*Math.PI*7000*i/48000);
       const result = await RSNeural.denoise(x);
       let peak=0, finite=true; if(result.output) for(const v of result.output){ if(!Number.isFinite(v)) finite=false; peak=Math.max(peak,Math.abs(v)); }
-      return {isolated:crossOriginIsolated, manifest, installed:{ready:installed.ready,variant:installed.variant,verified:installed.verified,artifacts:installed.artifacts&&installed.artifacts.length}, cached:status.cached,storage,probe,files,result:{applied:result.applied,reason:result.reason,pipeline:result.pipeline,provider:result.provider,length:result.output&&result.output.length,finite,peak}};
+      return {isolated:crossOriginIsolated, manifest, installed:{ready:installed.ready,variant:installed.variant,verified:installed.verified,artifacts:installed.artifacts&&installed.artifacts.length}, installedFallback:{ready:installedFallback.ready,variant:installedFallback.variant}, cached:status.cached,storage,probe,files,result:{applied:result.applied,reason:result.reason,pipeline:result.pipeline,provider:result.provider,variant:result.variant,length:result.output&&result.output.length,finite,peak}};
     })()`;
     const reply = await cdp.withDeadline(page.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }), 120000);
     const v = reply.result && reply.result.value;
     ok(v && v.isolated, 'browser is cross-origin isolated for threaded local WASM');
-    ok(v && v.manifest.ready && v.installed.ready && v.installed.variant === 'official' && v.installed.verified && v.installed.artifacts === 3 && v.files.length === 3 && v.cached,
-      'browser installs and reopens the verified three-graph group through OPFS', v && JSON.stringify({manifest:v.manifest,installed:v.installed,cached:v.cached,storage:v.storage,probe:v.probe,files:v.files}));
-    ok(v && v.result.applied && v.result.pipeline === 'official' && v.result.length === 12000 && v.result.finite && v.result.peak <= 1.5,
+    ok(v && v.manifest.ready && v.installed.ready && v.installed.variant === 'fp16' && v.installed.verified && v.installed.artifacts === 3
+      && v.installedFallback.ready && v.installedFallback.variant === 'official' && v.files.length === 6 && v.cached
+      && v.storage.models.deepfilternet3.variants.fp16.cached && v.storage.models.deepfilternet3.variants.official.cached,
+      'browser keeps verified FP16 and FP32 graph groups in separate OPFS slots', v && JSON.stringify({manifest:v.manifest,installed:v.installed,installedFallback:v.installedFallback,cached:v.cached,storage:v.storage,probe:v.probe,files:v.files}));
+    ok(v && v.result.applied && v.result.pipeline === 'official' && v.result.variant === 'fp16' && v.result.length === 12000 && v.result.finite && v.result.peak <= 1.5,
       'real browser worker returns safe exact-length PCM', v && JSON.stringify({result:v.result, modelRequests:requests.filter(x=>x.includes('.onnx')||x.includes('neural-worker'))}));
 
     const songReply = await cdp.withDeadline(page.send('Runtime.evaluate', {

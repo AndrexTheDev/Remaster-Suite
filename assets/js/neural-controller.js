@@ -322,6 +322,7 @@
    */
   const MODEL_GROUPS = Object.freeze({
     deepfilternet3: Object.freeze({
+      fp16: Object.freeze(['enc.fp16.onnx', 'erb_dec.fp16.onnx', 'df_dec.fp16.onnx']),
       official: Object.freeze(['enc.onnx', 'erb_dec.onnx', 'df_dec.onnx']),
     }),
   });
@@ -776,7 +777,8 @@
     const store = modelStore();
     if (!store) return { ready: false, key, reason: 'no-store' };
     const manifestVariants = modelManifest[key] || {};
-    const automatic = manifestVariants.official ? ['official'] : preferredVariants(!!opts.mobile);
+    const grouped = ['fp16', 'official'].filter((variant) => manifestVariants[variant] && groups[variant]);
+    const automatic = grouped.length ? grouped : preferredVariants(!!opts.mobile);
     const variants = opts.variant ? [opts.variant] : automatic;
     const missing = variants.filter((v) => !files[v] && !groups[v]);
     if (missing.length === variants.length) return { ready: false, key, reason: 'unknown-variant: ' + variants.join(',') };
