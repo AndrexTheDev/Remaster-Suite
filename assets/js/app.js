@@ -418,6 +418,16 @@
     box.hidden = false;
   }
 
+  /** Map structured manifest rejections to an end-user status. @param {Object[]} items rejection entries. @returns {?string} i18n key. */
+  function manifestRejectionStatusKey(items) {
+    const reasons = new Set((items || []).map((item) => item && item.reason));
+    if (reasons.has('missing-license')) return 'ctl.neuralRejectedLicense';
+    if (reasons.has('size-budget')) return 'ctl.neuralRejectedSize';
+    if (reasons.has('missing-provenance')) return 'ctl.neuralRejectedProvenance';
+    if (reasons.size) return 'ctl.neuralRejectedIntegrity';
+    return null;
+  }
+
   /**
    * Probe the optional neural pipeline once at boot: does WebGPU (or at
    * least WASM-SIMD) work here, and is any model's weights file actually
@@ -436,8 +446,13 @@
     // A configured URL is not evidence that a usable model exists. Resolve the
     // signed-by-hash channel description first; only a compatible manifest may
     // turn the empty state into a download offer.
+    let rejectionKey = null;
     if (typeof Neural.loadModelManifest === 'function') {
-      try { await Neural.loadModelManifest(); } catch (e) { /* clean unavailable state below */ }
+      try {
+        await Neural.loadModelManifest();
+        rejectionKey = manifestRejectionStatusKey(Neural.getModelManifestRejections
+          ? Neural.getModelManifestRejections() : []);
+      } catch (e) { /* clean unavailable state below */ }
     }
     let probe;
     try { probe = await Neural.probe(); } catch (e) { toggle.disabled = true; setNeuralStatus('ctl.neuralUnavailable'); return; }
@@ -485,6 +500,8 @@
       setNeuralStatus('ctl.neuralInstalledNoRuntime');
     } else if (State.neuralDownloadable) {
       setNeuralStatus('ctl.neuralDownloadable');
+    } else if (rejectionKey) {
+      setNeuralStatus(rejectionKey);
     } else {
       setNeuralStatus('ctl.neuralUnavailable');
     }
